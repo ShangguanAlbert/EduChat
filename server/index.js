@@ -1,0 +1,2150 @@
+import express from "express";
+import cors from "cors";
+import multer from "multer";
+import dotenv from "dotenv";
+import path from "node:path";
+import crypto from "node:crypto";
+import { promisify } from "node:util";
+import mammoth from "mammoth";
+import XLSX from "xlsx";
+import { PDFParse } from "pdf-parse";
+import mongoose from "mongoose";
+
+dotenv.config();
+
+const app = express();
+const port = process.env.PORT || 8787;
+const mongoUri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/educhat";
+const authSecret = String(
+  process.env.AUTH_SECRET || "educhat-dev-secret-change-this-secret",
+).trim();
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 - 1; // strictly < 10MB
+const MAX_FILES = 8;
+const MAX_PARSED_CHARS_PER_FILE = 12000;
+const EXCEL_PREVIEW_MAX_ROWS = 120;
+const EXCEL_PREVIEW_MAX_COLS = 30;
+const EXCEL_PREVIEW_MAX_SHEETS = 8;
+const PASSWORD_MIN_LENGTH = 6;
+const AUTH_TOKEN_TTL_SECONDS = 12 * 60 * 60;
+const ADMIN_TOKEN_TTL_SECONDS = 2 * 60 * 60;
+const scryptAsync = promisify(crypto.scrypt);
+const CRC32_TABLE = createCrc32Table();
+
+const TEXT_EXTENSIONS = new Set([
+  "txt",
+  "md",
+  "markdown",
+  "c",
+  "h",
+  "cc",
+  "hh",
+  "cpp",
+  "hpp",
+  "cxx",
+  "hxx",
+  "py",
+  "python",
+  "xml",
+  "json",
+  "yaml",
+  "yml",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "java",
+  "go",
+  "rs",
+  "sh",
+  "bash",
+  "zsh",
+  "sql",
+  "html",
+  "css",
+  "scss",
+  "less",
+  "csv",
+  "tsv",
+  "toml",
+  "ini",
+  "log",
+  "tex",
+  "r",
+  "rb",
+  "php",
+  "swift",
+  "kt",
+  "m",
+  "mm",
+  "vue",
+  "svelte",
+]);
+
+const WORD_EXTENSIONS = new Set(["docx", "doc"]);
+const EXCEL_EXTENSIONS = new Set(["xlsx", "xls"]);
+const PDF_EXTENSIONS = new Set(["pdf"]);
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { files: MAX_FILES, fileSize: MAX_FILE_SIZE_BYTES },
+});
+
+const authUserSchema = new mongoose.Schema(
+  {
+    username: { type: String, required: true, trim: true },
+    usernameKey: { type: String, required: true, unique: true, index: true },
+    role: { type: String, enum: ["admin", "user"], default: "user" },
+    passwordHash: { type: String, required: true },
+    // NOTE: 仅用于本地教学演示的管理员导出功能，不建议在生产场景保存明文密码。
+    passwordPlain: { type: String, required: true },
+    profile: {
+      name: { type: String, default: "" },
+      studentId: { type: String, default: "" },
+      gender: { type: String, default: "" },
+      grade: { type: String, default: "" },
+      className: { type: String, default: "" },
+    },
+  },
+  {
+    timestamps: true,
+    collection: "auth_users",
+  },
+);
+
+const AuthUser =
+  mongoose.models.AuthUser || mongoose.model("AuthUser", authUserSchema);
+
+const chatStateSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      required: true,
+      unique: true,
+      index: true,
+      ref: "AuthUser",
+    },
+    activeId: { type: String, default: "s1" },
+    groups: {
+      type: [
+        new mongoose.Schema(
+          {
+            id: { type: String, required: true },
+            name: { type: String, required: true },
+            description: { type: String, default: "" },
+          },
+          { _id: false },
+        ),
+      ],
+      default: () => [],
+    },
+    sessions: {
+      type: [
+        new mongoose.Schema(
+          {
+            id: { type: String, required: true },
+            title: { type: String, required: true },
+            groupId: { type: String, default: "" },
+            pinned: { type: Boolean, default: false },
+          },
+          { _id: false },
+        ),
+      ],
+      default: () => [],
+    },
+    sessionMessages: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
+    },
+    settings: {
+      type: new mongoose.Schema(
+        {
+          agent: { type: String, default: "A" },
+          apiTemperature: { type: Number, default: 0.6 },
+          apiTopP: { type: Number, default: 1 },
+          apiReasoningEffort: { type: String, default: "low" },
+          lastAppliedReasoning: { type: String, default: "low" },
+        },
+        { _id: false },
+      ),
+      default: () => ({
+        agent: "A",
+        apiTemperature: 0.6,
+        apiTopP: 1,
+        apiReasoningEffort: "low",
+        lastAppliedReasoning: "low",
+      }),
+    },
+  },
+  {
+    timestamps: true,
+    collection: "chat_states",
+  },
+);
+
+const ChatState =
+  mongoose.models.ChatState || mongoose.model("ChatState", chatStateSchema);
+
+app.use(cors());
+app.use(express.json({ limit: "2mb" }));
+
+app.get("/api/health", (_, res) => {
+  res.json({ ok: true });
+});
+
+app.get("/api/auth/status", async (_req, res) => {
+  const [totalUsers, admin] = await Promise.all([
+    AuthUser.countDocuments({}),
+    AuthUser.findOne({ role: "admin" }).sort({ createdAt: 1 }).lean(),
+  ]);
+
+  res.json({
+    ok: true,
+    hasAnyUser: totalUsers > 0,
+    hasAdmin: !!admin,
+    adminUsername: admin?.username || "admin",
+  });
+});
+
+app.get("/api/chat/bootstrap", requireChatAuth, async (req, res) => {
+  const user = req.authUser;
+  const [stateDoc] = await Promise.all([
+    ChatState.findOne({ userId: user._id }).lean(),
+  ]);
+
+  const normalizedProfile = sanitizeUserProfile(user.profile);
+  const profileComplete = isUserProfileComplete(normalizedProfile);
+  const state = normalizeChatStateDoc(stateDoc);
+
+  res.json({
+    ok: true,
+    user: toPublicUser(user),
+    profile: normalizedProfile,
+    profileComplete,
+    state,
+  });
+});
+
+app.get("/api/user/profile", requireChatAuth, async (req, res) => {
+  const profile = sanitizeUserProfile(req.authUser.profile);
+  res.json({
+    ok: true,
+    profile,
+    profileComplete: isUserProfileComplete(profile),
+  });
+});
+
+app.put("/api/user/profile", requireChatAuth, async (req, res) => {
+  const profile = sanitizeUserProfile(req.body || {});
+  const errors = validateUserProfile(profile);
+  if (Object.keys(errors).length > 0) {
+    res.status(400).json({ error: "用户信息不完整或格式错误。", errors });
+    return;
+  }
+
+  req.authUser.profile = profile;
+  await req.authUser.save();
+
+  res.json({
+    ok: true,
+    profile,
+    profileComplete: true,
+  });
+});
+
+app.put("/api/chat/state", requireChatAuth, async (req, res) => {
+  const nextState = sanitizeChatStatePayload(req.body || {});
+
+  await ChatState.findOneAndUpdate(
+    { userId: req.authUser._id },
+    {
+      $set: {
+        userId: req.authUser._id,
+        activeId: nextState.activeId,
+        groups: nextState.groups,
+        sessions: nextState.sessions,
+        sessionMessages: nextState.sessionMessages,
+        settings: nextState.settings,
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  res.json({ ok: true });
+});
+
+app.put("/api/chat/state/meta", requireChatAuth, async (req, res) => {
+  const nextMeta = sanitizeChatStateMetaPayload(req.body || {});
+
+  await ChatState.findOneAndUpdate(
+    { userId: req.authUser._id },
+    {
+      $set: {
+        userId: req.authUser._id,
+        activeId: nextMeta.activeId,
+        groups: nextMeta.groups,
+        sessions: nextMeta.sessions,
+        settings: nextMeta.settings,
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  res.json({ ok: true });
+});
+
+app.put("/api/chat/state/messages", requireChatAuth, async (req, res) => {
+  const upserts = sanitizeSessionMessageUpsertsPayload(req.body || {});
+  if (upserts.length === 0) {
+    res.json({ ok: true, updated: 0 });
+    return;
+  }
+
+  const bySession = new Map();
+  upserts.forEach(({ sessionId, message }) => {
+    const list = bySession.get(sessionId) || [];
+    list.push(message);
+    bySession.set(sessionId, list);
+  });
+
+  const stateDoc = await ChatState.findOne(
+    { userId: req.authUser._id },
+    { sessionMessages: 1 },
+  ).lean();
+  const sourceMessages =
+    stateDoc?.sessionMessages && typeof stateDoc.sessionMessages === "object"
+      ? stateDoc.sessionMessages
+      : {};
+
+  const setPayload = { userId: req.authUser._id };
+  bySession.forEach((updates, sessionId) => {
+    const currentList = Array.isArray(sourceMessages[sessionId])
+      ? sourceMessages[sessionId].slice(0, 400)
+      : [];
+
+    const indexById = new Map();
+    currentList.forEach((message, idx) => {
+      if (!message?.id) return;
+      indexById.set(message.id, idx);
+    });
+
+    updates.forEach((message) => {
+      const existingIndex = indexById.get(message.id);
+      if (Number.isInteger(existingIndex)) {
+        currentList[existingIndex] = message;
+        return;
+      }
+      if (currentList.length < 400) {
+        currentList.push(message);
+        indexById.set(message.id, currentList.length - 1);
+      }
+    });
+
+    setPayload[`sessionMessages.${sessionId}`] = currentList;
+  });
+
+  await ChatState.findOneAndUpdate(
+    { userId: req.authUser._id },
+    { $set: setPayload },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  res.json({ ok: true, updated: upserts.length });
+});
+
+app.post("/api/auth/register", async (req, res) => {
+  const password = String(req.body?.password || "");
+  const usernameInput = String(req.body?.username || "");
+  const passwordError = validatePassword(password);
+  if (passwordError) {
+    res.status(400).json({ error: passwordError });
+    return;
+  }
+
+  const totalUsers = await AuthUser.countDocuments({});
+  const bootstrapMode = totalUsers === 0;
+  const username = bootstrapMode ? "admin" : normalizeUsername(usernameInput);
+
+  if (!username) {
+    res.status(400).json({ error: "请输入用户名。" });
+    return;
+  }
+
+  if (!bootstrapMode && toUsernameKey(username) === "admin") {
+    res.status(400).json({ error: "admin 为保留账号名，请使用其他用户名。" });
+    return;
+  }
+
+  const usernameKey = toUsernameKey(username);
+  const existing = await AuthUser.findOne({ usernameKey }).lean();
+  if (existing) {
+    res.status(409).json({ error: "该账号已存在，请更换用户名。" });
+    return;
+  }
+
+  const role = bootstrapMode ? "admin" : "user";
+  const passwordHash = await hashPassword(password);
+  const user = await AuthUser.create({
+    username,
+    usernameKey,
+    role,
+    passwordHash,
+    passwordPlain: password,
+  });
+
+  res.status(201).json({
+    ok: true,
+    bootstrapAdmin: bootstrapMode,
+    user: toPublicUser(user),
+  });
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const username = normalizeUsername(req.body?.username);
+  const password = String(req.body?.password || "");
+  if (!username || !password) {
+    res.status(400).json({ error: "请输入账号和密码。" });
+    return;
+  }
+
+  const user = await AuthUser.findOne({ usernameKey: toUsernameKey(username) });
+  const valid = user ? await verifyPassword(password, user.passwordHash) : false;
+
+  if (!user || !valid) {
+    res.status(401).json({ error: "账号或密码错误。" });
+    return;
+  }
+
+  const token = signToken(
+    { uid: String(user._id), role: user.role, scope: "chat" },
+    AUTH_TOKEN_TTL_SECONDS,
+  );
+
+  res.json({
+    ok: true,
+    token,
+    user: toPublicUser(user),
+  });
+});
+
+app.post("/api/auth/forgot/verify", async (req, res) => {
+  const username = normalizeUsername(req.body?.username);
+  if (!username) {
+    res.status(400).json({ error: "请输入账号。" });
+    return;
+  }
+
+  const user = await AuthUser.findOne({ usernameKey: toUsernameKey(username) }).lean();
+  res.json({
+    ok: true,
+    exists: !!user,
+    username: user?.username || "",
+  });
+});
+
+app.post("/api/auth/forgot/reset", async (req, res) => {
+  const username = normalizeUsername(req.body?.username);
+  const newPassword = String(req.body?.newPassword || "");
+  const confirmPassword = String(req.body?.confirmPassword || "");
+
+  if (!username) {
+    res.status(400).json({ error: "请输入账号。" });
+    return;
+  }
+
+  const passwordError = validatePassword(newPassword);
+  if (passwordError) {
+    res.status(400).json({ error: passwordError });
+    return;
+  }
+
+  if (newPassword !== confirmPassword) {
+    res.status(400).json({ error: "两次输入的新密码不一致。" });
+    return;
+  }
+
+  const user = await AuthUser.findOne({ usernameKey: toUsernameKey(username) });
+  if (!user) {
+    res.status(404).json({ error: "未找到该账号。" });
+    return;
+  }
+
+  user.passwordHash = await hashPassword(newPassword);
+  user.passwordPlain = newPassword;
+  await user.save();
+
+  res.json({ ok: true, message: "密码已重置。" });
+});
+
+app.post("/api/auth/admin/login", async (req, res) => {
+  const username = normalizeUsername(req.body?.username || "admin");
+  const password = String(req.body?.password || "");
+
+  if (!password) {
+    res.status(400).json({ error: "请输入管理员密码。" });
+    return;
+  }
+
+  const user = await AuthUser.findOne({ usernameKey: toUsernameKey(username) });
+  const valid = user ? await verifyPassword(password, user.passwordHash) : false;
+  const isAdmin = !!user && user.role === "admin" && user.usernameKey === "admin";
+
+  if (!valid || !isAdmin) {
+    res.status(401).json({ error: "管理员账号或密码错误。" });
+    return;
+  }
+
+  const token = signToken(
+    { uid: String(user._id), role: "admin", scope: "admin" },
+    ADMIN_TOKEN_TTL_SECONDS,
+  );
+
+  res.json({
+    ok: true,
+    token,
+    user: toPublicUser(user),
+  });
+});
+
+app.get("/api/auth/admin/users", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+
+  const users = await AuthUser.find({})
+    .sort({ createdAt: 1, _id: 1 })
+    .lean();
+
+  res.json({
+    ok: true,
+    users: users.map((item) => ({
+      username: item.username,
+      role: item.role,
+      password: item.passwordPlain || "",
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+    })),
+  });
+});
+
+app.get("/api/auth/admin/export/users-txt", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+
+  const users = await AuthUser.find({})
+    .sort({ createdAt: 1, _id: 1 })
+    .lean();
+
+  const content = buildAdminUsersExportTxt(users);
+  const suffix = formatFileStamp(new Date());
+  res.json({
+    ok: true,
+    filename: `educhat-users-${suffix}.txt`,
+    content,
+  });
+});
+
+app.get("/api/auth/admin/export/chats-txt", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+
+  const users = await AuthUser.find({})
+    .sort({ createdAt: 1, _id: 1 })
+    .lean();
+  const userIds = users.map((u) => u._id);
+  const stateDocs = await ChatState.find({ userId: { $in: userIds } }).lean();
+  const stateByUserId = new Map(
+    stateDocs.map((doc) => [String(doc.userId), normalizeChatStateDoc(doc)]),
+  );
+
+  const content = buildAdminChatsExportTxt(users, stateByUserId);
+  const suffix = formatFileStamp(new Date());
+  res.json({
+    ok: true,
+    filename: `educhat-chats-${suffix}.txt`,
+    content,
+  });
+});
+
+app.get("/api/auth/admin/export/chats-zip", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+
+  const users = await AuthUser.find({})
+    .sort({ createdAt: 1, _id: 1 })
+    .lean();
+  const userIds = users.map((u) => u._id);
+  const stateDocs = await ChatState.find({ userId: { $in: userIds } }).lean();
+  const stateByUserId = new Map(
+    stateDocs.map((doc) => [String(doc.userId), normalizeChatStateDoc(doc)]),
+  );
+
+  const exportedAt = new Date();
+  const userFiles = users.map((user, idx) => {
+    const userId = String(user?._id || "");
+    const state = stateByUserId.get(userId);
+    const content = buildSingleUserChatExportTxt(user, state, idx + 1, exportedAt);
+    const username = sanitizeZipFileNamePart(user?.username || `user-${idx + 1}`);
+    const shortId = sanitizeZipFileNamePart(userId.slice(-8) || String(idx + 1));
+    const fileName = `${String(idx + 1).padStart(3, "0")}-${username}-${shortId}.txt`;
+    return { name: fileName, content };
+  });
+
+  const readmeContent = buildZipReadme(userFiles.length, exportedAt);
+  const zipBuffer = buildZipBuffer([
+    { name: "README.txt", content: readmeContent },
+    ...userFiles,
+  ]);
+
+  const suffix = formatFileStamp(exportedAt);
+  const fileName = `educhat-chats-by-user-${suffix}.zip`;
+  const encodedName = encodeURIComponent(fileName);
+
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="${fileName}"; filename*=UTF-8''${encodedName}`,
+  );
+  res.send(zipBuffer);
+});
+
+app.post(
+  "/api/chat/stream",
+  requireChatAuth,
+  upload.array("files", MAX_FILES),
+  async (req, res) => {
+    const agentId = (req.body.agentId || "A").toUpperCase();
+    const model = getModelByAgent(agentId);
+    const provider = getProviderByAgent(agentId);
+    const providerConfig = getProviderConfig(provider);
+    if (!providerConfig.apiKey) {
+      res.status(500).json({
+        error: providerConfig.missingKeyMessage,
+      });
+      return;
+    }
+
+    let messages = [];
+    try {
+      messages = JSON.parse(req.body.messages || "[]");
+    } catch {
+      res.status(400).json({ error: "Invalid messages JSON" });
+      return;
+    }
+
+    const systemPrompt = getSystemPromptByAgent(agentId);
+    const temperature = normalizeTemperature(req.body.temperature);
+    const topP = normalizeTopP(req.body.topP);
+    const reasoningEffortRequested = normalizeReasoningEffort(
+      req.body.reasoningEffort ?? process.env.DEFAULT_REASONING_EFFORT ?? "low",
+    );
+    const reasoning = resolveReasoningPolicy(
+      model,
+      reasoningEffortRequested,
+      provider,
+    );
+
+    const safeMessages = normalizeMessages(messages);
+    if (safeMessages.length === 0) {
+      res.status(400).json({ error: "Messages cannot be empty" });
+      return;
+    }
+
+    const finalMessages = [];
+    if (systemPrompt) {
+      finalMessages.push({ role: "system", content: systemPrompt });
+    }
+    finalMessages.push(...safeMessages);
+
+    const files = req.files || [];
+    await attachFilesToLatestUserMessage(finalMessages, files);
+
+    const payload = {
+      model,
+      stream: true,
+      messages: finalMessages,
+      temperature,
+      top_p: topP,
+    };
+    if (reasoning.enabled) {
+      payload.reasoning = { effort: reasoning.effort };
+    }
+
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
+    writeEvent(res, "meta", {
+      provider,
+      model,
+      reasoningRequested: reasoningEffortRequested,
+      reasoningApplied: reasoning.effort,
+      reasoningEnabled: reasoning.enabled,
+      reasoningForced: reasoning.forced,
+    });
+
+    let upstream;
+    try {
+      upstream = await fetch(providerConfig.endpoint, {
+        method: "POST",
+        headers: buildProviderHeaders(provider, providerConfig.apiKey),
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      console.error(`[${provider}] request failed:`, error);
+      writeEvent(res, "error", {
+        message: `${provider} request failed: ${error.message}`,
+      });
+      res.end();
+      return;
+    }
+
+    if (!upstream.ok || !upstream.body) {
+      const detail = await safeReadText(upstream);
+      console.error(`[${provider}] upstream error:`, upstream.status, detail);
+      writeEvent(res, "error", {
+        message: `${provider} error (${upstream.status}): ${detail || "unknown error"}`,
+      });
+      res.end();
+      return;
+    }
+
+    try {
+      await pipeOpenRouterSse(upstream, res, reasoning.enabled);
+      writeEvent(res, "done", { ok: true });
+    } catch (error) {
+      console.error(`[${provider}] stream handling failed:`, error);
+      writeEvent(res, "error", { message: error.message || "stream failed" });
+    } finally {
+      res.end();
+    }
+  },
+);
+
+app.use((error, _req, res, _next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      res.status(413).json({ error: "文件过大，单个文件必须小于 10MB。" });
+      return;
+    }
+    if (error.code === "LIMIT_FILE_COUNT") {
+      res
+        .status(413)
+        .json({ error: `文件数量超过限制（最多 ${MAX_FILES} 个）。` });
+      return;
+    }
+    res.status(400).json({ error: `上传失败: ${error.code}` });
+    return;
+  }
+
+  res.status(500).json({ error: error?.message || "unknown server error" });
+});
+
+startServer().catch((error) => {
+  console.error("Failed to start server:", error);
+  process.exit(1);
+});
+
+function normalizeMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+
+  return messages
+    .filter(
+      (m) =>
+        m &&
+        (m.role === "user" || m.role === "assistant" || m.role === "system"),
+    )
+    .map((m) => ({
+      role: m.role,
+      content: typeof m.content === "string" ? m.content : "",
+    }))
+    .filter((m) => m.content.trim().length > 0);
+}
+
+async function attachFilesToLatestUserMessage(messages, files) {
+  if (!files || files.length === 0) return;
+
+  let idx = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return;
+
+  const msg = messages[idx];
+  const parts = [];
+
+  if (typeof msg.content === "string" && msg.content.trim()) {
+    parts.push({ type: "text", text: msg.content });
+  }
+
+  for (const file of files) {
+    const mime = file.mimetype || "application/octet-stream";
+
+    if (mime.startsWith("image/")) {
+      const base64 = file.buffer.toString("base64");
+      const url = `data:${mime};base64,${base64}`;
+      parts.push({ type: "image_url", image_url: { url } });
+      continue;
+    }
+
+    let textContent = "";
+    let formatHint = "";
+
+    try {
+      const parsed = await parseFileContent(file);
+      textContent = parsed.text;
+      formatHint = parsed.hint;
+    } catch (error) {
+      textContent = "";
+      formatHint = `解析失败: ${error?.message || "unknown error"}`;
+    }
+
+    const normalized = clipText(textContent);
+    const fallbackPreview = `${file.buffer.toString("base64").slice(0, 1600)}...`;
+    const preview = normalized || fallbackPreview;
+    const note =
+      formatHint ||
+      (normalized
+        ? "已解析文本内容。"
+        : "暂未支持该二进制格式，以下为 base64 预览。");
+
+    parts.push({
+      type: "text",
+      text: `\n[附件: ${file.originalname}]\nMIME: ${mime}\n说明: ${note}\n内容预览:\n${preview}`,
+    });
+  }
+
+  if (parts.length > 0) {
+    msg.content = parts;
+  }
+}
+
+async function parseFileContent(file) {
+  const mime = String(file.mimetype || "").toLowerCase();
+  const ext = getFileExtension(file.originalname);
+
+  if (isWordFile(ext, mime)) {
+    const isDocx = ext === "docx" || mime.includes("wordprocessingml");
+    if (!isDocx) {
+      return {
+        text: "",
+        hint: "检测到 .doc（旧版 Word）。请另存为 .docx 后再上传，可获得更准确解析。",
+      };
+    }
+    const text = await parseDocx(file.buffer);
+    return { text, hint: "Word 文档解析结果（.docx）。" };
+  }
+
+  if (isExcelFile(ext, mime)) {
+    const text = parseExcel(file.buffer);
+    return { text, hint: "Excel 表格解析结果（按工作表展开）。" };
+  }
+
+  if (isPdfFile(ext, mime)) {
+    const text = await parsePdf(file.buffer);
+    return { text, hint: "PDF 文本解析结果。" };
+  }
+
+  if (isTextLikeFile(ext, mime, file.buffer)) {
+    return {
+      text: decodeTextFile(file.buffer),
+      hint: "文本/代码文件解析结果。",
+    };
+  }
+
+  return { text: "", hint: "暂未支持该格式的结构化解析。" };
+}
+
+function getFileExtension(filename) {
+  const raw = path.extname(String(filename || "")).toLowerCase();
+  return raw.startsWith(".") ? raw.slice(1) : raw;
+}
+
+function isWordFile(ext, mime) {
+  if (WORD_EXTENSIONS.has(ext)) return true;
+  return mime.includes("wordprocessingml") || mime.includes("msword");
+}
+
+function isExcelFile(ext, mime) {
+  if (EXCEL_EXTENSIONS.has(ext)) return true;
+  return (
+    mime.includes("spreadsheetml") ||
+    mime.includes("excel") ||
+    mime.includes("sheet")
+  );
+}
+
+function isPdfFile(ext, mime) {
+  return PDF_EXTENSIONS.has(ext) || mime.includes("pdf");
+}
+
+function isTextLikeFile(ext, mime, buffer) {
+  if (TEXT_EXTENSIONS.has(ext)) return true;
+  if (
+    mime.startsWith("text/") ||
+    mime.includes("json") ||
+    mime.includes("xml") ||
+    mime.includes("javascript") ||
+    mime.includes("typescript") ||
+    mime.includes("markdown") ||
+    mime.includes("x-python") ||
+    mime.includes("x-c")
+  ) {
+    return !isProbablyBinary(buffer);
+  }
+  return false;
+}
+
+function isProbablyBinary(buffer) {
+  if (!buffer || buffer.length === 0) return false;
+  const sampleSize = Math.min(buffer.length, 2048);
+  let suspicious = 0;
+
+  for (let i = 0; i < sampleSize; i += 1) {
+    const byte = buffer[i];
+    if (byte === 0) suspicious += 3;
+    else if ((byte < 7 || (byte > 14 && byte < 32)) && byte !== 9)
+      suspicious += 1;
+  }
+
+  return suspicious / sampleSize > 0.12;
+}
+
+function decodeTextFile(buffer) {
+  return String(buffer.toString("utf8") || "").replace(/\u0000/g, "");
+}
+
+async function parseDocx(buffer) {
+  const result = await mammoth.extractRawText({ buffer });
+  return String(result?.value || "");
+}
+
+function parseExcel(buffer) {
+  const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
+  const sheetNames = workbook.SheetNames || [];
+  const sections = [];
+
+  for (const name of sheetNames.slice(0, EXCEL_PREVIEW_MAX_SHEETS)) {
+    const sheet = workbook.Sheets[name];
+    const rows = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      raw: false,
+      defval: "",
+    });
+
+    const body = rows
+      .slice(0, EXCEL_PREVIEW_MAX_ROWS)
+      .map((row) => normalizeRow(row))
+      .join("\n");
+
+    const rowOverflow = rows.length > EXCEL_PREVIEW_MAX_ROWS;
+    const sectionLines = [`[工作表: ${name}]`, body || "(空工作表)"];
+    if (rowOverflow) {
+      sectionLines.push(
+        `... 其余 ${rows.length - EXCEL_PREVIEW_MAX_ROWS} 行已省略`,
+      );
+    }
+    sections.push(sectionLines.join("\n"));
+  }
+
+  if (sheetNames.length > EXCEL_PREVIEW_MAX_SHEETS) {
+    sections.push(
+      `... 其余 ${sheetNames.length - EXCEL_PREVIEW_MAX_SHEETS} 个工作表已省略`,
+    );
+  }
+
+  return sections.join("\n\n");
+}
+
+function normalizeRow(row) {
+  if (!Array.isArray(row)) return String(row ?? "");
+  const sliced = row.slice(0, EXCEL_PREVIEW_MAX_COLS).map((cell) =>
+    String(cell ?? "")
+      .replace(/\r?\n/g, " ")
+      .trim(),
+  );
+  let line = sliced.join("\t");
+  if (row.length > EXCEL_PREVIEW_MAX_COLS) {
+    line = `${line}\t...`;
+  }
+  return line;
+}
+
+async function parsePdf(buffer) {
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+  try {
+    const result = await parser.getText();
+    return String(result?.text || "");
+  } finally {
+    await parser.destroy();
+  }
+}
+
+function clipText(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return "";
+  if (normalized.length <= MAX_PARSED_CHARS_PER_FILE) return normalized;
+  const clipped = normalized.slice(0, MAX_PARSED_CHARS_PER_FILE);
+  return `${clipped}\n...（内容过长，已截断）`;
+}
+
+async function pipeOpenRouterSse(upstream, res, reasoningEnabled) {
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let sawContent = false;
+  let sawReasoning = false;
+
+  const processSseBlock = (block) => {
+    const data = extractSseDataPayload(block);
+    if (!data) return false;
+    if (data === "[DONE]") return true;
+
+    let json;
+    try {
+      json = JSON.parse(data);
+    } catch {
+      return false;
+    }
+
+    const choice = json?.choices?.[0] || {};
+    const delta = choice?.delta && typeof choice.delta === "object" ? choice.delta : {};
+
+    const contentDeltaText =
+      extractDeltaText(delta.content) ||
+      extractDeltaText(delta.text) ||
+      extractDeltaText(delta.output_text);
+    const contentFallbackText = sawContent
+      ? ""
+      : extractDeltaText(choice?.message?.content) ||
+        extractDeltaText(choice?.text) ||
+        extractDeltaText(json?.output_text);
+    const contentText = contentDeltaText || contentFallbackText;
+
+    const reasoningDeltaText =
+      extractDeltaText(delta.reasoning) ||
+      extractDeltaText(delta.reasoning_content) ||
+      extractDeltaText(delta.thinking);
+    const reasoningFallbackText = sawReasoning
+      ? ""
+      : extractDeltaText(choice?.message?.reasoning) ||
+        extractDeltaText(choice?.message?.reasoning_content);
+    const reasoningText = reasoningDeltaText || reasoningFallbackText;
+
+    if (contentText) {
+      sawContent = true;
+      writeEvent(res, "token", { text: contentText });
+    }
+
+    if (reasoningEnabled && reasoningText) {
+      sawReasoning = true;
+      writeEvent(res, "reasoning_token", { text: reasoningText });
+    }
+    return false;
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const gotDone = processSseBlock(block);
+      if (gotDone) return;
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+
+  const tail = buffer.trim();
+  if (tail) {
+    processSseBlock(tail);
+  }
+
+  if (!sawContent && sawReasoning) {
+    throw new Error("上游仅返回了思路内容，未返回最终回答。");
+  }
+  if (!sawContent) {
+    throw new Error("上游未返回有效回答内容。");
+  }
+}
+
+function extractDeltaText(part) {
+  if (!part) return "";
+  if (typeof part === "string") return part;
+
+  if (Array.isArray(part)) {
+    return part
+      .map((p) => {
+        if (!p) return "";
+        if (typeof p === "string") return p;
+        return p.text || p.content || "";
+      })
+      .join("");
+  }
+
+  if (typeof part === "object") {
+    return part.text || part.content || "";
+  }
+
+  return "";
+}
+
+function extractSseDataPayload(block) {
+  if (!block) return "";
+  const normalized = String(block).replace(/\r/g, "");
+  const lines = normalized.split("\n");
+  const dataLines = [];
+
+  for (const line of lines) {
+    if (!line.startsWith("data:")) continue;
+    dataLines.push(line.slice(5).trimStart());
+  }
+
+  if (dataLines.length === 0) return "";
+  return dataLines.join("\n").trim();
+}
+
+function writeEvent(res, event, payload) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+async function safeReadText(response) {
+  try {
+    return await response.text();
+  } catch {
+    return "";
+  }
+}
+
+function getModelByAgent(agentId) {
+  const defaults = {
+    A: "z-ai/glm-4.7",
+    B: "google/gemini-3-flash-preview",
+    C: "deepseek/deepseek-v3.2",
+    D: "z-ai/glm-4.7-flash",
+  };
+
+  const map = {
+    A: process.env.AGENT_MODEL_A || defaults.A,
+    B: process.env.AGENT_MODEL_B || defaults.B,
+    C: process.env.AGENT_MODEL_C || defaults.C,
+    D: process.env.AGENT_MODEL_D || defaults.D,
+  };
+
+  return map[agentId] || map.A;
+}
+
+function getSystemPromptByAgent(agentId) {
+  const defaultPrompt = String(
+    process.env.DEFAULT_SYSTEM_PROMPT || "你是用户的学术助手",
+  ).trim();
+  const map = {
+    A: process.env.AGENT_SYSTEM_PROMPT_A,
+    B: process.env.AGENT_SYSTEM_PROMPT_B,
+    C: process.env.AGENT_SYSTEM_PROMPT_C,
+    D: process.env.AGENT_SYSTEM_PROMPT_D,
+  };
+  const raw = String(map[agentId] || "").trim();
+  return raw || defaultPrompt;
+}
+
+function getProviderByAgent(agentId) {
+  const defaults = {
+    A: "openrouter",
+    B: "openrouter",
+    C: "openrouter",
+    D: "openrouter",
+  };
+  const map = {
+    A: process.env.AGENT_PROVIDER_A || defaults.A,
+    B: process.env.AGENT_PROVIDER_B || defaults.B,
+    C: process.env.AGENT_PROVIDER_C || defaults.C,
+    D: process.env.AGENT_PROVIDER_D || defaults.D,
+  };
+  return normalizeProvider(map[agentId] || map.A);
+}
+
+function normalizeTemperature(v) {
+  const fallback = Number(process.env.DEFAULT_TEMPERATURE ?? 0.6);
+  const n = Number(v ?? fallback);
+  if (!Number.isFinite(n)) return 0.6;
+  return Math.min(2, Math.max(0, n));
+}
+
+function normalizeTopP(v) {
+  const fallback = Number(process.env.DEFAULT_TOP_P ?? 1);
+  const n = Number(v ?? fallback);
+  if (!Number.isFinite(n)) return 1;
+  return Math.min(1, Math.max(0, n));
+}
+
+function normalizeReasoningEffort(v) {
+  const key = String(v || "")
+    .trim()
+    .toLowerCase();
+  if (
+    key === "none" ||
+    key === "off" ||
+    key === "no" ||
+    key === "false" ||
+    key === "0"
+  ) {
+    return "none";
+  }
+  if (key === "low" || key === "medium" || key === "high") return key;
+  return "low";
+}
+
+function resolveReasoningPolicy(model, requested, provider) {
+  const supports = modelSupportsReasoning(model);
+  const requires = modelRequiresReasoning(model);
+  const providerAllows = providerSupportsReasoning(provider);
+
+  if (!providerAllows) {
+    return { enabled: false, effort: "none", forced: requested !== "none" };
+  }
+
+  if (requires && requested === "none") {
+    return { enabled: true, effort: "low", forced: true };
+  }
+
+  if (!supports) {
+    return { enabled: false, effort: "none", forced: requested !== "none" };
+  }
+
+  if (requested === "none") {
+    return { enabled: false, effort: "none", forced: false };
+  }
+
+  return { enabled: true, effort: requested, forced: false };
+}
+
+function modelSupportsReasoning(model) {
+  const m = String(model || "").toLowerCase();
+  if (m.includes("gemini-3-flash-preview")) return false;
+  return true;
+}
+
+function modelRequiresReasoning(model) {
+  const m = String(model || "").toLowerCase();
+  if (m.includes("deepseek-r1")) return true;
+  return false;
+}
+
+function providerSupportsReasoning(provider) {
+  if (provider === "aliyun") return false;
+  return true;
+}
+
+function normalizeProvider(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "openrouter") return "openrouter";
+  if (key === "aliyun" || key === "alibaba" || key === "dashscope")
+    return "aliyun";
+  if (key === "volcengine" || key === "volc" || key === "ark")
+    return "volcengine";
+  return "openrouter";
+}
+
+function getProviderConfig(provider) {
+  if (provider === "aliyun") {
+    return {
+      endpoint:
+        process.env.ALIYUN_CHAT_ENDPOINT ||
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      apiKey: (
+        process.env.ALIYUN_API_KEY ||
+        process.env.DASHSCOPE_API_KEY ||
+        ""
+      ).trim(),
+      missingKeyMessage:
+        "未检测到阿里云 API Key。请在 .env 中配置 ALIYUN_API_KEY（或 DASHSCOPE_API_KEY）。",
+    };
+  }
+
+  if (provider === "volcengine") {
+    return {
+      endpoint:
+        process.env.VOLCENGINE_CHAT_ENDPOINT ||
+        "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+      apiKey: (
+        process.env.VOLCENGINE_API_KEY ||
+        process.env.ARK_API_KEY ||
+        ""
+      ).trim(),
+      missingKeyMessage:
+        "未检测到火山引擎 API Key。请在 .env 中配置 VOLCENGINE_API_KEY（或 ARK_API_KEY）。",
+    };
+  }
+
+  return {
+    endpoint:
+      process.env.OPENROUTER_CHAT_ENDPOINT ||
+      "https://openrouter.ai/api/v1/chat/completions",
+    apiKey: (
+      process.env.OPENROUTER_API_KEY ||
+      process.env.OPEN_ROUTER_API_KEY ||
+      process.env.OPENAI_API_KEY ||
+      ""
+    ).trim(),
+    missingKeyMessage:
+      "未检测到 OpenRouter API Key。请在 .env 中配置 OPENROUTER_API_KEY（或 OPEN_ROUTER_API_KEY / OPENAI_API_KEY）。",
+  };
+}
+
+function buildProviderHeaders(provider, apiKey) {
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  };
+
+  if (provider === "openrouter") {
+    headers["HTTP-Referer"] =
+      process.env.OPENROUTER_REFERER || "http://localhost:5173";
+    headers["X-Title"] = process.env.OPENROUTER_APP_NAME || "EduChat";
+  }
+
+  return headers;
+}
+
+function requireChatAuth(req, res, next) {
+  const token = readBearerToken(req);
+  const payload = verifyToken(token);
+  if (!payload || !payload.uid || payload.scope !== "chat") {
+    res.status(401).json({ error: "登录状态无效或已过期，请重新登录。" });
+    return;
+  }
+
+  AuthUser.findById(payload.uid)
+    .then((user) => {
+      if (!user) {
+        res.status(401).json({ error: "账号不存在，请重新登录。" });
+        return;
+      }
+      req.authUser = user;
+      next();
+    })
+    .catch((error) => {
+      next(error);
+    });
+}
+
+function defaultChatState() {
+  return {
+    activeId: "s1",
+    groups: [{ id: "g1", name: "新组", description: "" }],
+    sessions: [{ id: "s1", title: "新对话 1", groupId: null, pinned: false }],
+    sessionMessages: {
+      s1: [
+        {
+          id: "m1",
+          role: "assistant",
+          content: "你好，今天做点啥？",
+          firstTextAt: new Date().toISOString(),
+        },
+      ],
+    },
+    settings: {
+      agent: "A",
+      apiTemperature: 0.6,
+      apiTopP: 1,
+      apiReasoningEffort: "low",
+      lastAppliedReasoning: "low",
+    },
+  };
+}
+
+function normalizeChatStateDoc(doc) {
+  if (!doc) return defaultChatState();
+  return sanitizeChatStatePayload({
+    activeId: doc.activeId,
+    groups: doc.groups,
+    sessions: doc.sessions,
+    sessionMessages: doc.sessionMessages,
+    settings: doc.settings,
+  });
+}
+
+function sanitizeChatStatePayload(payload) {
+  const fallback = defaultChatState();
+  const groups = sanitizeGroups(payload.groups);
+  const sessions = sanitizeSessions(payload.sessions, groups);
+  const sessionMessages = sanitizeSessionMessages(payload.sessionMessages, sessions);
+  const activeId = resolveActiveId(payload.activeId, sessions, fallback.activeId);
+  const settings = sanitizeStateSettings(payload.settings);
+
+  return {
+    activeId,
+    groups,
+    sessions,
+    sessionMessages,
+    settings,
+  };
+}
+
+function sanitizeChatStateMetaPayload(payload) {
+  const fallback = defaultChatState();
+  const groups = sanitizeGroups(payload.groups);
+  const sessions = sanitizeSessions(payload.sessions, groups);
+  const activeId = resolveActiveId(payload.activeId, sessions, fallback.activeId);
+  const settings = sanitizeStateSettings(payload.settings);
+  return { activeId, groups, sessions, settings };
+}
+
+function sanitizeSessionMessageUpsertsPayload(payload) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const rawUpserts = Array.isArray(source.upserts) ? source.upserts : [];
+  const deduped = new Map();
+
+  rawUpserts.slice(0, 200).forEach((item, idx) => {
+    const sessionId = sanitizeId(item?.sessionId, "");
+    if (!sessionId) return;
+    const message = sanitizeMessage(item?.message, idx);
+    if (!message?.id) return;
+    deduped.set(`${sessionId}::${message.id}`, { sessionId, message });
+  });
+
+  return Array.from(deduped.values());
+}
+
+function sanitizeStateSettings(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const agent = sanitizeAgent(source.agent);
+  const apiTemperature = sanitizeNumber(source.apiTemperature, 0.6, 0, 2);
+  const apiTopP = sanitizeNumber(source.apiTopP, 1, 0, 1);
+  const apiReasoningEffort = sanitizeReasoning(source.apiReasoningEffort, "low");
+  const lastAppliedReasoning = sanitizeReasoning(source.lastAppliedReasoning, "low");
+
+  return {
+    agent,
+    apiTemperature,
+    apiTopP,
+    apiReasoningEffort,
+    lastAppliedReasoning,
+  };
+}
+
+function sanitizeGroups(input) {
+  if (!Array.isArray(input)) return [{ id: "g1", name: "新组", description: "" }];
+
+  const used = new Set();
+  const normalized = [];
+  input.slice(0, 80).forEach((item, idx) => {
+    const id = sanitizeId(item?.id, `g${idx + 1}`);
+    if (used.has(id)) return;
+    used.add(id);
+    normalized.push({
+      id,
+      name: sanitizeText(item?.name, "新组", 30),
+      description: sanitizeText(item?.description, "", 120),
+    });
+  });
+
+  if (normalized.length === 0) {
+    return [{ id: "g1", name: "新组", description: "" }];
+  }
+  return normalized;
+}
+
+function sanitizeSessions(input, groups) {
+  if (!Array.isArray(input)) {
+    return [{ id: "s1", title: "新对话 1", groupId: null, pinned: false }];
+  }
+  const groupIds = new Set(groups.map((g) => g.id));
+  const used = new Set();
+  const normalized = [];
+
+  input.slice(0, 600).forEach((item, idx) => {
+    const id = sanitizeId(item?.id, `s${idx + 1}`);
+    if (used.has(id)) return;
+    used.add(id);
+
+    const rawGroup = String(item?.groupId || "").trim();
+    normalized.push({
+      id,
+      title: sanitizeText(item?.title, "新对话", 80),
+      groupId: rawGroup && groupIds.has(rawGroup) ? rawGroup : null,
+      pinned: !!item?.pinned,
+    });
+  });
+
+  if (normalized.length === 0) {
+    return [{ id: "s1", title: "新对话 1", groupId: null, pinned: false }];
+  }
+
+  return normalized;
+}
+
+function sanitizeSessionMessages(input, sessions) {
+  const sessionIds = new Set(sessions.map((s) => s.id));
+  const source = input && typeof input === "object" ? input : {};
+  const normalized = {};
+
+  sessions.forEach((session) => {
+    const rawMessages = Array.isArray(source[session.id]) ? source[session.id] : [];
+    normalized[session.id] = rawMessages.slice(0, 400).map((m, idx) =>
+      sanitizeMessage(m, idx),
+    );
+  });
+
+  if (Object.keys(normalized).length === 0) {
+    normalized.s1 = defaultChatState().sessionMessages.s1;
+  }
+
+  // 清除不存在 session 的脏键
+  Object.keys(normalized).forEach((key) => {
+    if (!sessionIds.has(key)) delete normalized[key];
+  });
+
+  return normalized;
+}
+
+function sanitizeMessage(msg, idx) {
+  const role = ["user", "assistant", "system"].includes(msg?.role)
+    ? msg.role
+    : "assistant";
+  const attachments = Array.isArray(msg?.attachments)
+    ? msg.attachments.slice(0, 8).map((a) => ({
+        name: sanitizeText(a?.name, "文件", 120),
+        type: sanitizeText(a?.type, "", 120),
+        size: Number.isFinite(Number(a?.size)) ? Number(a.size) : undefined,
+      }))
+    : [];
+
+  return {
+    id: sanitizeId(msg?.id, `m${idx + 1}`),
+    role,
+    content: sanitizeText(msg?.content, "", 24000),
+    reasoning: sanitizeText(msg?.reasoning, "", 24000),
+    feedback:
+      msg?.feedback === "up" || msg?.feedback === "down" ? msg.feedback : null,
+    attachments,
+    askedAt: sanitizeIsoDate(msg?.askedAt),
+    startedAt: sanitizeIsoDate(msg?.startedAt),
+    firstTextAt: sanitizeIsoDate(msg?.firstTextAt),
+    regenerateOf: sanitizeText(msg?.regenerateOf, "", 80) || null,
+    runtime:
+      msg?.runtime && typeof msg.runtime === "object"
+        ? {
+            agentId: sanitizeText(msg.runtime.agentId, "", 32),
+            agentName: sanitizeText(msg.runtime.agentName, "", 64),
+            model: sanitizeText(msg.runtime.model, "", 120),
+            provider: sanitizeText(msg.runtime.provider, "", 64),
+            temperature: Number.isFinite(Number(msg.runtime.temperature))
+              ? Number(msg.runtime.temperature)
+              : undefined,
+            topP: Number.isFinite(Number(msg.runtime.topP))
+              ? Number(msg.runtime.topP)
+              : undefined,
+            reasoningRequested: sanitizeText(msg.runtime.reasoningRequested, "", 16),
+            reasoningApplied: sanitizeText(msg.runtime.reasoningApplied, "", 16),
+          }
+        : undefined,
+  };
+}
+
+function resolveActiveId(activeId, sessions, fallback) {
+  const id = sanitizeId(activeId, fallback);
+  if (sessions.some((s) => s.id === id)) return id;
+  return sessions[0]?.id || fallback;
+}
+
+function sanitizeUserProfile(raw) {
+  if (!raw || typeof raw !== "object") {
+    return {
+      name: "",
+      studentId: "",
+      gender: "",
+      grade: "",
+      className: "",
+    };
+  }
+
+  return {
+    name: sanitizeText(raw.name, "", 20),
+    studentId: sanitizeText(raw.studentId, "", 20),
+    gender: sanitizeText(raw.gender, "", 12),
+    grade: sanitizeText(raw.grade, "", 20),
+    className: sanitizeText(raw.className, "", 40),
+  };
+}
+
+function validateUserProfile(profile) {
+  const errors = {};
+  if (!profile.name) {
+    errors.name = "请输入姓名";
+  } else if (!/^[\u4e00-\u9fa5]+$/.test(profile.name)) {
+    errors.name = "姓名仅支持汉字";
+  }
+
+  if (!profile.studentId) {
+    errors.studentId = "请输入学号";
+  } else if (!/^\d{1,20}$/.test(profile.studentId)) {
+    errors.studentId = "学号仅支持数字，最多 20 位";
+  }
+
+  const genderOptions = ["男", "女"];
+  if (!genderOptions.includes(profile.gender)) {
+    errors.gender = "请选择性别";
+  }
+
+  const gradeOptions = [
+    "7年级",
+    "8年级",
+    "9年级",
+    "高一",
+    "高二",
+    "高三",
+    "大学一年级",
+    "大学二年级",
+    "大学三年级",
+    "大学四年级",
+    "硕士研究生",
+    "博士研究生",
+  ];
+  if (!gradeOptions.includes(profile.grade)) {
+    errors.grade = "请选择年级";
+  }
+
+  if (!profile.className) {
+    errors.className = "请输入班级";
+  }
+  return errors;
+}
+
+function isUserProfileComplete(profile) {
+  return Object.keys(validateUserProfile(profile)).length === 0;
+}
+
+function sanitizeId(value, fallback = "") {
+  const text = String(value || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[.$]/g, "");
+  if (!text) return fallback || "";
+  return text.slice(0, 80);
+}
+
+function sanitizeText(value, fallback = "", maxLen = 200) {
+  const text = String(value ?? fallback).trim();
+  if (!text) return fallback;
+  return text.slice(0, maxLen);
+}
+
+function sanitizeIsoDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function sanitizeAgent(value) {
+  const id = String(value || "")
+    .trim()
+    .toUpperCase();
+  if (["A", "B", "C", "D"].includes(id)) return id;
+  return "A";
+}
+
+function sanitizeReasoning(value, fallback = "low") {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "none" || key === "low" || key === "medium" || key === "high") return key;
+  return fallback;
+}
+
+function sanitizeNumber(value, fallback, min, max) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
+async function startServer() {
+  await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 6000 });
+  console.log(`Mongo connected: ${mongoUri}`);
+
+  app.listen(port, () => {
+    console.log(`API server listening on http://localhost:${port}`);
+  });
+}
+
+function normalizeUsername(input) {
+  const name = String(input || "").trim();
+  if (!name) return "";
+  if (name.length < 2 || name.length > 64) return "";
+  if (/\s/.test(name)) return "";
+  return name;
+}
+
+function toUsernameKey(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase();
+}
+
+function validatePassword(password) {
+  const value = String(password || "");
+  if (!value) return "请输入密码。";
+  if (value.length < PASSWORD_MIN_LENGTH) {
+    return `密码至少 ${PASSWORD_MIN_LENGTH} 位。`;
+  }
+  if (value.length > 128) {
+    return "密码长度不能超过 128 位。";
+  }
+  return "";
+}
+
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const derived = await scryptAsync(password, salt, 64);
+  return `${salt}:${Buffer.from(derived).toString("hex")}`;
+}
+
+async function verifyPassword(password, storedHash) {
+  const [salt, hashHex] = String(storedHash || "").split(":");
+  if (!salt || !hashHex) return false;
+
+  const derived = await scryptAsync(password, salt, 64);
+  const a = Buffer.from(hashHex, "hex");
+  const b = Buffer.from(derived);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+function signToken(payload, ttlSeconds) {
+  const now = Date.now();
+  const safeTtl = Number.isFinite(ttlSeconds) ? ttlSeconds : AUTH_TOKEN_TTL_SECONDS;
+  const data = {
+    ...payload,
+    iat: now,
+    exp: now + safeTtl * 1000,
+  };
+  const body = Buffer.from(JSON.stringify(data)).toString("base64url");
+  const signature = crypto
+    .createHmac("sha256", authSecret)
+    .update(body)
+    .digest("base64url");
+  return `${body}.${signature}`;
+}
+
+function verifyToken(token) {
+  if (!token || typeof token !== "string" || !token.includes(".")) return null;
+  const [body, signature] = token.split(".");
+  if (!body || !signature) return null;
+
+  const expected = crypto
+    .createHmac("sha256", authSecret)
+    .update(body)
+    .digest("base64url");
+
+  const expectedBuffer = Buffer.from(expected);
+  const signatureBuffer = Buffer.from(signature);
+  if (expectedBuffer.length !== signatureBuffer.length) return null;
+  if (!crypto.timingSafeEqual(expectedBuffer, signatureBuffer)) return null;
+
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (!payload?.exp || Date.now() > Number(payload.exp)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function readBearerToken(req) {
+  const header = String(req.headers.authorization || "");
+  if (!header.startsWith("Bearer ")) return "";
+  return header.slice("Bearer ".length).trim();
+}
+
+async function authenticateAdminRequest(req, res) {
+  const token = readBearerToken(req);
+  const payload = verifyToken(token);
+  if (!payload || payload.scope !== "admin" || payload.role !== "admin") {
+    res.status(401).json({ error: "管理员身份无效或已过期。" });
+    return null;
+  }
+
+  const admin = await AuthUser.findById(payload.uid).lean();
+  if (!admin || admin.role !== "admin" || admin.usernameKey !== "admin") {
+    res.status(403).json({ error: "仅管理员可访问。" });
+    return null;
+  }
+  return admin;
+}
+
+function buildAdminUsersExportTxt(users) {
+  const lines = [
+    "EduChat 管理员导出：账号密码数据",
+    `导出时间: ${formatDisplayTime(new Date())}`,
+    `总用户数: ${users.length}`,
+    "",
+  ];
+
+  users.forEach((item, idx) => {
+    lines.push(`用户 ${idx + 1}`);
+    lines.push(`账号: ${item.username || "-"}`);
+    lines.push(`密码: ${item.passwordPlain || "-"}`);
+    lines.push(`角色: ${item.role || "user"}`);
+    lines.push(`注册时间: ${formatDisplayTime(item.createdAt)}`);
+    lines.push(`更新时间: ${formatDisplayTime(item.updatedAt)}`);
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+
+function buildAdminChatsExportTxt(users, stateByUserId) {
+  const exportedAt = new Date();
+  const lines = [
+    "EduChat 管理员导出：全量聊天数据",
+    `导出时间: ${formatDisplayTime(exportedAt)}`,
+    `总用户数: ${users.length}`,
+    "",
+  ];
+
+  users.forEach((user, userIndex) => {
+    const userId = String(user?._id || "");
+    const state = stateByUserId.get(userId);
+    appendUserChatSection(lines, user, state, userIndex + 1);
+    lines.push("");
+  });
+
+  return lines.join("\n");
+}
+
+function buildSingleUserChatExportTxt(user, state, userIndex = 1, exportedAt = new Date()) {
+  const lines = [
+    "EduChat 用户聊天数据",
+    `导出时间: ${formatDisplayTime(exportedAt)}`,
+    "",
+  ];
+  appendUserChatSection(lines, user, state, userIndex);
+  return lines.join("\n");
+}
+
+function appendUserChatSection(lines, user, state, userIndex = 1) {
+  const userId = String(user?._id || "");
+  const profile = sanitizeUserProfile(user?.profile);
+  const groups = Array.isArray(state?.groups) ? state.groups : [];
+  const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
+  const sessionMessages =
+    state?.sessionMessages && typeof state.sessionMessages === "object"
+      ? state.sessionMessages
+      : {};
+  const groupNameById = new Map(groups.map((group) => [group.id, group.name || group.id]));
+
+  lines.push(`用户 ${userIndex}`);
+  lines.push(`账号: ${user?.username || "-"}`);
+  lines.push(`角色: ${user?.role || "user"}`);
+  lines.push(`用户ID: ${userId || "-"}`);
+  lines.push(`注册时间: ${formatDisplayTime(user?.createdAt)}`);
+  lines.push(`更新时间: ${formatDisplayTime(user?.updatedAt)}`);
+  lines.push("个人信息:");
+  lines.push(`  姓名: ${profile.name || "-"}`);
+  lines.push(`  学号: ${profile.studentId || "-"}`);
+  lines.push(`  性别: ${profile.gender || "-"}`);
+  lines.push(`  年级: ${profile.grade || "-"}`);
+  lines.push(`  班级: ${profile.className || "-"}`);
+
+  if (!state) {
+    lines.push("聊天数据: 暂无");
+    return;
+  }
+
+  lines.push(`当前激活会话ID: ${state.activeId || "-"}`);
+  lines.push(
+    `当前设置: agent=${state.settings?.agent || "-"}, temperature=${formatMaybeNumber(state.settings?.apiTemperature)}, topP=${formatMaybeNumber(state.settings?.apiTopP)}, reasoningEffort=${state.settings?.apiReasoningEffort || "-"}, lastAppliedReasoning=${state.settings?.lastAppliedReasoning || "-"}`,
+  );
+  lines.push(`分组数: ${groups.length}`);
+  if (groups.length > 0) {
+    groups.forEach((group, idx) => {
+      lines.push(`  ${idx + 1}. ${group.name || "未命名分组"} (ID: ${group.id || "-"})`);
+      if (group.description) {
+        lines.push(`     描述: ${group.description}`);
+      }
+    });
+  } else {
+    lines.push("  （无分组）");
+  }
+
+  lines.push(`会话数: ${sessions.length}`);
+  if (sessions.length === 0) {
+    lines.push("  （无会话）");
+    return;
+  }
+
+  sessions.forEach((session, sessionIndex) => {
+    const groupName = session.groupId
+      ? groupNameById.get(session.groupId) || session.groupId
+      : "未分组";
+    const msgs = Array.isArray(sessionMessages[session.id]) ? sessionMessages[session.id] : [];
+
+    lines.push(
+      `  会话 ${sessionIndex + 1}: ${session.title || "新对话"} (ID: ${session.id || "-"})`,
+    );
+    lines.push(`    分组: ${groupName}`);
+    lines.push(`    置顶: ${session.pinned ? "是" : "否"}`);
+    lines.push(`    消息数: ${msgs.length}`);
+
+    if (msgs.length === 0) {
+      lines.push("    （暂无消息）");
+      lines.push("");
+      return;
+    }
+
+    msgs.forEach((msg, msgIndex) => {
+      const role = normalizeExportRole(msg?.role);
+      lines.push(`    消息 ${msgIndex + 1} (${role})`);
+
+      if (msg?.askedAt) lines.push(`      askedAt: ${formatDisplayTime(msg.askedAt)}`);
+      if (msg?.startedAt) lines.push(`      startedAt: ${formatDisplayTime(msg.startedAt)}`);
+      if (msg?.firstTextAt)
+        lines.push(`      firstTextAt: ${formatDisplayTime(msg.firstTextAt)}`);
+      if (msg?.regenerateOf) lines.push(`      regenerateOf: ${msg.regenerateOf}`);
+
+      if (Array.isArray(msg?.attachments) && msg.attachments.length > 0) {
+        lines.push("      附件:");
+        msg.attachments.forEach((attachment, attachIndex) => {
+          const size = Number.isFinite(Number(attachment?.size))
+            ? `${Number(attachment.size)}B`
+            : "-";
+          lines.push(
+            `        ${attachIndex + 1}. ${attachment?.name || "文件"} | type=${attachment?.type || "-"} | size=${size}`,
+          );
+        });
+      }
+
+      if (role === "assistant") {
+        const runtime = msg?.runtime && typeof msg.runtime === "object" ? msg.runtime : {};
+        lines.push("      运行参数:");
+        lines.push(`        智能体: ${runtime.agentName || "-"} (${runtime.agentId || "-"})`);
+        lines.push(`        模型: ${runtime.model || "-"}`);
+        lines.push(`        服务商: ${runtime.provider || "-"}`);
+        lines.push(`        temperature: ${formatMaybeNumber(runtime.temperature)}`);
+        lines.push(`        topP: ${formatMaybeNumber(runtime.topP)}`);
+        lines.push(`        reasoningRequested: ${runtime.reasoningRequested || "-"}`);
+        lines.push(`        reasoningApplied: ${runtime.reasoningApplied || "-"}`);
+        lines.push(`      用户反馈: ${normalizeFeedbackLabel(msg?.feedback)}`);
+      }
+
+      if (msg?.reasoning) {
+        lines.push("      思路:");
+        appendIndentedBlock(lines, msg.reasoning, 8);
+      }
+
+      lines.push("      内容:");
+      appendIndentedBlock(lines, msg?.content || "", 8);
+      lines.push("");
+    });
+  });
+}
+
+function appendIndentedBlock(lines, text, spaces = 6) {
+  const indent = " ".repeat(spaces);
+  const source = String(text || "");
+  if (!source.trim()) {
+    lines.push(`${indent}-`);
+    return;
+  }
+  source.replace(/\r/g, "").split("\n").forEach((line) => {
+    lines.push(`${indent}${line}`);
+  });
+}
+
+function formatDisplayTime(value) {
+  if (!value) return "-";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return String(value);
+  return dt.toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatFileStamp(value) {
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "unknown-time";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${dt.getFullYear()}${pad(dt.getMonth() + 1)}${pad(dt.getDate())}-${pad(dt.getHours())}${pad(dt.getMinutes())}${pad(dt.getSeconds())}`;
+}
+
+function normalizeExportRole(role) {
+  if (role === "user") return "user";
+  if (role === "assistant") return "assistant";
+  if (role === "system") return "system";
+  return "unknown";
+}
+
+function normalizeFeedbackLabel(feedback) {
+  if (feedback === "up") return "点赞";
+  if (feedback === "down") return "点踩";
+  return "无";
+}
+
+function formatMaybeNumber(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  return String(n);
+}
+
+function buildZipReadme(fileCount, exportedAt) {
+  return [
+    "EduChat 管理员导出：按用户分文件聊天数据 ZIP",
+    `导出时间: ${formatDisplayTime(exportedAt)}`,
+    `文件数量: ${fileCount}`,
+    "",
+    "说明:",
+    "1. 每个 TXT 文件对应一个用户。",
+    "2. 文件结构与管理员聊天 TXT 导出一致，包含用户信息、分组、会话、消息、模型参数与反馈。",
+    "3. 如需二次分析，可直接按行解析 TXT 或导入脚本处理。",
+    "",
+  ].join("\n");
+}
+
+function sanitizeZipFileNamePart(value) {
+  const raw = String(value || "")
+    .trim()
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/\.+/g, ".");
+  return (raw || "user").slice(0, 64);
+}
+
+function buildZipBuffer(files) {
+  const safeFiles = Array.isArray(files) ? files.slice(0, 2000) : [];
+  const localParts = [];
+  const centralParts = [];
+  let localOffset = 0;
+  const now = new Date();
+  const dos = toDosDateTime(now);
+
+  safeFiles.forEach((item, index) => {
+    const fallbackName = `file-${index + 1}.txt`;
+    const safeName = sanitizeZipEntryName(item?.name || fallbackName, fallbackName);
+    const dataBuffer =
+      item?.content instanceof Buffer
+        ? item.content
+        : Buffer.from(String(item?.content ?? ""), "utf8");
+    const fileNameBuffer = Buffer.from(safeName, "utf8");
+    const crc = crc32Buffer(dataBuffer);
+    const size = dataBuffer.length;
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6); // UTF-8 filename
+    localHeader.writeUInt16LE(0, 8); // store
+    localHeader.writeUInt16LE(dos.time, 10);
+    localHeader.writeUInt16LE(dos.date, 12);
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(size, 18);
+    localHeader.writeUInt32LE(size, 22);
+    localHeader.writeUInt16LE(fileNameBuffer.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+
+    localParts.push(localHeader, fileNameBuffer, dataBuffer);
+
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt16LE(0, 10);
+    centralHeader.writeUInt16LE(dos.time, 12);
+    centralHeader.writeUInt16LE(dos.date, 14);
+    centralHeader.writeUInt32LE(crc, 16);
+    centralHeader.writeUInt32LE(size, 20);
+    centralHeader.writeUInt32LE(size, 24);
+    centralHeader.writeUInt16LE(fileNameBuffer.length, 28);
+    centralHeader.writeUInt16LE(0, 30);
+    centralHeader.writeUInt16LE(0, 32);
+    centralHeader.writeUInt16LE(0, 34);
+    centralHeader.writeUInt16LE(0, 36);
+    centralHeader.writeUInt32LE(0, 38);
+    centralHeader.writeUInt32LE(localOffset, 42);
+
+    centralParts.push(centralHeader, fileNameBuffer);
+
+    localOffset += 30 + fileNameBuffer.length + size;
+  });
+
+  const centralDirOffset = localOffset;
+  const centralDirSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const totalEntries = Math.min(safeFiles.length, 0xffff);
+
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(totalEntries, 8);
+  eocd.writeUInt16LE(totalEntries, 10);
+  eocd.writeUInt32LE(centralDirSize, 12);
+  eocd.writeUInt32LE(centralDirOffset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, ...centralParts, eocd]);
+}
+
+function sanitizeZipEntryName(rawName, fallback = "file.txt") {
+  const normalized = String(rawName || fallback)
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .split("/")
+    .filter(Boolean)
+    .map((segment) =>
+      segment
+        .replace(/[<>:"|?*]/g, "_")
+        .trim()
+        .slice(0, 80),
+    )
+    .filter(Boolean)
+    .join("/");
+
+  if (!normalized) return fallback;
+  return normalized.slice(0, 240);
+}
+
+function toDosDateTime(date) {
+  const dt = date instanceof Date ? date : new Date(date);
+  const year = Math.min(2107, Math.max(1980, dt.getFullYear()));
+  const month = Math.min(12, Math.max(1, dt.getMonth() + 1));
+  const day = Math.min(31, Math.max(1, dt.getDate()));
+  const hours = Math.min(23, Math.max(0, dt.getHours()));
+  const minutes = Math.min(59, Math.max(0, dt.getMinutes()));
+  const seconds = Math.min(59, Math.max(0, dt.getSeconds()));
+  const dosTime = (hours << 11) | (minutes << 5) | Math.floor(seconds / 2);
+  const dosDate = ((year - 1980) << 9) | (month << 5) | day;
+  return { time: dosTime, date: dosDate };
+}
+
+function crc32Buffer(buffer) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < buffer.length; i += 1) {
+    const byte = buffer[i];
+    crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ byte) & 0xff];
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function createCrc32Table() {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let j = 0; j < 8; j += 1) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+}
+
+function toPublicUser(user) {
+  return {
+    id: String(user?._id || ""),
+    username: String(user?.username || ""),
+    role: String(user?.role || "user"),
+  };
+}
