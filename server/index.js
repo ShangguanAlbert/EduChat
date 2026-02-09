@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import dotenv from "dotenv";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { promisify } from "node:util";
@@ -713,6 +714,15 @@ app.post(
     }
   },
 );
+
+const distDir = path.resolve(process.cwd(), "dist");
+const distIndexHtml = path.join(distDir, "index.html");
+if (existsSync(distIndexHtml)) {
+  app.use(express.static(distDir));
+  app.get(/^\/(?!api(?:\/|$)).*/, (_req, res) => {
+    res.sendFile(distIndexHtml);
+  });
+}
 
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) {
