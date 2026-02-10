@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { LogOut, Settings } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import Sidebar from "../components/Sidebar.jsx";
 import AgentSelect from "../components/AgentSelect.jsx";
@@ -12,6 +13,11 @@ import {
   GENDER_OPTIONS,
   GRADE_OPTIONS,
 } from "./chat/constants.js";
+import {
+  DEFAULT_AGENT_RUNTIME_CONFIG,
+  createDefaultAgentRuntimeConfigMap,
+  sanitizeRuntimeConfigMap,
+} from "./chat/agentRuntimeConfig.js";
 import {
   createRuntimeSnapshot,
   mergeRuntimeWithMeta,
@@ -46,49 +52,22 @@ import {
   saveChatStateMeta,
   saveUserProfile,
 } from "./chat/stateApi.js";
+import {
+  createNewSessionRecord,
+  createWelcomeMessage,
+  hasUserTurn,
+} from "./chat/sessionFactory.js";
 import "../styles/chat.css";
 
 const DEFAULT_GROUPS = [{ id: "g1", name: "新组", description: "" }];
 const DEFAULT_SESSIONS = [{ id: "s1", title: "新对话 1", groupId: null, pinned: false }];
 const DEFAULT_SESSION_MESSAGES = {
   s1: [
-    {
-      id: "m1",
-      role: "assistant",
-      content: "你好，今天做点啥？",
-      firstTextAt: new Date().toISOString(),
-    },
+    createWelcomeMessage(),
   ],
 };
 const CONTEXT_USER_ROUNDS = 10;
 const LOGIN_BOOTSTRAP_FLAG = "educhat_just_logged_in";
-
-function createWelcomeMessage() {
-  return {
-    id: `m${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    role: "assistant",
-    content: "你好，今天做点啥？",
-    firstTextAt: new Date().toISOString(),
-  };
-}
-
-function createNewSessionRecord() {
-  const id = `s${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  return {
-    session: { id, title: "新对话", groupId: null, pinned: false },
-    messages: [createWelcomeMessage()],
-  };
-}
-
-function hasUserTurn(messages) {
-  if (!Array.isArray(messages)) return false;
-  return messages.some((m) => {
-    if (m?.role !== "user") return false;
-    const hasText = String(m?.content || "").trim().length > 0;
-    const hasAttachments = Array.isArray(m?.attachments) && m.attachments.length > 0;
-    return hasText || hasAttachments;
-  });
-}
 
 export default function ChatPage() {
   const navigate = useNavigate();
@@ -98,8 +77,10 @@ export default function ChatPage() {
 
   const [activeId, setActiveId] = useState("s1");
   const [agent, setAgent] = useState("A");
+  const [agentRuntimeConfigs, setAgentRuntimeConfigs] = useState(
+    createDefaultAgentRuntimeConfigMap(),
+  );
   const [showExportMenu, setShowExportMenu] = useState(false);
-  const [showApiSettings, setShowApiSettings] = useState(false);
   const [apiTemperature, setApiTemperature] = useState("0.6");
   const [apiTopP, setApiTopP] = useState("1");
   const [apiReasoningEffort, setApiReasoningEffort] = useState("low");
@@ -118,6 +99,16 @@ export default function ChatPage() {
   const [userInfoSaving, setUserInfoSaving] = useState(false);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [bootstrapError, setBootstrapError] = useState("");
+  const [isAdminUser, setIsAdminUser] = useState(() => {
+    try {
+      const raw = localStorage.getItem("auth_user");
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      return String(parsed?.role || "").toLowerCase() === "admin";
+    } catch {
+      return false;
+    }
+  });
 
   const messageListRef = useRef(null);
   const exportWrapRef = useRef(null);
@@ -151,13 +142,21 @@ export default function ChatPage() {
   const userInfoComplete = useMemo(() => isUserInfoComplete(userInfo), [userInfo]);
   const interactionLocked = bootstrapLoading || forceUserInfoModal || userInfoSaving;
   const activeAgent = useMemo(() => AGENT_META[agent] || AGENT_META.A, [agent]);
+  const activeRuntimeConfig = useMemo(
+    () => agentRuntimeConfigs[agent] || DEFAULT_AGENT_RUNTIME_CONFIG,
+    [agentRuntimeConfigs, agent],
+  );
   const makeRuntimeSnapshot = (agentId = agent) =>
     createRuntimeSnapshot({
       agentId,
       agentMeta: AGENT_META,
-      apiTemperature,
-      apiTopP,
-      apiReasoningEffort,
+      apiTemperature:
+        agentRuntimeConfigs[agentId]?.temperature ??
+        DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
+      apiTopP: agentRuntimeConfigs[agentId]?.topP ?? DEFAULT_AGENT_RUNTIME_CONFIG.topP,
+      apiReasoningEffort:
+        agentRuntimeConfigs[agentId]?.reasoningEffort ??
+        DEFAULT_AGENT_RUNTIME_CONFIG.reasoningEffort,
     });
 
   function updateAssistantRuntimeFromMeta(sessionId, assistantId, meta) {
@@ -400,6 +399,7 @@ export default function ChatPage() {
 
   async function onSend(text, files) {
     if (!activeId || isStreaming || interactionLocked || !userInfoComplete) return;
+    const runtimeConfig = agentRuntimeConfigs[agent] || DEFAULT_AGENT_RUNTIME_CONFIG;
 
     setStreamError("");
     const askedAt = new Date().toISOString();
@@ -445,24 +445,24 @@ export default function ChatPage() {
     startStreamDraft(currentSessionId, assistantMsg);
 
     const historyForApi = toApiMessages(
-      pickRecentRounds(currentHistory, CONTEXT_USER_ROUNDS),
+      pickRecentRounds(currentHistory, runtimeConfig.contextRounds || CONTEXT_USER_ROUNDS),
     );
 
     const formData = new FormData();
     formData.append("agentId", agent);
     formData.append(
       "temperature",
-      String(normalizeTemperature(apiTemperature)),
+      String(normalizeTemperature(runtimeConfig.temperature)),
     );
-    formData.append("topP", String(normalizeTopP(apiTopP)));
-    formData.append("reasoningEffort", apiReasoningEffort);
+    formData.append("topP", String(normalizeTopP(runtimeConfig.topP)));
+    formData.append("reasoningEffort", runtimeConfig.reasoningEffort);
     formData.append("messages", JSON.stringify(historyForApi));
 
     (files || []).forEach((f) => formData.append("files", f));
 
     setFocusUserMessageId(userMsg.id);
     setIsStreaming(true);
-    streamReasoningEnabledRef.current = apiReasoningEffort !== "none";
+    streamReasoningEnabledRef.current = runtimeConfig.reasoningEffort !== "none";
     streamTargetRef.current = { sessionId: currentSessionId, assistantId };
     streamBufferRef.current = { content: "", reasoning: "", firstTextAt: "" };
 
@@ -571,6 +571,7 @@ export default function ChatPage() {
     if (!activeId || isStreaming || !promptMessageId || interactionLocked || !userInfoComplete) {
       return;
     }
+    const runtimeConfig = agentRuntimeConfigs[agent] || DEFAULT_AGENT_RUNTIME_CONFIG;
 
     const currentSessionId = activeId;
     const list = sessionMessages[currentSessionId] || [];
@@ -581,7 +582,10 @@ export default function ChatPage() {
 
     const promptMsg = list[promptIndex];
     const historyForApi = toApiMessages(
-      pickRecentRounds(list.slice(0, promptIndex + 1), CONTEXT_USER_ROUNDS),
+      pickRecentRounds(
+        list.slice(0, promptIndex + 1),
+        runtimeConfig.contextRounds || CONTEXT_USER_ROUNDS,
+      ),
     );
 
     const newAssistantId = `a${Date.now()}-regen`;
@@ -605,15 +609,15 @@ export default function ChatPage() {
     formData.append("agentId", agent);
     formData.append(
       "temperature",
-      String(normalizeTemperature(apiTemperature)),
+      String(normalizeTemperature(runtimeConfig.temperature)),
     );
-    formData.append("topP", String(normalizeTopP(apiTopP)));
-    formData.append("reasoningEffort", apiReasoningEffort);
+    formData.append("topP", String(normalizeTopP(runtimeConfig.topP)));
+    formData.append("reasoningEffort", runtimeConfig.reasoningEffort);
     formData.append("messages", JSON.stringify(historyForApi));
 
     setFocusUserMessageId(promptMessageId);
     setIsStreaming(true);
-    streamReasoningEnabledRef.current = apiReasoningEffort !== "none";
+    streamReasoningEnabledRef.current = runtimeConfig.reasoningEffort !== "none";
     streamTargetRef.current = {
       sessionId: currentSessionId,
       assistantId: newAssistantId,
@@ -722,9 +726,9 @@ export default function ChatPage() {
       messages: exportMessages,
       userInfo,
       activeAgentName: activeAgent.name,
-      apiTemperature,
-      apiTopP,
-      apiReasoningEffort,
+      apiTemperature: String(activeRuntimeConfig.temperature),
+      apiTopP: String(activeRuntimeConfig.topP),
+      apiReasoningEffort: activeRuntimeConfig.reasoningEffort,
       lastAppliedReasoning,
     });
 
@@ -753,6 +757,13 @@ export default function ChatPage() {
       return;
     }
     runExport(kind, userInfo);
+  }
+
+  function onLogout() {
+    localStorage.removeItem("token");
+    localStorage.removeItem("auth_user");
+    sessionStorage.removeItem(LOGIN_BOOTSTRAP_FLAG);
+    navigate("/login", { replace: true });
   }
 
   async function submitUserInfo(e) {
@@ -855,14 +866,12 @@ export default function ChatPage() {
         const rawActiveId = String(state.activeId || nextSessions[0]?.id || "s1");
         const stateSettings =
           state.settings && typeof state.settings === "object" ? state.settings : {};
+        const nextRuntimeConfigs = sanitizeRuntimeConfigMap(data?.agentRuntimeConfigs);
         const nextAgent = AGENT_META[stateSettings.agent] ? stateSettings.agent : "A";
-        const nextApiTemperature = String(
-          normalizeTemperature(stateSettings.apiTemperature ?? 0.6),
-        );
-        const nextApiTopP = String(normalizeTopP(stateSettings.apiTopP ?? 1));
-        const nextApiReasoning = normalizeReasoningEffort(
-          stateSettings.apiReasoningEffort ?? "low",
-        );
+        const nextRuntime = nextRuntimeConfigs[nextAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+        const nextApiTemperature = String(normalizeTemperature(nextRuntime.temperature));
+        const nextApiTopP = String(normalizeTopP(nextRuntime.topP));
+        const nextApiReasoning = normalizeReasoningEffort(nextRuntime.reasoningEffort);
         const nextAppliedReasoning = normalizeReasoningEffort(
           stateSettings.lastAppliedReasoning ?? "low",
         );
@@ -897,6 +906,7 @@ export default function ChatPage() {
         setSessionMessages(resolvedMessages);
         setActiveId(resolvedActiveId);
         setAgent(nextAgent);
+        setAgentRuntimeConfigs(nextRuntimeConfigs);
         setApiTemperature(nextApiTemperature);
         setApiTopP(nextApiTopP);
         setApiReasoningEffort(nextApiReasoning);
@@ -907,6 +917,8 @@ export default function ChatPage() {
         }
 
         const profile = sanitizeUserInfo(data?.profile);
+        const role = String(data?.user?.role || "").toLowerCase();
+        setIsAdminUser(role === "admin");
         setUserInfo(profile);
         if (!isUserInfoComplete(profile)) {
           setForceUserInfoModal(true);
@@ -944,6 +956,14 @@ export default function ChatPage() {
       cancelled = true;
     };
   }, [navigate]);
+
+  useEffect(() => {
+    setApiTemperature(String(normalizeTemperature(activeRuntimeConfig.temperature)));
+    setApiTopP(String(normalizeTopP(activeRuntimeConfig.topP)));
+    setApiReasoningEffort(
+      normalizeReasoningEffort(activeRuntimeConfig.reasoningEffort),
+    );
+  }, [activeRuntimeConfig]);
 
   useEffect(() => {
     if (!persistReadyRef.current || bootstrapLoading) return;
@@ -1085,11 +1105,7 @@ export default function ChatPage() {
 
       <div className="chat-main">
         <div className="chat-topbar">
-          <AgentSelect
-            value={agent}
-            onChange={setAgent}
-            onOpenApiSettings={() => setShowApiSettings(true)}
-          />
+          <AgentSelect value={agent} onChange={setAgent} />
           <div className="chat-topbar-right">
             <div className="export-wrap" ref={exportWrapRef}>
               <button
@@ -1118,6 +1134,16 @@ export default function ChatPage() {
                 </div>
               )}
             </div>
+            <button
+              type="button"
+              className="chat-logout-btn"
+              onClick={onLogout}
+              aria-label="退出登录"
+              title="退出登录"
+            >
+              <span className="chat-logout-tip">退出登录</span>
+              <LogOut size={16} aria-hidden="true" />
+            </button>
             <span className="chat-status">
               {isStreaming
                 ? `流式生成中 · ${activeAgent.name}`
@@ -1181,6 +1207,19 @@ export default function ChatPage() {
         </div>
       </div>
 
+      {isAdminUser && (
+        <button
+          type="button"
+          className="chat-admin-entry"
+          onClick={() => navigate("/admin/settings")}
+          title="管理员设置"
+          aria-label="管理员设置"
+        >
+          <Settings size={16} />
+          <span>管理员设置</span>
+        </button>
+      )}
+
       <ExportUserInfoModal
         open={showUserInfoModal}
         userInfo={userInfo}
@@ -1207,103 +1246,6 @@ export default function ChatPage() {
         lockOverlayClose={forceUserInfoModal || userInfoSaving}
         dialogLabel={forceUserInfoModal ? "首次填写用户信息" : "编辑用户信息"}
       />
-
-      {showApiSettings && (
-        <div
-          className="modal-overlay"
-          role="presentation"
-          onClick={() => setShowApiSettings(false)}
-        >
-          <div
-            className="group-modal api-settings-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="API 设置"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="group-modal-title">API 参数设置</h3>
-            <div className="group-modal-form">
-              <label className="group-modal-label" htmlFor="temperature-input">
-                Temperature（0 - 2）
-              </label>
-              <input
-                id="temperature-input"
-                className="group-modal-input"
-                type="number"
-                min="0"
-                max="2"
-                step="0.1"
-                value={apiTemperature}
-                onChange={(e) => setApiTemperature(e.target.value)}
-              />
-
-              <label className="group-modal-label" htmlFor="topp-input">
-                Top-p（0 - 1）
-              </label>
-              <input
-                id="topp-input"
-                className="group-modal-input"
-                type="number"
-                min="0"
-                max="1"
-                step="0.05"
-                value={apiTopP}
-                onChange={(e) => setApiTopP(e.target.value)}
-              />
-
-              <label className="group-modal-label" htmlFor="reasoning-select">
-                Reasoning（推理强度）
-              </label>
-              <select
-                id="reasoning-select"
-                className="group-modal-input"
-                value={apiReasoningEffort}
-                onChange={(e) => setApiReasoningEffort(e.target.value)}
-              >
-                <option value="none">关闭</option>
-                <option value="low">浮想</option>
-                <option value="medium">斟酌</option>
-                <option value="high">沉思</option>
-              </select>
-
-              <p className="api-setting-hint">
-                默认值：Temperature = 0.6，Top-p = 1，Reasoning =
-                low。若模型不支持推理会自动降级为 none。
-              </p>
-
-              <div className="group-modal-actions">
-                <button
-                  type="button"
-                  className="group-modal-btn group-modal-btn-secondary"
-                  onClick={() => {
-                    setApiTemperature("0.6");
-                    setApiTopP("1");
-                    setApiReasoningEffort("low");
-                  }}
-                >
-                  恢复默认
-                </button>
-                <button
-                  type="button"
-                  className="group-modal-btn group-modal-btn-primary"
-                  onClick={() => {
-                    setApiTemperature(
-                      String(normalizeTemperature(apiTemperature)),
-                    );
-                    setApiTopP(String(normalizeTopP(apiTopP)));
-                    setApiReasoningEffort(
-                      normalizeReasoningEffort(apiReasoningEffort),
-                    );
-                    setShowApiSettings(false);
-                  }}
-                >
-                  保存
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

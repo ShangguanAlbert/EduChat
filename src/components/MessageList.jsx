@@ -30,6 +30,7 @@ const MessageList = forwardRef(function MessageList({
   onAssistantRegenerate,
   onAskSelection,
   onLatestChange,
+  showAssistantActions = true,
 }, ref) {
   const streamDraft = useSessionStreamDraft(activeSessionId);
   const rootRef = useRef(null);
@@ -179,6 +180,11 @@ const MessageList = forwardRef(function MessageList({
   }, []);
 
   const updateAskPopoverFromSelection = useCallback(() => {
+    if (typeof onAskSelection !== "function") {
+      closeAskPopover();
+      return;
+    }
+
     const root = rootRef.current;
     const selection = window.getSelection();
     if (!root || !selection || selection.rangeCount === 0 || selection.isCollapsed) {
@@ -232,7 +238,7 @@ const MessageList = forwardRef(function MessageList({
       x: rect.left + rect.width / 2,
       y: Math.max(8, rect.top - 8),
     });
-  }, [closeAskPopover]);
+  }, [closeAskPopover, onAskSelection]);
 
   useEffect(() => {
     function onSelectionChange() {
@@ -293,11 +299,12 @@ const MessageList = forwardRef(function MessageList({
             onAssistantFeedback={onAssistantFeedback}
             onAssistantRegenerate={onAssistantRegenerate}
             promptMessageId={promptMap.get(m.id) || ""}
+            showAssistantActions={showAssistantActions}
           />
         ))}
       </div>
 
-      {askPopover.open && (
+      {askPopover.open && typeof onAskSelection === "function" && (
         <button
           type="button"
           className="selection-ask-btn"
@@ -325,6 +332,7 @@ const MessageItem = memo(function MessageItem({
   onAssistantFeedback,
   onAssistantRegenerate,
   promptMessageId,
+  showAssistantActions,
 }) {
   const [copied, setCopied] = useState(false);
   const rowRef = useCallback(
@@ -398,7 +406,7 @@ const MessageItem = memo(function MessageItem({
           <div className="streaming-placeholder">正在回答中...</div>
         ) : null}
 
-        {m.role === "assistant" && !m.streaming && (
+        {showAssistantActions && m.role === "assistant" && !m.streaming && (
           <div className="msg-actions">
             <button
               type="button"

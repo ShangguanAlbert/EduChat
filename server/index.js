@@ -28,6 +28,26 @@ const EXCEL_PREVIEW_MAX_SHEETS = 8;
 const PASSWORD_MIN_LENGTH = 6;
 const AUTH_TOKEN_TTL_SECONDS = 12 * 60 * 60;
 const ADMIN_TOKEN_TTL_SECONDS = 2 * 60 * 60;
+const AGENT_IDS = ["A", "B", "C", "D"];
+const ADMIN_CONFIG_KEY = "global";
+const SYSTEM_PROMPT_MAX_LENGTH = 24000;
+const DEFAULT_SYSTEM_PROMPT_FALLBACK = "你是用户的助手";
+const RUNTIME_CONTEXT_ROUNDS_MAX = 20;
+const RUNTIME_MAX_OUTPUT_TOKENS = 8192;
+const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
+  protocol: "chat",
+  creativityMode: "balanced",
+  temperature: 0.6,
+  topP: 1,
+  frequencyPenalty: 0,
+  presencePenalty: 0,
+  contextRounds: 10,
+  maxOutputTokens: 4096,
+  maxReasoningTokens: 0,
+  reasoningEffort: "low",
+  includeCurrentTime: false,
+  injectSafetyPrompt: false,
+});
 const scryptAsync = promisify(crypto.scrypt);
 const CRC32_TABLE = createCrc32Table();
 
@@ -184,6 +204,104 @@ const chatStateSchema = new mongoose.Schema(
 const ChatState =
   mongoose.models.ChatState || mongoose.model("ChatState", chatStateSchema);
 
+const runtimeConfigSchema = new mongoose.Schema(
+  {
+    protocol: { type: String, default: DEFAULT_AGENT_RUNTIME_CONFIG.protocol },
+    creativityMode: {
+      type: String,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.creativityMode,
+    },
+    temperature: { type: Number, default: DEFAULT_AGENT_RUNTIME_CONFIG.temperature },
+    topP: { type: Number, default: DEFAULT_AGENT_RUNTIME_CONFIG.topP },
+    frequencyPenalty: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty,
+    },
+    presencePenalty: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.presencePenalty,
+    },
+    contextRounds: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.contextRounds,
+    },
+    maxOutputTokens: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.maxOutputTokens,
+    },
+    maxReasoningTokens: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.maxReasoningTokens,
+    },
+    reasoningEffort: {
+      type: String,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.reasoningEffort,
+    },
+    includeCurrentTime: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.includeCurrentTime,
+    },
+    injectSafetyPrompt: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.injectSafetyPrompt,
+    },
+  },
+  { _id: false },
+);
+
+const adminConfigSchema = new mongoose.Schema(
+  {
+    key: {
+      type: String,
+      required: true,
+      unique: true,
+      default: ADMIN_CONFIG_KEY,
+      index: true,
+    },
+    agentSystemPrompts: {
+      type: new mongoose.Schema(
+        {
+          A: { type: String, default: "" },
+          B: { type: String, default: "" },
+          C: { type: String, default: "" },
+          D: { type: String, default: "" },
+        },
+        { _id: false },
+      ),
+      default: () => ({
+        A: "",
+        B: "",
+        C: "",
+        D: "",
+      }),
+    },
+    agentRuntimeConfigs: {
+      type: new mongoose.Schema(
+        {
+          A: { type: runtimeConfigSchema, default: () => ({}) },
+          B: { type: runtimeConfigSchema, default: () => ({}) },
+          C: { type: runtimeConfigSchema, default: () => ({}) },
+          D: { type: runtimeConfigSchema, default: () => ({}) },
+        },
+        { _id: false },
+      ),
+      default: () => ({
+        A: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
+        B: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
+        C: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
+        D: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
+      }),
+    },
+  },
+  {
+    timestamps: true,
+    collection: "admin_configs",
+  },
+);
+
+const AdminConfig =
+  mongoose.models.AdminConfig || mongoose.model("AdminConfig", adminConfigSchema);
+
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
@@ -207,8 +325,9 @@ app.get("/api/auth/status", async (_req, res) => {
 
 app.get("/api/chat/bootstrap", requireChatAuth, async (req, res) => {
   const user = req.authUser;
-  const [stateDoc] = await Promise.all([
+  const [stateDoc, adminConfig] = await Promise.all([
     ChatState.findOne({ userId: user._id }).lean(),
+    readAdminAgentConfig(),
   ]);
 
   const normalizedProfile = sanitizeUserProfile(user.profile);
@@ -221,6 +340,7 @@ app.get("/api/chat/bootstrap", requireChatAuth, async (req, res) => {
     profile: normalizedProfile,
     profileComplete,
     state,
+    agentRuntimeConfigs: resolveAgentRuntimeConfigs(adminConfig.runtimeConfigs),
   });
 });
 
@@ -505,6 +625,72 @@ app.post("/api/auth/admin/login", async (req, res) => {
   });
 });
 
+app.get("/api/auth/admin/agent-prompts", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+
+  const config = await readAdminAgentConfig();
+  res.json(buildAdminAgentSettingsResponse(config));
+});
+
+app.put("/api/auth/admin/agent-prompts", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+
+  const prompts = sanitizeAgentPromptPayload(req.body?.prompts);
+  const previous = await readAdminAgentConfig();
+  const doc = await AdminConfig.findOneAndUpdate(
+    { key: ADMIN_CONFIG_KEY },
+    {
+      $set: {
+        key: ADMIN_CONFIG_KEY,
+        agentSystemPrompts: prompts,
+        agentRuntimeConfigs: previous.runtimeConfigs,
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+    },
+  ).lean();
+
+  const config = normalizeAdminConfigDoc(doc);
+  res.json(buildAdminAgentSettingsResponse(config));
+});
+
+app.get("/api/auth/admin/agent-settings", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+  const config = await readAdminAgentConfig();
+  res.json(buildAdminAgentSettingsResponse(config));
+});
+
+app.put("/api/auth/admin/agent-settings", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+
+  const prompts = sanitizeAgentPromptPayload(req.body?.prompts);
+  const runtimeConfigs = sanitizeAgentRuntimeConfigsPayload(
+    req.body?.runtimeConfigs,
+  );
+
+  const doc = await AdminConfig.findOneAndUpdate(
+    { key: ADMIN_CONFIG_KEY },
+    {
+      $set: {
+        key: ADMIN_CONFIG_KEY,
+        agentSystemPrompts: prompts,
+        agentRuntimeConfigs: runtimeConfigs,
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+    },
+  ).lean();
+
+  const config = normalizeAdminConfigDoc(doc);
+  res.json(buildAdminAgentSettingsResponse(config));
+});
+
 app.get("/api/auth/admin/users", async (req, res) => {
   if (!(await authenticateAdminRequest(req, res))) return;
 
@@ -602,22 +788,45 @@ app.get("/api/auth/admin/export/chats-zip", async (req, res) => {
   res.send(zipBuffer);
 });
 
+app.delete("/api/auth/admin/chats", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+
+  const result = await ChatState.deleteMany({});
+  res.json({
+    ok: true,
+    deletedCount: Number(result?.deletedCount || 0),
+  });
+});
+
+app.post(
+  "/api/auth/admin/agent-debug-stream",
+  requireAdminAuth,
+  upload.array("files", MAX_FILES),
+  async (req, res) => {
+    const agentId = sanitizeAgent(req.body?.agentId || "A");
+    const messages = readRequestMessages(req.body?.messages);
+    const runtimeConfig = sanitizeSingleAgentRuntimeConfig(
+      readJsonLikeField(req.body?.runtimeConfig, {}),
+    );
+    const files = Array.isArray(req.files) ? req.files : [];
+
+    await streamAgentResponse({
+      res,
+      agentId,
+      messages,
+      files,
+      runtimeConfig,
+      attachUploadedFiles: files.length > 0,
+    });
+  },
+);
+
 app.post(
   "/api/chat/stream",
   requireChatAuth,
   upload.array("files", MAX_FILES),
   async (req, res) => {
-    const agentId = (req.body.agentId || "A").toUpperCase();
-    const model = getModelByAgent(agentId);
-    const provider = getProviderByAgent(agentId);
-    const providerConfig = getProviderConfig(provider);
-    if (!providerConfig.apiKey) {
-      res.status(500).json({
-        error: providerConfig.missingKeyMessage,
-      });
-      return;
-    }
-
+    const agentId = sanitizeAgent(req.body?.agentId || "A");
     let messages = [];
     try {
       messages = JSON.parse(req.body.messages || "[]");
@@ -626,92 +835,13 @@ app.post(
       return;
     }
 
-    const systemPrompt = getSystemPromptByAgent(agentId);
-    const temperature = normalizeTemperature(req.body.temperature);
-    const topP = normalizeTopP(req.body.topP);
-    const reasoningEffortRequested = normalizeReasoningEffort(
-      req.body.reasoningEffort ?? process.env.DEFAULT_REASONING_EFFORT ?? "low",
-    );
-    const reasoning = resolveReasoningPolicy(
-      model,
-      reasoningEffortRequested,
-      provider,
-    );
-
-    const safeMessages = normalizeMessages(messages);
-    if (safeMessages.length === 0) {
-      res.status(400).json({ error: "Messages cannot be empty" });
-      return;
-    }
-
-    const finalMessages = [];
-    if (systemPrompt) {
-      finalMessages.push({ role: "system", content: systemPrompt });
-    }
-    finalMessages.push(...safeMessages);
-
-    const files = req.files || [];
-    await attachFilesToLatestUserMessage(finalMessages, files);
-
-    const payload = {
-      model,
-      stream: true,
-      messages: finalMessages,
-      temperature,
-      top_p: topP,
-    };
-    if (reasoning.enabled) {
-      payload.reasoning = { effort: reasoning.effort };
-    }
-
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders?.();
-    writeEvent(res, "meta", {
-      provider,
-      model,
-      reasoningRequested: reasoningEffortRequested,
-      reasoningApplied: reasoning.effort,
-      reasoningEnabled: reasoning.enabled,
-      reasoningForced: reasoning.forced,
+    await streamAgentResponse({
+      res,
+      agentId,
+      messages,
+      files: req.files || [],
+      attachUploadedFiles: true,
     });
-
-    let upstream;
-    try {
-      upstream = await fetch(providerConfig.endpoint, {
-        method: "POST",
-        headers: buildProviderHeaders(provider, providerConfig.apiKey),
-        body: JSON.stringify(payload),
-      });
-    } catch (error) {
-      console.error(`[${provider}] request failed:`, error);
-      writeEvent(res, "error", {
-        message: `${provider} request failed: ${error.message}`,
-      });
-      res.end();
-      return;
-    }
-
-    if (!upstream.ok || !upstream.body) {
-      const detail = await safeReadText(upstream);
-      console.error(`[${provider}] upstream error:`, upstream.status, detail);
-      writeEvent(res, "error", {
-        message: `${provider} error (${upstream.status}): ${detail || "unknown error"}`,
-      });
-      res.end();
-      return;
-    }
-
-    try {
-      await pipeOpenRouterSse(upstream, res, reasoning.enabled);
-      writeEvent(res, "done", { ok: true });
-    } catch (error) {
-      console.error(`[${provider}] stream handling failed:`, error);
-      writeEvent(res, "error", { message: error.message || "stream failed" });
-    } finally {
-      res.end();
-    }
   },
 );
 
@@ -823,6 +953,196 @@ async function attachFilesToLatestUserMessage(messages, files) {
   if (parts.length > 0) {
     msg.content = parts;
   }
+}
+
+async function streamAgentResponse({
+  res,
+  agentId,
+  messages,
+  files = [],
+  runtimeConfig = null,
+  attachUploadedFiles = true,
+}) {
+  const model = getModelByAgent(agentId);
+  const provider = getProviderByAgent(agentId);
+  const providerConfig = getProviderConfig(provider);
+  if (!providerConfig.apiKey) {
+    res.status(500).json({
+      error: providerConfig.missingKeyMessage,
+    });
+    return;
+  }
+
+  const systemPrompt = await getSystemPromptByAgent(agentId);
+  const config = runtimeConfig || (await getResolvedAgentRuntimeConfig(agentId));
+  const reasoningEffortRequested = normalizeReasoningEffort(
+    config.reasoningEffort ?? process.env.DEFAULT_REASONING_EFFORT ?? "low",
+  );
+  const reasoning = resolveReasoningPolicy(
+    model,
+    reasoningEffortRequested,
+    provider,
+  );
+
+  let safeMessages = normalizeMessages(messages);
+  if (
+    safeMessages.length === 0 &&
+    attachUploadedFiles &&
+    Array.isArray(files) &&
+    files.length > 0
+  ) {
+    safeMessages = [{ role: "user", content: "请基于附件内容进行分析和回答。" }];
+  }
+
+  if (safeMessages.length === 0) {
+    res.status(400).json({ error: "Messages cannot be empty" });
+    return;
+  }
+
+  const narrowedMessages = pickRecentUserRounds(
+    safeMessages,
+    sanitizeRuntimeInteger(
+      config.contextRounds,
+      DEFAULT_AGENT_RUNTIME_CONFIG.contextRounds,
+      1,
+      RUNTIME_CONTEXT_ROUNDS_MAX,
+    ),
+  );
+
+  let composedSystemPrompt = systemPrompt || "";
+  if (config.includeCurrentTime) {
+    const nowText = formatDisplayTime(new Date());
+    composedSystemPrompt = [composedSystemPrompt, `当前时间: ${nowText}`]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  if (config.injectSafetyPrompt) {
+    composedSystemPrompt = [
+      composedSystemPrompt,
+      "请遵循安全与事实优先原则：不编造来源，不提供危险或违法行为的具体执行步骤。",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  const finalMessages = [];
+  if (composedSystemPrompt) {
+    finalMessages.push({ role: "system", content: composedSystemPrompt });
+  }
+  finalMessages.push(...narrowedMessages);
+
+  if (attachUploadedFiles && files.length > 0) {
+    await attachFilesToLatestUserMessage(finalMessages, files);
+  }
+
+  const payload = {
+    model,
+    stream: true,
+    messages: finalMessages,
+    temperature: sanitizeRuntimeNumber(
+      config.temperature,
+      DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
+      0,
+      2,
+    ),
+    top_p: sanitizeRuntimeNumber(
+      config.topP,
+      DEFAULT_AGENT_RUNTIME_CONFIG.topP,
+      0,
+      1,
+    ),
+    frequency_penalty: sanitizeRuntimeNumber(
+      config.frequencyPenalty,
+      DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty,
+      -2,
+      2,
+    ),
+    presence_penalty: sanitizeRuntimeNumber(
+      config.presencePenalty,
+      DEFAULT_AGENT_RUNTIME_CONFIG.presencePenalty,
+      -2,
+      2,
+    ),
+    max_tokens: sanitizeRuntimeInteger(
+      config.maxOutputTokens,
+      DEFAULT_AGENT_RUNTIME_CONFIG.maxOutputTokens,
+      64,
+      RUNTIME_MAX_OUTPUT_TOKENS,
+    ),
+  };
+  if (reasoning.enabled) {
+    payload.reasoning = { effort: reasoning.effort };
+  }
+
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+  writeEvent(res, "meta", {
+    provider,
+    model,
+    reasoningRequested: reasoningEffortRequested,
+    reasoningApplied: reasoning.effort,
+    reasoningEnabled: reasoning.enabled,
+    reasoningForced: reasoning.forced,
+    runtimeConfig: config,
+  });
+
+  let upstream;
+  try {
+    upstream = await fetch(providerConfig.endpoint, {
+      method: "POST",
+      headers: buildProviderHeaders(provider, providerConfig.apiKey),
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.error(`[${provider}] request failed:`, error);
+    writeEvent(res, "error", {
+      message: `${provider} request failed: ${error.message}`,
+    });
+    res.end();
+    return;
+  }
+
+  if (!upstream.ok || !upstream.body) {
+    const detail = await safeReadText(upstream);
+    console.error(`[${provider}] upstream error:`, upstream.status, detail);
+    const message = formatProviderUpstreamError(provider, upstream.status, detail);
+    writeEvent(res, "error", {
+      message,
+    });
+    res.end();
+    return;
+  }
+
+  try {
+    await pipeOpenRouterSse(upstream, res, reasoning.enabled);
+    writeEvent(res, "done", { ok: true });
+  } catch (error) {
+    console.error(`[${provider}] stream handling failed:`, error);
+    writeEvent(res, "error", { message: error.message || "stream failed" });
+  } finally {
+    res.end();
+  }
+}
+
+function pickRecentUserRounds(messages, maxRounds = 10) {
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  const safeRounds = sanitizeRuntimeInteger(maxRounds, 10, 1, RUNTIME_CONTEXT_ROUNDS_MAX);
+
+  let seenUser = 0;
+  let startIdx = 0;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") {
+      seenUser += 1;
+      if (seenUser > safeRounds) {
+        startIdx = i + 1;
+        break;
+      }
+    }
+  }
+
+  return messages.slice(startIdx);
 }
 
 async function parseFileContent(file) {
@@ -1144,18 +1464,239 @@ function getModelByAgent(agentId) {
   return map[agentId] || map.A;
 }
 
-function getSystemPromptByAgent(agentId) {
-  const defaultPrompt = String(
-    process.env.DEFAULT_SYSTEM_PROMPT || "你是用户的学术助手",
+async function getSystemPromptByAgent(agentId) {
+  const fallback = getDefaultSystemPrompt();
+  try {
+    const config = await readAdminAgentConfig();
+    const targetAgent = sanitizeAgent(agentId);
+    const prompt = config.prompts[targetAgent] || "";
+    return prompt || fallback;
+  } catch (error) {
+    console.error("Failed to load admin agent prompts:", error);
+    return fallback;
+  }
+}
+
+async function getResolvedAgentRuntimeConfig(agentId) {
+  const targetAgent = sanitizeAgent(agentId);
+  try {
+    const config = await readAdminAgentConfig();
+    const resolved = resolveAgentRuntimeConfigs(config.runtimeConfigs);
+    return resolved[targetAgent] || normalizeRuntimeConfigFromPreset({});
+  } catch (error) {
+    console.error("Failed to load admin runtime configs:", error);
+    return normalizeRuntimeConfigFromPreset({});
+  }
+}
+
+function getDefaultSystemPrompt() {
+  const prompt = String(
+    process.env.DEFAULT_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT_FALLBACK,
   ).trim();
-  const map = {
-    A: process.env.AGENT_SYSTEM_PROMPT_A,
-    B: process.env.AGENT_SYSTEM_PROMPT_B,
-    C: process.env.AGENT_SYSTEM_PROMPT_C,
-    D: process.env.AGENT_SYSTEM_PROMPT_D,
+  return prompt || DEFAULT_SYSTEM_PROMPT_FALLBACK;
+}
+
+async function readAdminAgentConfig() {
+  const doc = await AdminConfig.findOne({ key: ADMIN_CONFIG_KEY }).lean();
+  return normalizeAdminConfigDoc(doc);
+}
+
+function normalizeAdminConfigDoc(doc) {
+  return {
+    prompts: sanitizeAgentPromptPayload(doc?.agentSystemPrompts),
+    runtimeConfigs: sanitizeAgentRuntimeConfigsPayload(doc?.agentRuntimeConfigs),
+    updatedAt: sanitizeIsoDate(doc?.updatedAt),
   };
-  const raw = String(map[agentId] || "").trim();
-  return raw || defaultPrompt;
+}
+
+function sanitizeAgentPromptPayload(input) {
+  const source = input && typeof input === "object" ? input : {};
+  return {
+    A: sanitizeSystemPrompt(source.A),
+    B: sanitizeSystemPrompt(source.B),
+    C: sanitizeSystemPrompt(source.C),
+    D: sanitizeSystemPrompt(source.D),
+  };
+}
+
+function resolveAgentSystemPrompts(prompts) {
+  const defaultPrompt = getDefaultSystemPrompt();
+  const normalized = sanitizeAgentPromptPayload(prompts);
+  const resolved = {};
+  AGENT_IDS.forEach((agentId) => {
+    resolved[agentId] = normalized[agentId] || defaultPrompt;
+  });
+  return resolved;
+}
+
+function sanitizeAgentRuntimeConfigsPayload(input) {
+  const source = input && typeof input === "object" ? input : {};
+  const next = {};
+  AGENT_IDS.forEach((agentId) => {
+    next[agentId] = sanitizeSingleAgentRuntimeConfig(source[agentId]);
+  });
+  return next;
+}
+
+function sanitizeSingleAgentRuntimeConfig(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const protocol = sanitizeRuntimeProtocol(source.protocol);
+  const creativityMode = sanitizeCreativityMode(source.creativityMode);
+  const temperature = sanitizeRuntimeNumber(
+    source.temperature,
+    DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
+    0,
+    2,
+  );
+  const topP = sanitizeRuntimeNumber(
+    source.topP,
+    DEFAULT_AGENT_RUNTIME_CONFIG.topP,
+    0,
+    1,
+  );
+  const frequencyPenalty = sanitizeRuntimeNumber(
+    source.frequencyPenalty,
+    DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty,
+    -2,
+    2,
+  );
+  const presencePenalty = sanitizeRuntimeNumber(
+    source.presencePenalty,
+    DEFAULT_AGENT_RUNTIME_CONFIG.presencePenalty,
+    -2,
+    2,
+  );
+  const contextRounds = sanitizeRuntimeInteger(
+    source.contextRounds,
+    DEFAULT_AGENT_RUNTIME_CONFIG.contextRounds,
+    1,
+    RUNTIME_CONTEXT_ROUNDS_MAX,
+  );
+  const maxOutputTokens = sanitizeRuntimeInteger(
+    source.maxOutputTokens,
+    DEFAULT_AGENT_RUNTIME_CONFIG.maxOutputTokens,
+    64,
+    RUNTIME_MAX_OUTPUT_TOKENS,
+  );
+  const maxReasoningTokens = sanitizeRuntimeInteger(
+    source.maxReasoningTokens,
+    DEFAULT_AGENT_RUNTIME_CONFIG.maxReasoningTokens,
+    0,
+    RUNTIME_MAX_OUTPUT_TOKENS,
+  );
+  const reasoningEffort = normalizeReasoningEffort(source.reasoningEffort);
+
+  return {
+    protocol,
+    creativityMode,
+    temperature,
+    topP,
+    frequencyPenalty,
+    presencePenalty,
+    contextRounds,
+    maxOutputTokens,
+    maxReasoningTokens,
+    reasoningEffort,
+    includeCurrentTime: !!source.includeCurrentTime,
+    injectSafetyPrompt: !!source.injectSafetyPrompt,
+  };
+}
+
+function resolveAgentRuntimeConfigs(runtimeConfigs) {
+  const normalized = sanitizeAgentRuntimeConfigsPayload(runtimeConfigs);
+  const resolved = {};
+  AGENT_IDS.forEach((agentId) => {
+    resolved[agentId] = normalizeRuntimeConfigFromPreset(normalized[agentId]);
+  });
+  return resolved;
+}
+
+function normalizeRuntimeConfigFromPreset(runtimeConfig) {
+  const config = sanitizeSingleAgentRuntimeConfig(runtimeConfig);
+  const base = getRuntimePresetDefaults(config.creativityMode);
+  return {
+    ...config,
+    temperature:
+      config.creativityMode === "custom"
+        ? config.temperature
+        : sanitizeRuntimeNumber(base.temperature, config.temperature, 0, 2),
+    topP:
+      config.creativityMode === "custom"
+        ? config.topP
+        : sanitizeRuntimeNumber(base.topP, config.topP, 0, 1),
+    frequencyPenalty:
+      config.creativityMode === "custom"
+        ? config.frequencyPenalty
+        : sanitizeRuntimeNumber(base.frequencyPenalty, config.frequencyPenalty, -2, 2),
+    presencePenalty:
+      config.creativityMode === "custom"
+        ? config.presencePenalty
+        : sanitizeRuntimeNumber(base.presencePenalty, config.presencePenalty, -2, 2),
+  };
+}
+
+function getRuntimePresetDefaults(mode) {
+  if (mode === "precise") {
+    return { temperature: 0.2, topP: 0.8, frequencyPenalty: 0, presencePenalty: -0.1 };
+  }
+  if (mode === "creative") {
+    return { temperature: 1.1, topP: 1, frequencyPenalty: 0.2, presencePenalty: 0.3 };
+  }
+  return { temperature: 0.6, topP: 1, frequencyPenalty: 0, presencePenalty: 0 };
+}
+
+function sanitizeRuntimeProtocol(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "responses") return "responses";
+  return "chat";
+}
+
+function sanitizeCreativityMode(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "precise" || key === "balanced" || key === "creative" || key === "custom") {
+    return key;
+  }
+  return "balanced";
+}
+
+function sanitizeRuntimeNumber(value, fallback, min, max) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+}
+
+function sanitizeRuntimeInteger(value, fallback, min, max) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  const normalized = Math.round(num);
+  return Math.min(max, Math.max(min, normalized));
+}
+
+function buildAdminAgentSettingsResponse(config) {
+  const resolvedPrompts = resolveAgentSystemPrompts(config.prompts);
+  const resolvedRuntimeConfigs = resolveAgentRuntimeConfigs(config.runtimeConfigs);
+  return {
+    ok: true,
+    defaultSystemPrompt: getDefaultSystemPrompt(),
+    prompts: config.prompts,
+    resolvedPrompts,
+    runtimeConfigs: config.runtimeConfigs,
+    resolvedRuntimeConfigs,
+    updatedAt: config.updatedAt,
+  };
+}
+
+function sanitizeSystemPrompt(value) {
+  const text = String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\u0000/g, "");
+  if (!text.trim()) return "";
+  return text.slice(0, SYSTEM_PROMPT_MAX_LENGTH);
 }
 
 function getProviderByAgent(agentId) {
@@ -1172,20 +1713,6 @@ function getProviderByAgent(agentId) {
     D: process.env.AGENT_PROVIDER_D || defaults.D,
   };
   return normalizeProvider(map[agentId] || map.A);
-}
-
-function normalizeTemperature(v) {
-  const fallback = Number(process.env.DEFAULT_TEMPERATURE ?? 0.6);
-  const n = Number(v ?? fallback);
-  if (!Number.isFinite(n)) return 0.6;
-  return Math.min(2, Math.max(0, n));
-}
-
-function normalizeTopP(v) {
-  const fallback = Number(process.env.DEFAULT_TOP_P ?? 1);
-  const n = Number(v ?? fallback);
-  if (!Number.isFinite(n)) return 1;
-  return Math.min(1, Math.max(0, n));
 }
 
 function normalizeReasoningEffort(v) {
@@ -1264,11 +1791,7 @@ function getProviderConfig(provider) {
       endpoint:
         process.env.ALIYUN_CHAT_ENDPOINT ||
         "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-      apiKey: (
-        process.env.ALIYUN_API_KEY ||
-        process.env.DASHSCOPE_API_KEY ||
-        ""
-      ).trim(),
+      apiKey: readEnvApiKey("ALIYUN_API_KEY", "DASHSCOPE_API_KEY"),
       missingKeyMessage:
         "未检测到阿里云 API Key。请在 .env 中配置 ALIYUN_API_KEY（或 DASHSCOPE_API_KEY）。",
     };
@@ -1279,11 +1802,7 @@ function getProviderConfig(provider) {
       endpoint:
         process.env.VOLCENGINE_CHAT_ENDPOINT ||
         "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-      apiKey: (
-        process.env.VOLCENGINE_API_KEY ||
-        process.env.ARK_API_KEY ||
-        ""
-      ).trim(),
+      apiKey: readEnvApiKey("VOLCENGINE_API_KEY", "ARK_API_KEY"),
       missingKeyMessage:
         "未检测到火山引擎 API Key。请在 .env 中配置 VOLCENGINE_API_KEY（或 ARK_API_KEY）。",
     };
@@ -1293,15 +1812,34 @@ function getProviderConfig(provider) {
     endpoint:
       process.env.OPENROUTER_CHAT_ENDPOINT ||
       "https://openrouter.ai/api/v1/chat/completions",
-    apiKey: (
-      process.env.OPENROUTER_API_KEY ||
-      process.env.OPEN_ROUTER_API_KEY ||
-      process.env.OPENAI_API_KEY ||
-      ""
-    ).trim(),
+    apiKey: readEnvApiKey(
+      "OPENROUTER_API_KEY",
+      "OPEN_ROUTER_API_KEY",
+      "OPENAI_API_KEY",
+    ),
     missingKeyMessage:
       "未检测到 OpenRouter API Key。请在 .env 中配置 OPENROUTER_API_KEY（或 OPEN_ROUTER_API_KEY / OPENAI_API_KEY）。",
   };
+}
+
+function readEnvApiKey(...names) {
+  for (const name of names) {
+    const raw = String(process.env[name] || "").trim();
+    if (!raw) continue;
+    if (isPlaceholderApiKey(raw)) continue;
+    return raw;
+  }
+  return "";
+}
+
+function isPlaceholderApiKey(value) {
+  const key = String(value || "").trim().toLowerCase();
+  if (!key) return true;
+  if (key.startsWith("your_") && key.includes("api_key")) return true;
+  if (key.includes("replace_me")) return true;
+  if (key.includes("your-api-key")) return true;
+  if (key.includes("xxxx")) return true;
+  return false;
 }
 
 function buildProviderHeaders(provider, apiKey) {
@@ -1318,6 +1856,24 @@ function buildProviderHeaders(provider, apiKey) {
   }
 
   return headers;
+}
+
+function formatProviderUpstreamError(provider, status, detail) {
+  const raw = String(detail || "").trim();
+
+  if (
+    provider === "openrouter" &&
+    status === 401 &&
+    /cookie auth credentials/i.test(raw)
+  ) {
+    return "OpenRouter 认证失败：未检测到有效 API Key。请在 .env 中配置真实 OPENROUTER_API_KEY（不是示例占位符），然后重启服务。";
+  }
+
+  if (provider === "openrouter" && status === 401) {
+    return "OpenRouter 认证失败：请检查 OPENROUTER_API_KEY 是否正确且仍有效。";
+  }
+
+  return `${provider} error (${status}): ${raw || "unknown error"}`;
 }
 
 function requireChatAuth(req, res, next) {
@@ -1340,6 +1896,34 @@ function requireChatAuth(req, res, next) {
     .catch((error) => {
       next(error);
     });
+}
+
+async function requireAdminAuth(req, res, next) {
+  try {
+    const admin = await authenticateAdminRequest(req, res);
+    if (!admin) return;
+    req.authAdmin = admin;
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+function readJsonLikeField(raw, fallback) {
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  }
+  if (raw && typeof raw === "object") return raw;
+  return fallback;
+}
+
+function readRequestMessages(rawMessages) {
+  const parsed = readJsonLikeField(rawMessages, []);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function defaultChatState() {

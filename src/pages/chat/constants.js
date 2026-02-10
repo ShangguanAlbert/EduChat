@@ -5,7 +5,7 @@ export const AGENT_META = {
   D: { name: "智能体 D" },
 };
 
-export const DEFAULT_SYSTEM_PROMPT = "你是用户的学术助手";
+export const DEFAULT_SYSTEM_PROMPT = "你是用户的助手";
 export const USER_INFO_STORAGE_KEY = "educhat_user_info";
 export const USER_INFO_UPDATED_EVENT = "educhat:user-info-updated";
 

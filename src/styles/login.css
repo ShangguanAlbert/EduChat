@@ -352,6 +352,12 @@
   padding: 20px;
 }
 
+.login-modal-card-admin {
+  width: min(960px, 100%);
+  max-height: min(88vh, 980px);
+  overflow: auto;
+}
+
 .login-modal-head {
   margin-bottom: 12px;
 }
@@ -456,13 +462,136 @@
 .login-admin-export {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+}
+
+.login-admin-panel {
+  border: 1px solid #d6dde8;
+  border-radius: 14px;
+  padding: 12px;
+  background: #f8faff;
+}
+
+.login-admin-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.login-admin-section-title {
+  margin: 0;
+  font-size: 16px;
+  color: #111827;
 }
 
 .login-admin-export-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.login-admin-prompts-list {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.login-admin-prompt-card {
+  border: 1px solid #dbe3f0;
+  border-radius: 12px;
+  background: #fff;
+  padding: 10px;
+}
+
+.login-admin-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.login-admin-prompt-agent {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.login-admin-prompt-mode {
+  font-size: 12px;
+  color: #475569;
+  background: #e8eefb;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.login-admin-prompt-input {
+  width: 100%;
+  min-height: 124px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #cfd6e2;
+  background: #fff;
+  outline: none;
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  font-family: inherit;
+  transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.login-admin-prompt-input:focus {
+  border-color: var(--login-focus);
+  box-shadow: 0 0 0 4px rgba(91, 156, 255, 0.18);
+}
+
+.login-admin-prompt-meta {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.login-admin-prompt-preview-wrap {
+  margin-top: 10px;
+  border: 1px solid #d5ddeb;
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #fcfdff;
+}
+
+.login-admin-prompt-preview-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.login-admin-prompt-preview {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.login-admin-prompt-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.login-admin-success {
+  margin: 8px 0 0;
+  min-height: 18px;
+  font-size: 12px;
+  color: #0a7a40;
 }
 
 .login-admin-users-table-wrap {
@@ -521,5 +650,14 @@
   .login-modal-card {
     border-radius: 18px;
     padding: 16px;
+  }
+
+  .login-modal-card-admin {
+    width: 100%;
+    max-height: 90vh;
+  }
+
+  .login-admin-prompts-list {
+    grid-template-columns: 1fr;
   }
 }

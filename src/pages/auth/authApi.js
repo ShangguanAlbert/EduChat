@@ -102,6 +102,20 @@ export function exportAdminChatsTxt(adminToken) {
   });
 }
 
+export function fetchAdminAgentPrompts(adminToken) {
+  return request("/api/auth/admin/agent-prompts", {
+    headers: { Authorization: `Bearer ${adminToken}` },
+  });
+}
+
+export function saveAdminAgentPrompts(adminToken, payload) {
+  return request("/api/auth/admin/agent-prompts", {
+    method: "PUT",
+    headers: { Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function exportAdminChatsZip(adminToken) {
   const resp = await fetch("/api/auth/admin/export/chats-zip", {
     headers: { Authorization: `Bearer ${adminToken}` },

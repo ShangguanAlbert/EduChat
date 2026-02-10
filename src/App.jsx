@@ -1,7 +1,9 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage.jsx";
 import ChatPage from "./pages/ChatPage.jsx";
+import AdminSettingsPage from "./pages/AdminSettingsPage.jsx";
 import RequireAuth from "./app/RequireAuth.jsx";
+import RequireAdminAuth from "./app/RequireAdminAuth.jsx";
 
 export default function App() {
   return (
@@ -14,6 +16,15 @@ export default function App() {
           <RequireAuth>
             <ChatPage />
           </RequireAuth>
+        }
+      />
+
+      <Route
+        path="/admin/settings"
+        element={
+          <RequireAdminAuth>
+            <AdminSettingsPage />
+          </RequireAdminAuth>
         }
       />
 

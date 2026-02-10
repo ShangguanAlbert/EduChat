@@ -1,68 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import ModalOverlay from "../components/login/ModalOverlay.jsx";
 import {
-  exportAdminChatsZip,
   adminLogin,
-  exportAdminChatsTxt,
-  exportAdminUsersTxt,
   fetchAuthStatus,
   loginAccount,
   registerAccount,
   resetForgotPassword,
   verifyForgotAccount,
 } from "./auth/authApi.js";
+import { setAdminToken } from "./login/adminSession.js";
+import { EMPTY_AUTH_STATUS, PRIVACY_POLICY_SECTIONS } from "./login/loginConstants.js";
 import "../styles/login.css";
-
-const PRIVACY_POLICY_SECTIONS = [
-  "为保障教学实验与平台运行，本平台会在你使用对话功能时处理必要信息，包括账号标识、对话内容、时间戳和设备基础信息。",
-  "你填写的姓名、学号、性别、年级、班级仅用于教学实验管理、结果分析与导出留档，不会用于与教学无关的用途。",
-  "对话内容可能用于课程改进与模型效果评估，处理过程遵循最小必要原则，并在授权范围内由课程管理方访问。",
-  "你可在“用户信息”中更正个人资料。提交即表示你已阅读并同意本隐私政策（知情同意）。",
-];
-
-const EMPTY_AUTH_STATUS = {
-  hasAnyUser: false,
-  hasAdmin: false,
-  adminUsername: "admin",
-};
 
 function readErrorMessage(error) {
   return error?.message || "请求失败，请稍后再试。";
-}
-
-function downloadTxt(filename, content) {
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  downloadBlob(filename, blob);
-}
-
-function downloadBlob(filename, blob) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-function ModalOverlay({ title, subtitle = "", onClose, children }) {
-  return (
-    <div className="login-modal-overlay" role="presentation" onClick={onClose}>
-      <div
-        className="login-modal-card"
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="login-modal-head">
-          <h3 className="login-modal-title">{title}</h3>
-          {subtitle ? <p className="login-modal-subtitle">{subtitle}</p> : null}
-        </div>
-        {children}
-      </div>
-    </div>
-  );
 }
 
 export default function LoginPage() {
@@ -100,11 +53,6 @@ export default function LoginPage() {
   const [adminPassword, setAdminPassword] = useState("");
   const [adminLoginLoading, setAdminLoginLoading] = useState(false);
   const [adminLoginErr, setAdminLoginErr] = useState("");
-
-  const [showAdminExportModal, setShowAdminExportModal] = useState(false);
-  const [adminToken, setAdminToken] = useState("");
-  const [adminExportLoading, setAdminExportLoading] = useState("");
-  const [adminExportErr, setAdminExportErr] = useState("");
 
   const bootstrapMode = !authStatus.hasAnyUser;
 
@@ -222,7 +170,9 @@ export default function LoginPage() {
 
     setForgotMatchLoading(true);
     try {
-      const data = await verifyForgotAccount({ username: forgotUsername.trim() });
+      const data = await verifyForgotAccount({
+        username: forgotUsername.trim(),
+      });
       if (!data.exists) {
         setForgotMatched(false);
         setForgotErr("未找到该账号，请确认后再试。");
@@ -269,14 +219,12 @@ export default function LoginPage() {
   function onAdminEntryClick() {
     setAdminNotice("");
     setAdminLoginErr("");
-    setAdminExportErr("");
     if (authStatusLoading) return;
     if (!authStatus.hasAdmin) {
       setAdminNotice("管理员未注册，请先注册");
       return;
     }
 
-    setAdminToken("");
     setAdminPassword("");
     setShowAdminLoginModal(true);
   }
@@ -284,8 +232,11 @@ export default function LoginPage() {
   async function onAdminLoginSubmit(e) {
     e.preventDefault();
     setAdminLoginErr("");
-    setAdminExportErr("");
-    if (!adminPassword) return setAdminLoginErr("请输入管理员密码。");
+
+    if (!adminPassword) {
+      setAdminLoginErr("请输入管理员密码。");
+      return;
+    }
 
     setAdminLoginLoading(true);
     try {
@@ -293,70 +244,20 @@ export default function LoginPage() {
         username: adminUsername.trim() || "admin",
         password: adminPassword,
       });
-      setAdminToken(loginData.token || "");
+
+      const nextToken = String(loginData?.token || "").trim();
+      if (!nextToken) {
+        setAdminLoginErr("管理员会话创建失败，请重试。");
+        return;
+      }
+
+      setAdminToken(nextToken);
       setShowAdminLoginModal(false);
-      setShowAdminExportModal(true);
+      navigate("/admin/settings");
     } catch (error) {
       setAdminLoginErr(readErrorMessage(error));
     } finally {
       setAdminLoginLoading(false);
-    }
-  }
-
-  async function onExportAdminUsersTxt() {
-    if (!adminToken) {
-      setAdminExportErr("管理员会话已过期，请重新登录管理员入口。");
-      return;
-    }
-
-    setAdminExportErr("");
-    setAdminExportLoading("users");
-    try {
-      const data = await exportAdminUsersTxt(adminToken);
-      downloadTxt(data.filename || "educhat-users.txt", String(data.content || ""));
-    } catch (error) {
-      setAdminExportErr(readErrorMessage(error));
-    } finally {
-      setAdminExportLoading("");
-    }
-  }
-
-  async function onExportAdminChatsTxt() {
-    if (!adminToken) {
-      setAdminExportErr("管理员会话已过期，请重新登录管理员入口。");
-      return;
-    }
-
-    setAdminExportErr("");
-    setAdminExportLoading("chats");
-    try {
-      const data = await exportAdminChatsTxt(adminToken);
-      downloadTxt(data.filename || "educhat-chats.txt", String(data.content || ""));
-    } catch (error) {
-      setAdminExportErr(readErrorMessage(error));
-    } finally {
-      setAdminExportLoading("");
-    }
-  }
-
-  async function onExportAdminChatsZip() {
-    if (!adminToken) {
-      setAdminExportErr("管理员会话已过期，请重新登录管理员入口。");
-      return;
-    }
-
-    setAdminExportErr("");
-    setAdminExportLoading("zip");
-    try {
-      const data = await exportAdminChatsZip(adminToken);
-      downloadBlob(
-        data.filename || "educhat-chats-by-user.zip",
-        data.blob,
-      );
-    } catch (error) {
-      setAdminExportErr(readErrorMessage(error));
-    } finally {
-      setAdminExportLoading("");
     }
   }
 
@@ -399,7 +300,10 @@ export default function LoginPage() {
           </div>
 
           <div className="login-consent-row">
-            <label className="login-consent-label" htmlFor="privacy-agree-checkbox">
+            <label
+              className="login-consent-label"
+              htmlFor="privacy-agree-checkbox"
+            >
               <input
                 id="privacy-agree-checkbox"
                 className="login-consent-checkbox"
@@ -440,13 +344,21 @@ export default function LoginPage() {
           </div>
 
           <div className="login-footer">
-            <button type="button" className="login-link-btn" onClick={openRegisterModal}>
+            <button
+              type="button"
+              className="login-link-btn"
+              onClick={openRegisterModal}
+            >
               注册账号
             </button>
             <span className="login-footer-divider" aria-hidden="true">
               ·
             </span>
-            <button type="button" className="login-link-btn" onClick={openForgotModal}>
+            <button
+              type="button"
+              className="login-link-btn"
+              onClick={openForgotModal}
+            >
               忘记密码
             </button>
             <span className="login-footer-divider" aria-hidden="true">
@@ -463,7 +375,11 @@ export default function LoginPage() {
         </form>
       </div>
 
-      <button type="button" className="login-admin-entry" onClick={onAdminEntryClick}>
+      <button
+        type="button"
+        className="login-admin-entry"
+        onClick={onAdminEntryClick}
+      >
         管理员入口
       </button>
       {adminNotice ? <p className="login-admin-notice">{adminNotice}</p> : null}
@@ -525,7 +441,11 @@ export default function LoginPage() {
               >
                 取消
               </button>
-              <button type="submit" className="login-modal-btn" disabled={registerLoading}>
+              <button
+                type="submit"
+                className="login-modal-btn"
+                disabled={registerLoading}
+              >
                 {registerLoading ? "注册中…" : "注册"}
               </button>
             </div>
@@ -622,7 +542,7 @@ export default function LoginPage() {
       {showAdminLoginModal && (
         <ModalOverlay
           title="管理员登录"
-          subtitle="仅首个注册账号（admin）可访问管理入口。"
+          subtitle="登录后进入独立管理页面进行导出与智能体配置。"
           onClose={() => setShowAdminLoginModal(false)}
         >
           <form onSubmit={onAdminLoginSubmit}>
@@ -657,63 +577,15 @@ export default function LoginPage() {
               >
                 取消
               </button>
-              <button type="submit" className="login-modal-btn" disabled={adminLoginLoading}>
-                {adminLoginLoading ? "登录中…" : "进入管理"}
+              <button
+                type="submit"
+                className="login-modal-btn"
+                disabled={adminLoginLoading}
+              >
+                {adminLoginLoading ? "登录中…" : "进入管理页面"}
               </button>
             </div>
           </form>
-        </ModalOverlay>
-      )}
-
-      {showAdminExportModal && (
-        <ModalOverlay
-          title="管理员数据导出"
-          subtitle="仅导出，不展示账号密码明细。"
-          onClose={() => {
-            setShowAdminExportModal(false);
-            setAdminToken("");
-            setAdminExportLoading("");
-            setAdminExportErr("");
-          }}
-        >
-          <div className="login-admin-export">
-            <p className="login-modal-subtitle">
-              可导出账号密码 TXT，导出全量聊天 TXT，或按用户分文件打包导出聊天 ZIP（含用户信息、分组、会话、时间戳、模型参数、思路与点赞/踩反馈）。
-            </p>
-            <div className="login-admin-export-actions">
-              <button
-                type="button"
-                className="login-mini-btn"
-                onClick={onExportAdminUsersTxt}
-                disabled={!!adminExportLoading}
-              >
-                {adminExportLoading === "users"
-                  ? "导出中…"
-                  : "导出账号密码数据（TXT）"}
-              </button>
-              <button
-                type="button"
-                className="login-mini-btn"
-                onClick={onExportAdminChatsTxt}
-                disabled={!!adminExportLoading}
-              >
-                {adminExportLoading === "chats"
-                  ? "导出中…"
-                  : "导出聊天数据（TXT）"}
-              </button>
-              <button
-                type="button"
-                className="login-mini-btn"
-                onClick={onExportAdminChatsZip}
-                disabled={!!adminExportLoading}
-              >
-                {adminExportLoading === "zip"
-                  ? "打包中…"
-                  : "导出聊天数据（ZIP 按用户）"}
-              </button>
-            </div>
-            {adminExportErr ? <p className="login-modal-error">{adminExportErr}</p> : null}
-          </div>
         </ModalOverlay>
       )}
 

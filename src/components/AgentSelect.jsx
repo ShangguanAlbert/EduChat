@@ -167,19 +167,23 @@ export default function AgentSelect({
             );
           })}
 
-          <div className="agent-divider" />
-          <button
-            type="button"
-            className="agent-settings-item"
-            onMouseEnter={() => setActiveIndex(selectedIndex)}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              setOpen(false);
-              onOpenApiSettings?.();
-            }}
-          >
-            API 设置
-          </button>
+          {onOpenApiSettings ? (
+            <>
+              <div className="agent-divider" />
+              <button
+                type="button"
+                className="agent-settings-item"
+                onMouseEnter={() => setActiveIndex(selectedIndex)}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  setOpen(false);
+                  onOpenApiSettings();
+                }}
+              >
+                API 设置
+              </button>
+            </>
+          ) : null}
         </div>
       )}
     </div>
