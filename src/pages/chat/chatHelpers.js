@@ -20,6 +20,8 @@ export async function readSseStream(response, handlers) {
         handlers.onToken?.(evt.data?.text || "");
       } else if (evt.event === "reasoning_token") {
         handlers.onReasoningToken?.(evt.data?.text || "");
+      } else if (evt.event === "search_usage") {
+        handlers.onSearchUsage?.(evt.data || {});
       } else if (evt.event === "meta") {
         handlers.onMeta?.(evt.data || {});
       } else if (evt.event === "error") {

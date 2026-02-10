@@ -35,6 +35,8 @@ const DEFAULT_SYSTEM_PROMPT_FALLBACK = "你是用户的助手";
 const RUNTIME_CONTEXT_ROUNDS_MAX = 20;
 const RUNTIME_MAX_OUTPUT_TOKENS = 8192;
 const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
+  provider: "inherit",
+  model: "",
   protocol: "chat",
   creativityMode: "balanced",
   temperature: 0.6,
@@ -44,10 +46,60 @@ const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   contextRounds: 10,
   maxOutputTokens: 4096,
   maxReasoningTokens: 0,
+  enableThinking: true,
   reasoningEffort: "low",
   includeCurrentTime: false,
   injectSafetyPrompt: false,
+  enableWebSearch: false,
+  webSearchMaxKeyword: 2,
+  webSearchResultLimit: 10,
+  webSearchMaxToolCalls: 3,
+  webSearchSourceDouyin: true,
+  webSearchSourceMoji: true,
+  webSearchSourceToutiao: true,
 });
+const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = Object.freeze([
+  {
+    id: "doubao-seed-1-8-251228",
+    aliases: ["doubao-seed-1-8-251228", "doubao-seed-1-8"],
+    supportsThinking: true,
+  },
+  {
+    id: "deepseek-v3-2-251201",
+    aliases: ["deepseek-v3-2-251201", "deepseek-v3-2"],
+    supportsThinking: true,
+  },
+  {
+    id: "doubao-seed-1-6-250615",
+    aliases: ["doubao-seed-1-6-250615", "doubao-seed-1-6"],
+    supportsThinking: true,
+  },
+  {
+    id: "doubao-seed-1-6-thinking-250715",
+    aliases: ["doubao-seed-1-6-thinking-250715", "doubao-seed-1-6-thinking"],
+    supportsThinking: true,
+  },
+  {
+    id: "deepseek-v3-1-terminus",
+    aliases: ["deepseek-v3-1-terminus", "deepseek-v3-1-250821", "deepseek-v3-1"],
+    supportsThinking: true,
+  },
+  {
+    id: "kimi-k2-thinking-251104",
+    aliases: ["kimi-k2-thinking-251104"],
+    supportsThinking: true,
+  },
+  {
+    id: "kimi-k2-250905",
+    aliases: ["kimi-k2-250905", "kimi-k2"],
+    supportsThinking: false,
+  },
+]);
+const VOLCENGINE_WEB_SEARCH_THINKING_PROMPT = [
+  "你需要在回答过程中执行“边想边搜”策略：当问题涉及时效性、知识盲区或信息不足时，优先调用 web_search 工具补充信息。",
+  "在思考中明确说明：是否需要搜索、为什么搜索、计划使用的关键词。",
+  "回答应优先依据搜索结果，并在正文中标注可追溯来源。",
+].join("\n");
 const scryptAsync = promisify(crypto.scrypt);
 const CRC32_TABLE = createCrc32Table();
 
@@ -206,6 +258,8 @@ const ChatState =
 
 const runtimeConfigSchema = new mongoose.Schema(
   {
+    provider: { type: String, default: DEFAULT_AGENT_RUNTIME_CONFIG.provider },
+    model: { type: String, default: DEFAULT_AGENT_RUNTIME_CONFIG.model },
     protocol: { type: String, default: DEFAULT_AGENT_RUNTIME_CONFIG.protocol },
     creativityMode: {
       type: String,
@@ -233,6 +287,10 @@ const runtimeConfigSchema = new mongoose.Schema(
       type: Number,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.maxReasoningTokens,
     },
+    enableThinking: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
+    },
     reasoningEffort: {
       type: String,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.reasoningEffort,
@@ -244,6 +302,34 @@ const runtimeConfigSchema = new mongoose.Schema(
     injectSafetyPrompt: {
       type: Boolean,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.injectSafetyPrompt,
+    },
+    enableWebSearch: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.enableWebSearch,
+    },
+    webSearchMaxKeyword: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxKeyword,
+    },
+    webSearchResultLimit: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.webSearchResultLimit,
+    },
+    webSearchMaxToolCalls: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxToolCalls,
+    },
+    webSearchSourceDouyin: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceDouyin,
+    },
+    webSearchSourceMoji: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceMoji,
+    },
+    webSearchSourceToutiao: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceToutiao,
     },
   },
   { _id: false },
@@ -963,8 +1049,16 @@ async function streamAgentResponse({
   runtimeConfig = null,
   attachUploadedFiles = true,
 }) {
-  const model = getModelByAgent(agentId);
-  const provider = getProviderByAgent(agentId);
+  const systemPrompt = await getSystemPromptByAgent(agentId);
+  const config = runtimeConfig || (await getResolvedAgentRuntimeConfig(agentId));
+  const provider = getProviderByAgent(agentId, config);
+  const model = getModelByAgent(agentId, config);
+  const protocolInfo = resolveRequestProtocol(config.protocol, provider);
+  if (!protocolInfo.supported) {
+    res.status(400).json({ error: protocolInfo.message });
+    return;
+  }
+  const protocol = protocolInfo.value;
   const providerConfig = getProviderConfig(provider);
   if (!providerConfig.apiKey) {
     res.status(500).json({
@@ -972,17 +1066,35 @@ async function streamAgentResponse({
     });
     return;
   }
+  const endpoint =
+    protocol === "responses"
+      ? providerConfig.responsesEndpoint
+      : providerConfig.chatEndpoint;
+  if (!endpoint) {
+    res.status(500).json({
+      error: `当前 provider (${provider}) 未配置 ${protocol} 协议端点。`,
+    });
+    return;
+  }
 
-  const systemPrompt = await getSystemPromptByAgent(agentId);
-  const config = runtimeConfig || (await getResolvedAgentRuntimeConfig(agentId));
-  const reasoningEffortRequested = normalizeReasoningEffort(
-    config.reasoningEffort ?? process.env.DEFAULT_REASONING_EFFORT ?? "low",
-  );
+  const thinkingEnabled = sanitizeEnableThinking(config.enableThinking);
+  const reasoningEffortRequested = thinkingEnabled
+    ? normalizeReasoningEffort(
+        config.reasoningEffort ?? process.env.DEFAULT_REASONING_EFFORT ?? "low",
+      )
+    : "none";
   const reasoning = resolveReasoningPolicy(
     model,
     reasoningEffortRequested,
     provider,
   );
+  const webSearchRuntime = resolveVolcengineWebSearchRuntime({
+    provider,
+    protocol,
+    model,
+    config,
+    thinkingEnabled,
+  });
 
   let safeMessages = normalizeMessages(messages);
   if (
@@ -1024,16 +1136,116 @@ async function streamAgentResponse({
       .filter(Boolean)
       .join("\n\n");
   }
-
-  const finalMessages = [];
-  if (composedSystemPrompt) {
-    finalMessages.push({ role: "system", content: composedSystemPrompt });
+  if (webSearchRuntime.injectThinkingPrompt) {
+    composedSystemPrompt = [
+      composedSystemPrompt,
+      VOLCENGINE_WEB_SEARCH_THINKING_PROMPT,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   }
-  finalMessages.push(...narrowedMessages);
+
+  const requestMessages = [...narrowedMessages];
 
   if (attachUploadedFiles && files.length > 0) {
-    await attachFilesToLatestUserMessage(finalMessages, files);
+    await attachFilesToLatestUserMessage(requestMessages, files);
   }
+
+  const payload =
+    protocol === "responses"
+      ? buildResponsesRequestPayload({
+          model,
+          messages: requestMessages,
+          instructions: composedSystemPrompt,
+          config,
+          thinkingEnabled,
+          reasoning,
+          webSearchRuntime,
+        })
+      : buildChatRequestPayload({
+          model,
+          messages: requestMessages,
+          systemPrompt: composedSystemPrompt,
+          config,
+          reasoning,
+        });
+
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+  writeEvent(res, "meta", {
+    provider,
+    protocol,
+    model,
+    thinkingEnabledRequested: thinkingEnabled,
+    reasoningRequested: reasoningEffortRequested,
+    reasoningApplied: reasoning.effort,
+    reasoningEnabled: reasoning.enabled,
+    reasoningForced: reasoning.forced,
+    webSearchRequested: webSearchRuntime.requested,
+    webSearchModelSupported: webSearchRuntime.modelSupported,
+    webSearchMatchedModelId: webSearchRuntime.matchedModelId,
+    webSearchEnabled: webSearchRuntime.enabled,
+    webSearchThinkingPromptInjected: webSearchRuntime.injectThinkingPrompt,
+    runtimeConfig: config,
+  });
+
+  let upstream;
+  try {
+    upstream = await fetch(endpoint, {
+      method: "POST",
+      headers: buildProviderHeaders(provider, providerConfig.apiKey, protocol),
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.error(`[${provider}/${protocol}] request failed:`, error);
+    writeEvent(res, "error", {
+      message: `${provider}/${protocol} request failed: ${error.message}`,
+    });
+    res.end();
+    return;
+  }
+
+  if (!upstream.ok || !upstream.body) {
+    const detail = await safeReadText(upstream);
+    console.error(`[${provider}/${protocol}] upstream error:`, upstream.status, detail);
+    const message = formatProviderUpstreamError(
+      provider,
+      protocol,
+      upstream.status,
+      detail,
+    );
+    writeEvent(res, "error", {
+      message,
+    });
+    res.end();
+    return;
+  }
+
+  try {
+    if (protocol === "responses") {
+      await pipeResponsesSse(upstream, res, reasoning.enabled, {
+        emitSearchUsage: webSearchRuntime.enabled,
+      });
+    } else {
+      await pipeOpenRouterSse(upstream, res, reasoning.enabled);
+    }
+    writeEvent(res, "done", { ok: true });
+  } catch (error) {
+    console.error(`[${provider}/${protocol}] stream handling failed:`, error);
+    writeEvent(res, "error", { message: error.message || "stream failed" });
+  } finally {
+    res.end();
+  }
+}
+
+function buildChatRequestPayload({ model, messages, systemPrompt, config, reasoning }) {
+  const finalMessages = [];
+  if (systemPrompt) {
+    finalMessages.push({ role: "system", content: systemPrompt });
+  }
+  finalMessages.push(...messages);
 
   const payload = {
     model,
@@ -1073,57 +1285,357 @@ async function streamAgentResponse({
   if (reasoning.enabled) {
     payload.reasoning = { effort: reasoning.effort };
   }
+  return payload;
+}
 
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders?.();
-  writeEvent(res, "meta", {
-    provider,
+function buildResponsesRequestPayload({
+  model,
+  messages,
+  instructions,
+  config,
+  thinkingEnabled,
+  reasoning,
+  webSearchRuntime,
+}) {
+  const input = buildResponsesInputItems(messages);
+  const supportsReasoningEffort = supportsVolcengineResponsesReasoningEffort(model);
+  const payload = {
     model,
-    reasoningRequested: reasoningEffortRequested,
-    reasoningApplied: reasoning.effort,
-    reasoningEnabled: reasoning.enabled,
-    reasoningForced: reasoning.forced,
-    runtimeConfig: config,
+    stream: true,
+    input,
+    max_output_tokens: sanitizeRuntimeInteger(
+      config.maxOutputTokens,
+      DEFAULT_AGENT_RUNTIME_CONFIG.maxOutputTokens,
+      64,
+      RUNTIME_MAX_OUTPUT_TOKENS,
+    ),
+    thinking: { type: thinkingEnabled ? "enabled" : "disabled" },
+  };
+
+  if (supportsReasoningEffort) {
+    payload.reasoning = {
+      effort: thinkingEnabled
+        ? mapReasoningEffortToResponses(reasoning.effort)
+        : "minimal",
+    };
+  }
+
+  if (webSearchRuntime?.enabled && webSearchRuntime?.tool) {
+    payload.tools = [webSearchRuntime.tool];
+    payload.max_tool_calls = webSearchRuntime.maxToolCalls;
+  }
+
+  if (instructions) {
+    payload.instructions = instructions;
+  }
+
+  return payload;
+}
+
+function resolveVolcengineWebSearchRuntime({
+  provider,
+  protocol,
+  model,
+  config,
+  thinkingEnabled,
+}) {
+  const requested = sanitizeRuntimeBoolean(
+    config?.enableWebSearch,
+    DEFAULT_AGENT_RUNTIME_CONFIG.enableWebSearch,
+  );
+  const maxToolCalls = sanitizeRuntimeInteger(
+    config?.webSearchMaxToolCalls,
+    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxToolCalls,
+    1,
+    10,
+  );
+  const capability = resolveVolcengineWebSearchCapability(model);
+  const isVolcengineResponses =
+    provider === "volcengine" && protocol === "responses";
+  const modelSupported = isVolcengineResponses && capability.supported;
+  const supportsThinking = modelSupported && capability.supportsThinking;
+  const enabled = requested && modelSupported;
+  const tool = enabled ? buildWebSearchToolFromRuntimeConfig(config) : null;
+
+  return {
+    requested,
+    enabled,
+    modelSupported,
+    supportsThinking,
+    matchedModelId: capability.matchedModelId,
+    maxToolCalls,
+    tool,
+    injectThinkingPrompt: enabled && supportsThinking && thinkingEnabled,
+  };
+}
+
+function buildWebSearchToolFromRuntimeConfig(config) {
+  const tool = {
+    type: "web_search",
+    max_keyword: sanitizeRuntimeInteger(
+      config?.webSearchMaxKeyword,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxKeyword,
+      1,
+      50,
+    ),
+    limit: sanitizeRuntimeInteger(
+      config?.webSearchResultLimit,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchResultLimit,
+      1,
+      50,
+    ),
+    user_location: {
+      type: "approximate",
+      country: "中国",
+      region: "浙江",
+      city: "杭州",
+    },
+  };
+
+  const sources = [];
+  if (
+    sanitizeRuntimeBoolean(
+      config?.webSearchSourceDouyin,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceDouyin,
+    )
+  ) {
+    sources.push("douyin");
+  }
+  if (
+    sanitizeRuntimeBoolean(
+      config?.webSearchSourceMoji,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceMoji,
+    )
+  ) {
+    sources.push("moji");
+  }
+  if (
+    sanitizeRuntimeBoolean(
+      config?.webSearchSourceToutiao,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceToutiao,
+    )
+  ) {
+    sources.push("toutiao");
+  }
+  if (sources.length > 0) {
+    tool.sources = sources;
+  }
+
+  return tool;
+}
+
+function resolveVolcengineWebSearchCapability(model) {
+  const candidates = getNormalizedModelCandidates(model);
+  if (candidates.length === 0) {
+    return { supported: false, supportsThinking: false, matchedModelId: "" };
+  }
+
+  const modelsFromEnv = readModelAllowlistFromEnv("VOLCENGINE_WEB_SEARCH_MODELS");
+  if (modelsFromEnv.length > 0) {
+    const supported = modelsFromEnv.some((alias) =>
+      matchModelCandidates(candidates, alias),
+    );
+    if (!supported) {
+      return { supported: false, supportsThinking: false, matchedModelId: "" };
+    }
+
+    const thinkingFromEnv = readModelAllowlistFromEnv(
+      "VOLCENGINE_WEB_SEARCH_THINKING_MODELS",
+    );
+    const supportsThinking =
+      thinkingFromEnv.length > 0
+        ? thinkingFromEnv.some((alias) => matchModelCandidates(candidates, alias))
+        : true;
+    return { supported: true, supportsThinking, matchedModelId: "env" };
+  }
+
+  const matched = findVolcengineWebSearchCapabilityByModel(candidates);
+  if (!matched) {
+    return { supported: false, supportsThinking: false, matchedModelId: "" };
+  }
+
+  return {
+    supported: true,
+    supportsThinking: !!matched.supportsThinking,
+    matchedModelId: matched.id,
+  };
+}
+
+function findVolcengineWebSearchCapabilityByModel(candidates) {
+  let best = null;
+
+  VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES.forEach((item) => {
+    const aliases = Array.isArray(item.aliases) ? item.aliases : [];
+    aliases.forEach((aliasRaw) => {
+      const alias = String(aliasRaw || "")
+        .trim()
+        .toLowerCase();
+      if (!alias) return;
+
+      candidates.forEach((candidate) => {
+        if (!candidate) return;
+        const exact = candidate === alias;
+        const includes = !exact && candidate.includes(alias);
+        if (!exact && !includes) return;
+
+        const score = (exact ? 1000 : 100) + alias.length;
+        if (!best || score > best.score) {
+          best = { item, score };
+        }
+      });
+    });
   });
 
-  let upstream;
-  try {
-    upstream = await fetch(providerConfig.endpoint, {
-      method: "POST",
-      headers: buildProviderHeaders(provider, providerConfig.apiKey),
-      body: JSON.stringify(payload),
-    });
-  } catch (error) {
-    console.error(`[${provider}] request failed:`, error);
-    writeEvent(res, "error", {
-      message: `${provider} request failed: ${error.message}`,
-    });
-    res.end();
-    return;
+  return best?.item || null;
+}
+
+function getNormalizedModelCandidates(model) {
+  const normalized = String(model || "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return [];
+
+  const set = new Set([normalized]);
+  const slashIndex = normalized.lastIndexOf("/");
+  if (slashIndex > -1 && slashIndex < normalized.length - 1) {
+    set.add(normalized.slice(slashIndex + 1));
+  }
+  return Array.from(set);
+}
+
+function readModelAllowlistFromEnv(envName) {
+  return String(process.env[envName] || "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function matchModelCandidates(candidates, aliasRaw) {
+  const alias = String(aliasRaw || "")
+    .trim()
+    .toLowerCase();
+  if (!alias) return false;
+  return candidates.some((candidate) => candidate === alias || candidate.includes(alias));
+}
+
+function buildResponsesInputItems(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return "";
+
+  const items = messages
+    .map((message) => {
+      const role = String(message?.role || "")
+        .trim()
+        .toLowerCase();
+      if (role !== "user" && role !== "assistant" && role !== "system") return null;
+
+      const content = normalizeResponsesMessageContent(message?.content);
+      if (typeof content === "string" && !content.trim()) return null;
+      if (Array.isArray(content) && content.length === 0) return null;
+
+      return { role, content };
+    })
+    .filter(Boolean);
+
+  if (items.length === 0) return "";
+
+  if (items.length === 1 && items[0].role === "user" && typeof items[0].content === "string") {
+    return items[0].content;
   }
 
-  if (!upstream.ok || !upstream.body) {
-    const detail = await safeReadText(upstream);
-    console.error(`[${provider}] upstream error:`, upstream.status, detail);
-    const message = formatProviderUpstreamError(provider, upstream.status, detail);
-    writeEvent(res, "error", {
-      message,
-    });
-    res.end();
-    return;
+  return items;
+}
+
+function normalizeResponsesMessageContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  const parts = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    const type = String(part.type || "")
+      .trim()
+      .toLowerCase();
+
+    if (type === "text" || type === "input_text" || type === "output_text") {
+      const text = String(part.text || "").trim();
+      if (text) {
+        parts.push({ type: "input_text", text });
+      }
+      continue;
+    }
+
+    if (type === "image_url" || type === "input_image") {
+      const imageUrl = extractInputImageUrl(part);
+      if (imageUrl) {
+        parts.push({ type: "input_image", image_url: imageUrl });
+      }
+    }
   }
 
-  try {
-    await pipeOpenRouterSse(upstream, res, reasoning.enabled);
-    writeEvent(res, "done", { ok: true });
-  } catch (error) {
-    console.error(`[${provider}] stream handling failed:`, error);
-    writeEvent(res, "error", { message: error.message || "stream failed" });
-  } finally {
-    res.end();
+  if (parts.length === 0) return "";
+  if (parts.length === 1 && parts[0].type === "input_text") {
+    return parts[0].text;
   }
+  return parts;
+}
+
+function extractInputImageUrl(part) {
+  if (typeof part.image_url === "string") {
+    const direct = part.image_url.trim();
+    return direct || "";
+  }
+
+  if (part.image_url && typeof part.image_url === "object") {
+    const nested = String(part.image_url.url || "").trim();
+    if (nested) return nested;
+  }
+
+  const url = String(part.url || "").trim();
+  return url || "";
+}
+
+function mapReasoningEffortToResponses(effort) {
+  const key = String(effort || "")
+    .trim()
+    .toLowerCase();
+  if (key === "none") return "minimal";
+  if (key === "low" || key === "medium" || key === "high") return key;
+  return "medium";
+}
+
+function supportsVolcengineResponsesReasoningEffort(model) {
+  const defaults = [
+    "doubao-seed-1-8-251228",
+    "doubao-seed-1-6-lite-251015",
+    "doubao-seed-1-6-251015",
+  ];
+
+  const fromEnv = String(process.env.VOLCENGINE_RESPONSES_REASONING_MODELS || "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  const allowlist = fromEnv.length > 0 ? fromEnv : defaults;
+
+  const normalizedModel = String(model || "")
+    .trim()
+    .toLowerCase();
+  if (!normalizedModel) return false;
+
+  return allowlist.some((item) => normalizedModel.includes(item));
+}
+
+function resolveRequestProtocol(requestedProtocol, provider) {
+  const protocol = sanitizeRuntimeProtocol(requestedProtocol);
+
+  if (provider === "volcengine") {
+    return { supported: true, value: "responses", forced: protocol !== "responses" };
+  }
+
+  if (protocol === "responses" && provider !== "volcengine") {
+    return { supported: true, value: "chat", forced: true };
+  }
+
+  return { supported: true, value: protocol, forced: false };
 }
 
 function pickRecentUserRounds(messages, maxRounds = 10) {
@@ -1397,6 +1909,314 @@ async function pipeOpenRouterSse(upstream, res, reasoningEnabled) {
   }
 }
 
+async function pipeResponsesSse(
+  upstream,
+  res,
+  reasoningEnabled,
+  { emitSearchUsage = false } = {},
+) {
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let sawContent = false;
+  let sawReasoning = false;
+
+  const processSseBlock = (block) => {
+    const data = extractSseDataPayload(block);
+    if (!data) return false;
+    if (data === "[DONE]") return true;
+
+    let json;
+    try {
+      json = JSON.parse(data);
+    } catch {
+      return false;
+    }
+
+    const type = String(json?.type || "")
+      .trim()
+      .toLowerCase();
+    const deltaText = extractDeltaText(json?.delta);
+    const doneText = extractDeltaText(json?.text);
+
+    if (type === "error" || type === "response.failed") {
+      throw new Error(extractResponsesErrorMessage(json));
+    }
+
+    if (
+      type === "response.output_text.delta" ||
+      type === "response.text.delta" ||
+      type === "response.output_text_part.delta"
+    ) {
+      if (deltaText) {
+        sawContent = true;
+        writeEvent(res, "token", { text: deltaText });
+      }
+      return false;
+    }
+
+    if (
+      type === "response.output_text.done" ||
+      type === "response.text.done" ||
+      type === "response.output_text_part.done"
+    ) {
+      if (!sawContent && doneText) {
+        sawContent = true;
+        writeEvent(res, "token", { text: doneText });
+      }
+      return false;
+    }
+
+    if (
+      type === "response.reasoning_summary_text.delta" ||
+      type === "response.reasoning_text.delta"
+    ) {
+      if (reasoningEnabled && deltaText) {
+        sawReasoning = true;
+        writeEvent(res, "reasoning_token", { text: deltaText });
+      }
+      return false;
+    }
+
+    if (
+      type === "response.reasoning_summary_text.done" ||
+      type === "response.reasoning_text.done"
+    ) {
+      if (reasoningEnabled && !sawReasoning && doneText) {
+        sawReasoning = true;
+        writeEvent(res, "reasoning_token", { text: doneText });
+      }
+      return false;
+    }
+
+    if (type === "response.completed") {
+      if (!sawContent) {
+        const completedText = extractResponsesOutputTextFromCompleted(json?.response);
+        if (completedText) {
+          sawContent = true;
+          writeEvent(res, "token", { text: completedText });
+        }
+      }
+      if (reasoningEnabled && !sawReasoning) {
+        const completedReasoning = extractResponsesReasoningTextFromCompleted(
+          json?.response,
+        );
+        if (completedReasoning) {
+          sawReasoning = true;
+          writeEvent(res, "reasoning_token", { text: completedReasoning });
+        }
+      }
+      if (emitSearchUsage) {
+        writeEvent(res, "search_usage", extractResponsesWebSearchUsage(json?.response));
+      }
+      return true;
+    }
+
+    return false;
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const gotDone = processSseBlock(block);
+      if (gotDone) return;
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+
+  const tail = buffer.trim();
+  if (tail) {
+    processSseBlock(tail);
+  }
+
+  if (!sawContent && sawReasoning) {
+    throw new Error("上游仅返回了思路内容，未返回最终回答。");
+  }
+  if (!sawContent) {
+    throw new Error("上游未返回有效回答内容。");
+  }
+}
+
+function extractResponsesOutputTextFromCompleted(responseObj) {
+  const output = Array.isArray(responseObj?.output) ? responseObj.output : [];
+  const chunks = [];
+
+  output.forEach((item) => {
+    if (!item || item.type !== "message") return;
+    const content = Array.isArray(item.content) ? item.content : [];
+    content.forEach((part) => {
+      if (!part || (part.type !== "output_text" && part.type !== "text")) return;
+      const text = extractDeltaText(part.text || part.content || "");
+      if (text) chunks.push(text);
+    });
+  });
+
+  return chunks.join("");
+}
+
+function extractResponsesReasoningTextFromCompleted(responseObj) {
+  const output = Array.isArray(responseObj?.output) ? responseObj.output : [];
+  const chunks = [];
+
+  output.forEach((item) => {
+    if (!item || item.type !== "reasoning") return;
+    const summary = Array.isArray(item.summary) ? item.summary : [];
+    summary.forEach((part) => {
+      if (!part || (part.type !== "summary_text" && part.type !== "text")) return;
+      const text = extractDeltaText(part.text || part.content || "");
+      if (text) chunks.push(text);
+    });
+  });
+
+  return chunks.join("");
+}
+
+function extractResponsesWebSearchUsage(responseObj) {
+  const usage =
+    responseObj?.usage && typeof responseObj.usage === "object"
+      ? responseObj.usage
+      : {};
+  const webSearchCalls = extractNamedToolUsageCount(usage.tool_usage, "web_search");
+  const details = extractNamedToolUsageDetails(
+    usage.tool_usage_details,
+    "web_search",
+  );
+
+  return {
+    webSearchCalls,
+    details,
+    text: formatWebSearchUsageText(webSearchCalls, details),
+  };
+}
+
+function extractNamedToolUsageCount(source, toolName) {
+  const direct = normalizeUsageCount(source);
+  if (direct !== null) return direct;
+
+  if (source && typeof source === "object" && !Array.isArray(source)) {
+    const selected = source[toolName];
+    const selectedCount = normalizeUsageCount(selected);
+    if (selectedCount !== null) return selectedCount;
+    if (selected && typeof selected === "object") {
+      const summed = sumNumericUsage(selected);
+      if (summed !== null) return summed;
+    }
+  }
+
+  if (typeof source === "string") {
+    const regex = new RegExp(`${toolName}\\s*[:=]\\s*(\\d+)`, "i");
+    const match = source.match(regex);
+    if (match?.[1]) {
+      return sanitizeUsageCountNumber(Number(match[1]));
+    }
+  }
+
+  return 0;
+}
+
+function extractNamedToolUsageDetails(source, toolName) {
+  const details = {};
+  if (!source) return details;
+
+  let selected = source;
+  if (source && typeof source === "object" && !Array.isArray(source)) {
+    selected = source[toolName];
+    if (!selected && source.web_search) {
+      selected = source.web_search;
+    }
+  }
+
+  if (selected && typeof selected === "object" && !Array.isArray(selected)) {
+    Object.entries(selected).forEach(([name, count]) => {
+      const normalized = normalizeUsageCount(count);
+      if (normalized === null) return;
+      details[name] = normalized;
+    });
+    return details;
+  }
+
+  if (typeof selected === "string") {
+    try {
+      const parsed = JSON.parse(selected);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        Object.entries(parsed).forEach(([name, count]) => {
+          const normalized = normalizeUsageCount(count);
+          if (normalized === null) return;
+          details[name] = normalized;
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return details;
+}
+
+function normalizeUsageCount(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return sanitizeUsageCountNumber(value);
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed)) {
+      return sanitizeUsageCountNumber(parsed);
+    }
+  }
+
+  return null;
+}
+
+function sumNumericUsage(obj) {
+  if (!obj || typeof obj !== "object") return null;
+  let saw = false;
+  let total = 0;
+  Object.values(obj).forEach((value) => {
+    const count = normalizeUsageCount(value);
+    if (count === null) return;
+    saw = true;
+    total += count;
+  });
+  return saw ? total : null;
+}
+
+function sanitizeUsageCountNumber(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.round(value));
+}
+
+function formatWebSearchUsageText(total, details) {
+  const safeTotal = sanitizeUsageCountNumber(total);
+  const entries = Object.entries(details || {})
+    .filter(([, count]) => Number.isFinite(count))
+    .map(([name, count]) => `${name}=${sanitizeUsageCountNumber(count)}`);
+
+  if (safeTotal <= 0 && entries.length === 0) {
+    return "联网搜索用量：web_search=0（本轮未触发搜索）";
+  }
+
+  if (entries.length === 0) {
+    return `联网搜索用量：web_search=${safeTotal}`;
+  }
+
+  return `联网搜索用量：web_search=${safeTotal}；明细：${entries.join("，")}`;
+}
+
+function extractResponsesErrorMessage(event) {
+  const explicit = String(event?.error?.message || event?.message || "").trim();
+  if (explicit) return explicit;
+  return "Responses API 调用失败";
+}
+
 function extractDeltaText(part) {
   if (!part) return "";
   if (typeof part === "string") return part;
@@ -1446,7 +2266,10 @@ async function safeReadText(response) {
   }
 }
 
-function getModelByAgent(agentId) {
+function getModelByAgent(agentId, runtimeConfig = null) {
+  const runtimeModel = sanitizeRuntimeModel(runtimeConfig?.model);
+  if (runtimeModel) return runtimeModel;
+
   const defaults = {
     A: "z-ai/glm-4.7",
     B: "google/gemini-3-flash-preview",
@@ -1454,6 +2277,7 @@ function getModelByAgent(agentId) {
     D: "z-ai/glm-4.7-flash",
   };
 
+  const targetAgent = sanitizeAgent(agentId);
   const map = {
     A: process.env.AGENT_MODEL_A || defaults.A,
     B: process.env.AGENT_MODEL_B || defaults.B,
@@ -1461,7 +2285,7 @@ function getModelByAgent(agentId) {
     D: process.env.AGENT_MODEL_D || defaults.D,
   };
 
-  return map[agentId] || map.A;
+  return sanitizeRuntimeModel(map[targetAgent] || map.A) || map.A;
 }
 
 async function getSystemPromptByAgent(agentId) {
@@ -1540,6 +2364,8 @@ function sanitizeAgentRuntimeConfigsPayload(input) {
 
 function sanitizeSingleAgentRuntimeConfig(raw) {
   const source = raw && typeof raw === "object" ? raw : {};
+  const provider = sanitizeRuntimeProvider(source.provider);
+  const model = sanitizeRuntimeModel(source.model);
   const protocol = sanitizeRuntimeProtocol(source.protocol);
   const creativityMode = sanitizeCreativityMode(source.creativityMode);
   const temperature = sanitizeRuntimeNumber(
@@ -1584,9 +2410,46 @@ function sanitizeSingleAgentRuntimeConfig(raw) {
     0,
     RUNTIME_MAX_OUTPUT_TOKENS,
   );
+  const enableThinking = sanitizeEnableThinking(source.enableThinking);
   const reasoningEffort = normalizeReasoningEffort(source.reasoningEffort);
+  const enableWebSearch = sanitizeRuntimeBoolean(
+    source.enableWebSearch,
+    DEFAULT_AGENT_RUNTIME_CONFIG.enableWebSearch,
+  );
+  const webSearchMaxKeyword = sanitizeRuntimeInteger(
+    source.webSearchMaxKeyword,
+    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxKeyword,
+    1,
+    50,
+  );
+  const webSearchResultLimit = sanitizeRuntimeInteger(
+    source.webSearchResultLimit,
+    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchResultLimit,
+    1,
+    50,
+  );
+  const webSearchMaxToolCalls = sanitizeRuntimeInteger(
+    source.webSearchMaxToolCalls,
+    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxToolCalls,
+    1,
+    10,
+  );
+  const webSearchSourceDouyin = sanitizeRuntimeBoolean(
+    source.webSearchSourceDouyin,
+    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceDouyin,
+  );
+  const webSearchSourceMoji = sanitizeRuntimeBoolean(
+    source.webSearchSourceMoji,
+    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceMoji,
+  );
+  const webSearchSourceToutiao = sanitizeRuntimeBoolean(
+    source.webSearchSourceToutiao,
+    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceToutiao,
+  );
 
   return {
+    provider,
+    model,
     protocol,
     creativityMode,
     temperature,
@@ -1596,9 +2459,17 @@ function sanitizeSingleAgentRuntimeConfig(raw) {
     contextRounds,
     maxOutputTokens,
     maxReasoningTokens,
+    enableThinking,
     reasoningEffort,
     includeCurrentTime: !!source.includeCurrentTime,
     injectSafetyPrompt: !!source.injectSafetyPrompt,
+    enableWebSearch,
+    webSearchMaxKeyword,
+    webSearchResultLimit,
+    webSearchMaxToolCalls,
+    webSearchSourceDouyin,
+    webSearchSourceMoji,
+    webSearchSourceToutiao,
   };
 }
 
@@ -1649,8 +2520,34 @@ function sanitizeRuntimeProtocol(value) {
   const key = String(value || "")
     .trim()
     .toLowerCase();
-  if (key === "responses") return "responses";
+  if (key === "responses" || key === "response") return "responses";
   return "chat";
+}
+
+function sanitizeRuntimeProvider(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!key) return DEFAULT_AGENT_RUNTIME_CONFIG.provider;
+  if (key === "inherit" || key === "default" || key === "auto") return "inherit";
+  if (key === "openrouter") return "openrouter";
+  if (key === "aliyun" || key === "alibaba" || key === "dashscope") return "aliyun";
+  if (key === "volcengine" || key === "volc" || key === "ark") return "volcengine";
+  return DEFAULT_AGENT_RUNTIME_CONFIG.provider;
+}
+
+function sanitizeRuntimeModel(value) {
+  const model = String(value || "")
+    .trim()
+    .slice(0, 180);
+  return model;
+}
+
+function sanitizeEnableThinking(value) {
+  return sanitizeRuntimeBoolean(
+    value,
+    DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
+  );
 }
 
 function sanitizeCreativityMode(value) {
@@ -1676,6 +2573,18 @@ function sanitizeRuntimeInteger(value, fallback, min, max) {
   return Math.min(max, Math.max(min, normalized));
 }
 
+function sanitizeRuntimeBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!key) return fallback;
+  if (key === "1" || key === "true" || key === "yes" || key === "on") return true;
+  if (key === "0" || key === "false" || key === "no" || key === "off")
+    return false;
+  return fallback;
+}
+
 function buildAdminAgentSettingsResponse(config) {
   const resolvedPrompts = resolveAgentSystemPrompts(config.prompts);
   const resolvedRuntimeConfigs = resolveAgentRuntimeConfigs(config.runtimeConfigs);
@@ -1686,8 +2595,26 @@ function buildAdminAgentSettingsResponse(config) {
     resolvedPrompts,
     runtimeConfigs: config.runtimeConfigs,
     resolvedRuntimeConfigs,
+    agentProviderDefaults: buildAgentProviderDefaults(),
+    agentModelDefaults: buildAgentModelDefaults(),
     updatedAt: config.updatedAt,
   };
+}
+
+function buildAgentProviderDefaults() {
+  const defaults = {};
+  AGENT_IDS.forEach((agentId) => {
+    defaults[agentId] = getProviderByAgent(agentId, { provider: "inherit" });
+  });
+  return defaults;
+}
+
+function buildAgentModelDefaults() {
+  const defaults = {};
+  AGENT_IDS.forEach((agentId) => {
+    defaults[agentId] = getModelByAgent(agentId, { model: "" });
+  });
+  return defaults;
 }
 
 function sanitizeSystemPrompt(value) {
@@ -1699,20 +2626,26 @@ function sanitizeSystemPrompt(value) {
   return text.slice(0, SYSTEM_PROMPT_MAX_LENGTH);
 }
 
-function getProviderByAgent(agentId) {
+function getProviderByAgent(agentId, runtimeConfig = null) {
+  const runtimeProvider = sanitizeRuntimeProvider(runtimeConfig?.provider);
+  if (runtimeProvider !== "inherit") {
+    return normalizeProvider(runtimeProvider);
+  }
+
   const defaults = {
     A: "openrouter",
     B: "openrouter",
     C: "openrouter",
     D: "openrouter",
   };
+  const targetAgent = sanitizeAgent(agentId);
   const map = {
     A: process.env.AGENT_PROVIDER_A || defaults.A,
     B: process.env.AGENT_PROVIDER_B || defaults.B,
     C: process.env.AGENT_PROVIDER_C || defaults.C,
     D: process.env.AGENT_PROVIDER_D || defaults.D,
   };
-  return normalizeProvider(map[agentId] || map.A);
+  return normalizeProvider(map[targetAgent] || map.A);
 }
 
 function normalizeReasoningEffort(v) {
@@ -1721,6 +2654,7 @@ function normalizeReasoningEffort(v) {
     .toLowerCase();
   if (
     key === "none" ||
+    key === "minimal" ||
     key === "off" ||
     key === "no" ||
     key === "false" ||
@@ -1788,9 +2722,10 @@ function normalizeProvider(value) {
 function getProviderConfig(provider) {
   if (provider === "aliyun") {
     return {
-      endpoint:
+      chatEndpoint:
         process.env.ALIYUN_CHAT_ENDPOINT ||
         "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      responsesEndpoint: "",
       apiKey: readEnvApiKey("ALIYUN_API_KEY", "DASHSCOPE_API_KEY"),
       missingKeyMessage:
         "未检测到阿里云 API Key。请在 .env 中配置 ALIYUN_API_KEY（或 DASHSCOPE_API_KEY）。",
@@ -1799,9 +2734,12 @@ function getProviderConfig(provider) {
 
   if (provider === "volcengine") {
     return {
-      endpoint:
+      chatEndpoint:
         process.env.VOLCENGINE_CHAT_ENDPOINT ||
         "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+      responsesEndpoint:
+        process.env.VOLCENGINE_RESPONSES_ENDPOINT ||
+        "https://ark.cn-beijing.volces.com/api/v3/responses",
       apiKey: readEnvApiKey("VOLCENGINE_API_KEY", "ARK_API_KEY"),
       missingKeyMessage:
         "未检测到火山引擎 API Key。请在 .env 中配置 VOLCENGINE_API_KEY（或 ARK_API_KEY）。",
@@ -1809,9 +2747,10 @@ function getProviderConfig(provider) {
   }
 
   return {
-    endpoint:
+    chatEndpoint:
       process.env.OPENROUTER_CHAT_ENDPOINT ||
       "https://openrouter.ai/api/v1/chat/completions",
+    responsesEndpoint: "",
     apiKey: readEnvApiKey(
       "OPENROUTER_API_KEY",
       "OPEN_ROUTER_API_KEY",
@@ -1842,11 +2781,14 @@ function isPlaceholderApiKey(value) {
   return false;
 }
 
-function buildProviderHeaders(provider, apiKey) {
+function buildProviderHeaders(provider, apiKey, protocol = "chat") {
   const headers = {
     Authorization: `Bearer ${apiKey}`,
     "Content-Type": "application/json",
-    Accept: "text/event-stream",
+    Accept:
+      protocol === "responses"
+        ? "text/event-stream, application/json"
+        : "text/event-stream",
   };
 
   if (provider === "openrouter") {
@@ -1858,8 +2800,12 @@ function buildProviderHeaders(provider, apiKey) {
   return headers;
 }
 
-function formatProviderUpstreamError(provider, status, detail) {
-  const raw = String(detail || "").trim();
+function formatProviderUpstreamError(provider, protocol, status, detail) {
+  const parsed = parseUpstreamErrorDetail(detail);
+  const raw = parsed.raw;
+  const errorCode = parsed.code;
+  const errorMessage = parsed.message;
+  const errorParam = parsed.param;
 
   if (
     provider === "openrouter" &&
@@ -1873,7 +2819,135 @@ function formatProviderUpstreamError(provider, status, detail) {
     return "OpenRouter 认证失败：请检查 OPENROUTER_API_KEY 是否正确且仍有效。";
   }
 
-  return `${provider} error (${status}): ${raw || "unknown error"}`;
+  if (provider === "volcengine") {
+    const volcengineMapped = mapVolcengineUpstreamError({
+      status,
+      code: errorCode,
+      message: errorMessage,
+      param: errorParam,
+    });
+    if (volcengineMapped) return volcengineMapped;
+  }
+
+  return `${provider}/${protocol} error (${status}): ${errorMessage || raw || "unknown error"}`;
+}
+
+function parseUpstreamErrorDetail(detail) {
+  const raw = String(detail || "").trim();
+  if (!raw) {
+    return {
+      raw: "",
+      code: "",
+      message: "",
+      param: "",
+      type: "",
+    };
+  }
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+
+  const payload =
+    parsed && typeof parsed.error === "object" && parsed.error
+      ? parsed.error
+      : parsed && typeof parsed === "object"
+        ? parsed
+        : {};
+
+  return {
+    raw,
+    code: String(payload?.code || "").trim(),
+    message: String(payload?.message || raw).trim(),
+    param: String(payload?.param || "").trim(),
+    type: String(payload?.type || "").trim(),
+  };
+}
+
+function mapVolcengineUpstreamError({ status, code, message, param }) {
+  const codeKey = String(code || "")
+    .trim()
+    .toLowerCase();
+  const msg = String(message || "")
+    .trim()
+    .toLowerCase();
+  const paramKey = String(param || "")
+    .trim()
+    .toLowerCase();
+
+  if (
+    status === 400 &&
+    (paramKey === "image_url" || msg.includes("do not support image input"))
+  ) {
+    return "该模型不支持图片解析。（Error Code: 400）";
+  }
+
+  if (
+    status === 400 &&
+    (msg.includes("reasoning") || msg.includes("thinking") || paramKey === "reasoning")
+  ) {
+    return "当前模型不支持所选深度思考参数，请调整后重试。（Error Code: 400）";
+  }
+
+  if (status === 400) {
+    if (codeKey.startsWith("missingparameter")) {
+      return "请求缺少必要参数，请检查后重试。（Error Code: 400）";
+    }
+    if (
+      codeKey.startsWith("invalidparameter") ||
+      codeKey.startsWith("invalidargumenterror")
+    ) {
+      return "请求参数不合法，请检查参数配置后重试。（Error Code: 400）";
+    }
+    if (
+      codeKey.includes("sensitivecontentdetected") ||
+      codeKey.includes("riskdetection")
+    ) {
+      return "输入或输出内容可能涉及敏感信息，请调整后重试。（Error Code: 400）";
+    }
+    return "请求参数错误，请检查参数配置后重试。（Error Code: 400）";
+  }
+
+  if (status === 401) {
+    if (codeKey === "authenticationerror") {
+      return "鉴权失败，请检查 API Key 是否正确。（Error Code: 401）";
+    }
+    return "认证失败，请检查账号状态或鉴权配置。（Error Code: 401）";
+  }
+
+  if (status === 403) {
+    if (codeKey.includes("serviceoverdue") || codeKey === "accountoverdueerror") {
+      return "账号欠费或服务已过期，请检查火山账户计费状态。（Error Code: 403）";
+    }
+    if (codeKey.includes("accessdenied")) {
+      return "当前账号无权限访问该模型或资源。（Error Code: 403）";
+    }
+    return "无权限执行该操作，请检查模型开通与权限设置。（Error Code: 403）";
+  }
+
+  if (status === 404) {
+    if (codeKey.includes("modelnotopen")) {
+      return "该模型未开通，请先在火山方舟控制台开通模型服务。（Error Code: 404）";
+    }
+    return "模型或资源不存在，或当前账号无访问权限。（Error Code: 404）";
+  }
+
+  if (status === 429) {
+    return "请求频率或配额超限，请稍后重试。（Error Code: 429）";
+  }
+
+  if (status === 500) {
+    return "服务内部异常，请稍后重试。（Error Code: 500）";
+  }
+
+  if (status === 503) {
+    return "服务暂时不可用，请稍后重试。（Error Code: 503）";
+  }
+
+  return "";
 }
 
 function requireChatAuth(req, res, next) {

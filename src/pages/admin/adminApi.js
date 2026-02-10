@@ -235,6 +235,11 @@ function handleSseEvent(evt, handlers) {
     return;
   }
 
+  if (evt.event === "search_usage") {
+    handlers.onSearchUsage?.(evt.data || {});
+    return;
+  }
+
   if (evt.event === "meta") {
     handlers.onMeta?.(evt.data || {});
     return;

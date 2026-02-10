@@ -42,6 +42,99 @@ const REASONING_MODE_OPTIONS = [
   { value: "medium", label: "中" },
   { value: "high", label: "高" },
 ];
+const PROVIDER_OPTIONS = [
+  { value: "inherit", label: "跟随 .env 默认" },
+  { value: "openrouter", label: "OpenRouter" },
+  { value: "volcengine", label: "火山引擎 Ark" },
+  { value: "aliyun", label: "阿里云 DashScope" },
+];
+const KNOWN_PROVIDERS = new Set(["openrouter", "volcengine", "aliyun"]);
+const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = [
+  {
+    id: "doubao-seed-1-8-251228",
+    aliases: ["doubao-seed-1-8-251228", "doubao-seed-1-8"],
+    supportsThinking: true,
+  },
+  {
+    id: "deepseek-v3-2-251201",
+    aliases: ["deepseek-v3-2-251201", "deepseek-v3-2"],
+    supportsThinking: true,
+  },
+  {
+    id: "doubao-seed-1-6-250615",
+    aliases: ["doubao-seed-1-6-250615", "doubao-seed-1-6"],
+    supportsThinking: true,
+  },
+  {
+    id: "doubao-seed-1-6-thinking-250715",
+    aliases: ["doubao-seed-1-6-thinking-250715", "doubao-seed-1-6-thinking"],
+    supportsThinking: true,
+  },
+  {
+    id: "deepseek-v3-1-terminus",
+    aliases: ["deepseek-v3-1-terminus", "deepseek-v3-1-250821", "deepseek-v3-1"],
+    supportsThinking: true,
+  },
+  {
+    id: "kimi-k2-thinking-251104",
+    aliases: ["kimi-k2-thinking-251104"],
+    supportsThinking: true,
+  },
+  {
+    id: "kimi-k2-250905",
+    aliases: ["kimi-k2-250905", "kimi-k2"],
+    supportsThinking: false,
+  },
+];
+const VOLCENGINE_WEB_SEARCH_SOURCE_OPTIONS = [
+  { key: "webSearchSourceDouyin", value: "douyin", label: "抖音百科（douyin）" },
+  { key: "webSearchSourceMoji", value: "moji", label: "墨迹天气（moji）" },
+  { key: "webSearchSourceToutiao", value: "toutiao", label: "头条图文（toutiao）" },
+];
+
+function createDefaultAgentProviderMap() {
+  return {
+    A: "openrouter",
+    B: "openrouter",
+    C: "openrouter",
+    D: "openrouter",
+  };
+}
+
+function createDefaultAgentModelMap() {
+  return {
+    A: "",
+    B: "",
+    C: "",
+    D: "",
+  };
+}
+
+function sanitizeAgentProviderMap(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const fallback = createDefaultAgentProviderMap();
+  const next = { ...fallback };
+  AGENT_IDS.forEach((agentId) => {
+    const key = String(source?.[agentId] || "")
+      .trim()
+      .toLowerCase();
+    if (KNOWN_PROVIDERS.has(key)) {
+      next[agentId] = key;
+    }
+  });
+  return next;
+}
+
+function sanitizeAgentModelMap(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const next = createDefaultAgentModelMap();
+  AGENT_IDS.forEach((agentId) => {
+    next[agentId] = String(source?.[agentId] || "")
+      .trim()
+      .slice(0, 180);
+  });
+  return next;
+}
 
 function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
@@ -126,6 +219,54 @@ function readErrorMessage(error) {
 function shouldRelogin(error) {
   const msg = String(error?.message || "");
   return msg.includes("管理员身份无效") || msg.includes("仅管理员可访问");
+}
+
+function resolveVolcengineWebSearchCapability(model) {
+  const normalized = String(model || "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) {
+    return { supported: false, supportsThinking: false, matchedModelId: "" };
+  }
+
+  const candidates = new Set([normalized]);
+  const slashIndex = normalized.lastIndexOf("/");
+  if (slashIndex > -1 && slashIndex < normalized.length - 1) {
+    candidates.add(normalized.slice(slashIndex + 1));
+  }
+
+  let best = null;
+  VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES.forEach((item) => {
+    const aliases = Array.isArray(item.aliases) ? item.aliases : [];
+    aliases.forEach((aliasRaw) => {
+      const alias = String(aliasRaw || "")
+        .trim()
+        .toLowerCase();
+      if (!alias) return;
+
+      candidates.forEach((candidate) => {
+        if (!candidate) return;
+        const exact = candidate === alias;
+        const includes = !exact && candidate.includes(alias);
+        if (!exact && !includes) return;
+
+        const score = (exact ? 1000 : 100) + alias.length;
+        if (!best || score > best.score) {
+          best = { item, score };
+        }
+      });
+    });
+  });
+
+  if (!best) {
+    return { supported: false, supportsThinking: false, matchedModelId: "" };
+  }
+
+  return {
+    supported: true,
+    supportsThinking: !!best.item.supportsThinking,
+    matchedModelId: best.item.id,
+  };
 }
 
 function toPreviewMessages(list) {
@@ -436,6 +577,12 @@ export default function AdminSettingsPage() {
   const [runtimeConfigs, setRuntimeConfigs] = useState(
     createDefaultAgentRuntimeConfigMap(),
   );
+  const [agentProviderDefaults, setAgentProviderDefaults] = useState(
+    createDefaultAgentProviderMap(),
+  );
+  const [agentModelDefaults, setAgentModelDefaults] = useState(
+    createDefaultAgentModelMap(),
+  );
   const [selectedAgent, setSelectedAgent] = useState("A");
 
   const [loading, setLoading] = useState(true);
@@ -461,6 +608,49 @@ export default function AdminSettingsPage() {
     () => runtimeConfigs[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG,
     [runtimeConfigs, selectedAgent],
   );
+  const selectedProviderDefault = agentProviderDefaults[selectedAgent] || "openrouter";
+  const selectedProvider =
+    selectedRuntime.provider === "inherit"
+      ? selectedProviderDefault
+      : selectedRuntime.provider;
+  const selectedProviderName =
+    selectedProvider === "volcengine"
+      ? "火山引擎 Ark"
+      : selectedProvider === "aliyun"
+        ? "阿里云 DashScope"
+        : "OpenRouter";
+  const showVolcenginePanel = selectedProvider === "volcengine";
+  const selectedModelDefault = agentModelDefaults[selectedAgent] || "";
+  const selectedModelForMatching = String(
+    selectedRuntime.model || selectedModelDefault || "",
+  ).trim();
+  const volcWebSearchCapability = useMemo(
+    () => resolveVolcengineWebSearchCapability(selectedModelForMatching),
+    [selectedModelForMatching],
+  );
+  const webSearchSupported = showVolcenginePanel && volcWebSearchCapability.supported;
+  const webSearchSwitchDisabled = loading || !webSearchSupported;
+  const webSearchCapabilityHint = useMemo(() => {
+    if (!showVolcenginePanel) return "";
+    if (!selectedModelForMatching) {
+      return "请输入火山模型 ID 以匹配联网搜索支持列表。";
+    }
+    if (!webSearchSupported) {
+      return "该模型未命中联网搜索支持列表，联网搜索已自动关闭。";
+    }
+    return `已匹配支持联网搜索的模型：${volcWebSearchCapability.matchedModelId}`;
+  }, [
+    selectedModelForMatching,
+    showVolcenginePanel,
+    volcWebSearchCapability.matchedModelId,
+    webSearchSupported,
+  ]);
+  const webSearchThinkingHint =
+    !webSearchSupported
+      ? "当前模型未启用联网搜索能力，系统不会注入“边想边搜”策略提示词。"
+      : volcWebSearchCapability.supportsThinking
+        ? "该模型支持深度思考，开启联网搜索后会自动注入“边想边搜”规范提示词。"
+        : "该模型不支持深度思考联动，联网搜索将按默认模式直接调用。";
 
   const selectedPrompt = prompts[selectedAgent] || "";
   const selectedAgentName = AGENT_META[selectedAgent]?.name || `智能体 ${selectedAgent}`;
@@ -516,9 +706,15 @@ export default function AdminSettingsPage() {
         const nextRuntimeConfigs = sanitizeRuntimeConfigMap(
           data?.runtimeConfigs || data?.resolvedRuntimeConfigs,
         );
+        const nextProviderDefaults = sanitizeAgentProviderMap(
+          data?.agentProviderDefaults,
+        );
+        const nextModelDefaults = sanitizeAgentModelMap(data?.agentModelDefaults);
 
         setPrompts(nextPrompts);
         setRuntimeConfigs(nextRuntimeConfigs);
+        setAgentProviderDefaults(nextProviderDefaults);
+        setAgentModelDefaults(nextModelDefaults);
         draftRef.current = {
           prompts: nextPrompts,
           runtimeConfigs: nextRuntimeConfigs,
@@ -566,12 +762,18 @@ export default function AdminSettingsPage() {
         const nextRuntimeConfigs = sanitizeRuntimeConfigMap(
           data?.runtimeConfigs || data?.resolvedRuntimeConfigs,
         );
+        const nextProviderDefaults = sanitizeAgentProviderMap(
+          data?.agentProviderDefaults,
+        );
+        const nextModelDefaults = sanitizeAgentModelMap(data?.agentModelDefaults);
 
         setDefaultSystemPrompt(
           String(data?.defaultSystemPrompt || DEFAULT_SYSTEM_PROMPT),
         );
         setPrompts(nextPrompts);
         setRuntimeConfigs(nextRuntimeConfigs);
+        setAgentProviderDefaults(nextProviderDefaults);
+        setAgentModelDefaults(nextModelDefaults);
         draftRef.current = {
           prompts: nextPrompts,
           runtimeConfigs: nextRuntimeConfigs,
@@ -625,6 +827,54 @@ export default function AdminSettingsPage() {
     };
   }, [showExportMenu]);
 
+  useEffect(() => {
+    const expectedProtocol = showVolcenginePanel ? "responses" : "chat";
+    if (selectedRuntime.protocol === expectedProtocol) return;
+
+    setRuntimeConfigs((prev) => {
+      const current = prev[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+      if (current.protocol === expectedProtocol) return prev;
+      return {
+        ...prev,
+        [selectedAgent]: sanitizeSingleRuntimeConfig({
+          ...current,
+          protocol: expectedProtocol,
+        }),
+      };
+    });
+    markDirty();
+  }, [
+    markDirty,
+    selectedAgent,
+    selectedRuntime.protocol,
+    showVolcenginePanel,
+  ]);
+
+  useEffect(() => {
+    if (!showVolcenginePanel) return;
+    if (webSearchSupported) return;
+    if (!selectedRuntime.enableWebSearch) return;
+
+    setRuntimeConfigs((prev) => {
+      const current = prev[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+      if (!current.enableWebSearch) return prev;
+      return {
+        ...prev,
+        [selectedAgent]: sanitizeSingleRuntimeConfig({
+          ...current,
+          enableWebSearch: false,
+        }),
+      };
+    });
+    markDirty();
+  }, [
+    markDirty,
+    selectedAgent,
+    selectedRuntime.enableWebSearch,
+    showVolcenginePanel,
+    webSearchSupported,
+  ]);
+
   function updatePrompt(value) {
     setPrompts((prev) => ({
       ...prev,
@@ -637,11 +887,17 @@ export default function AdminSettingsPage() {
     setRuntimeConfigs((prev) => {
       const current = prev[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
       const shouldSwitchCustom = field === "temperature" || field === "topP";
-      const next = sanitizeSingleRuntimeConfig({
+      const draft = {
         ...current,
         ...(shouldSwitchCustom ? { creativityMode: "custom" } : {}),
         [field]: value,
-      });
+      };
+
+      if (field === "enableThinking" && value === false) {
+        draft.reasoningEffort = "none";
+      }
+
+      const next = sanitizeSingleRuntimeConfig(draft);
 
       return {
         ...prev,
@@ -1021,54 +1277,256 @@ export default function AdminSettingsPage() {
             </div>
 
             <div className="admin-field-grid">
-              <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
-                <span>温度</span>
-                <NumberRuntimeInput
-                  id="admin-runtime-temperature"
-                  value={selectedRuntime.temperature}
-                  min={0}
-                  max={2}
-                  step={0.1}
-                  onChange={(next) => updateRuntimeField("temperature", next)}
-                  disabled={loading}
-                />
-              </label>
-
-              <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
-                <span>Top-p</span>
-                <NumberRuntimeInput
-                  id="admin-runtime-top-p"
-                  value={selectedRuntime.topP}
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  onChange={(next) => updateRuntimeField("topP", next)}
-                  disabled={loading}
-                />
-              </label>
-
-              <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
-                <span>携带上下文轮数</span>
-                <NumberRuntimeInput
-                  id="admin-runtime-context-rounds"
-                  value={selectedRuntime.contextRounds}
-                  min={1}
-                  max={20}
-                  step={1}
-                  onChange={(next) => updateRuntimeField("contextRounds", next)}
-                  disabled={loading}
-                />
-              </label>
-
               <div className="admin-field-row split">
-                <span>推理模式</span>
+                <span>服务商</span>
                 <AdminPortalSelect
-                  value={selectedRuntime.reasoningEffort}
-                  options={REASONING_MODE_OPTIONS}
-                  onChange={(next) => updateRuntimeField("reasoningEffort", next)}
+                  value={selectedRuntime.provider}
+                  options={PROVIDER_OPTIONS}
+                  onChange={(next) => updateRuntimeField("provider", next)}
                   disabled={loading}
                 />
               </div>
+
+              <label className="admin-field-row" htmlFor="admin-runtime-model">
+                <span>模型 ID</span>
+                <input
+                  id="admin-runtime-model"
+                  type="text"
+                  value={selectedRuntime.model}
+                  onChange={(e) => updateRuntimeField("model", e.target.value)}
+                  placeholder={
+                    selectedModelDefault
+                      ? `留空则使用默认模型：${selectedModelDefault}`
+                      : "留空则走 .env 里对应 AGENT_MODEL_*"
+                  }
+                  disabled={loading}
+                />
+              </label>
+
+              {showVolcenginePanel ? (
+                <>
+                  <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
+                    <span>温度</span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-temperature"
+                      value={selectedRuntime.temperature}
+                      min={0}
+                      max={2}
+                      step={0.1}
+                      onChange={(next) => updateRuntimeField("temperature", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
+                    <span>Top-p</span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-top-p"
+                      value={selectedRuntime.topP}
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      onChange={(next) => updateRuntimeField("topP", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
+                    <span>携带上下文轮数</span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-context-rounds"
+                      value={selectedRuntime.contextRounds}
+                      min={1}
+                      max={20}
+                      step={1}
+                      onChange={(next) => updateRuntimeField("contextRounds", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <div className="admin-field-row split">
+                    <span>深度思考</span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!selectedRuntime.enableThinking}
+                        onChange={(e) => updateRuntimeField("enableThinking", e.target.checked)}
+                        disabled={loading}
+                      />
+                      <span>{selectedRuntime.enableThinking ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>推理模式</span>
+                    <AdminPortalSelect
+                      value={selectedRuntime.reasoningEffort}
+                      options={REASONING_MODE_OPTIONS}
+                      onChange={(next) => updateRuntimeField("reasoningEffort", next)}
+                      disabled={loading}
+                    />
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>联网搜索</span>
+                    <label
+                      className={`admin-switch-row ${webSearchSwitchDisabled ? "disabled" : ""}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!!selectedRuntime.enableWebSearch && webSearchSupported}
+                        onChange={(e) =>
+                          updateRuntimeField("enableWebSearch", e.target.checked)
+                        }
+                        disabled={webSearchSwitchDisabled}
+                      />
+                      <span>
+                        {!!selectedRuntime.enableWebSearch && webSearchSupported
+                          ? "开启"
+                          : "关闭"}
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>搜索来源</span>
+                    <div className="admin-switch-group">
+                      {VOLCENGINE_WEB_SEARCH_SOURCE_OPTIONS.map((source) => (
+                        <label
+                          key={source.key}
+                          className={`admin-switch-row compact ${
+                            loading || !webSearchSupported ? "disabled" : ""
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={!!selectedRuntime[source.key]}
+                            onChange={(e) =>
+                              updateRuntimeField(source.key, e.target.checked)
+                            }
+                            disabled={loading || !webSearchSupported}
+                          />
+                          <span>{source.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <label
+                    className="admin-field-row split"
+                    htmlFor="admin-runtime-web-search-max-keyword"
+                  >
+                    <span className="admin-label-with-hint">
+                      单轮关键词数
+                      <InfoHint text="限制每轮搜索可用关键词数量，范围 1 到 50。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-web-search-max-keyword"
+                      value={selectedRuntime.webSearchMaxKeyword}
+                      min={1}
+                      max={50}
+                      step={1}
+                      onChange={(next) => updateRuntimeField("webSearchMaxKeyword", next)}
+                      disabled={loading || !webSearchSupported}
+                    />
+                  </label>
+
+                  <label
+                    className="admin-field-row split"
+                    htmlFor="admin-runtime-web-search-limit"
+                  >
+                    <span className="admin-label-with-hint">
+                      单次结果条数
+                      <InfoHint text="限制单次搜索返回结果数量，范围 1 到 50。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-web-search-limit"
+                      value={selectedRuntime.webSearchResultLimit}
+                      min={1}
+                      max={50}
+                      step={1}
+                      onChange={(next) => updateRuntimeField("webSearchResultLimit", next)}
+                      disabled={loading || !webSearchSupported}
+                    />
+                  </label>
+
+                  <label
+                    className="admin-field-row split"
+                    htmlFor="admin-runtime-web-search-max-tool-calls"
+                  >
+                    <span className="admin-label-with-hint">
+                      工具调用轮次上限
+                      <InfoHint text="限制一次回答内最多可执行的联网搜索轮次，范围 1 到 10。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-web-search-max-tool-calls"
+                      value={selectedRuntime.webSearchMaxToolCalls}
+                      min={1}
+                      max={10}
+                      step={1}
+                      onChange={(next) => updateRuntimeField("webSearchMaxToolCalls", next)}
+                      disabled={loading || !webSearchSupported}
+                    />
+                  </label>
+
+                  <p className="admin-field-note">
+                    当前服务商：{selectedProviderName}
+                    {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
+                    火山引擎 Ark 仅使用 Responses API，已移除 Chat Completions 选项。
+                  </p>
+                  <p className={`admin-field-note ${webSearchSupported ? "" : "warning"}`}>
+                    {webSearchCapabilityHint}
+                  </p>
+                  <p className="admin-field-note">{webSearchThinkingHint}</p>
+                </>
+              ) : (
+                <>
+                  <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
+                    <span>温度</span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-temperature"
+                      value={selectedRuntime.temperature}
+                      min={0}
+                      max={2}
+                      step={0.1}
+                      onChange={(next) => updateRuntimeField("temperature", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
+                    <span>Top-p</span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-top-p"
+                      value={selectedRuntime.topP}
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      onChange={(next) => updateRuntimeField("topP", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
+                    <span>携带上下文轮数</span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-context-rounds"
+                      value={selectedRuntime.contextRounds}
+                      min={1}
+                      max={20}
+                      step={1}
+                      onChange={(next) => updateRuntimeField("contextRounds", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <p className="admin-field-note">
+                    当前服务商：{selectedProviderName}
+                    {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
+                    该服务商当前仅使用 Chat 协议，Responses 参数已自动隐藏。
+                  </p>
+                </>
+              )}
             </div>
           </section>
 

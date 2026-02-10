@@ -425,6 +425,27 @@
   min-width: 0;
 }
 
+.admin-field-row .admin-label-with-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.admin-field-note {
+  margin: 0;
+  padding-left: 148px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.admin-field-note.warning {
+  color: #9f1239;
+}
+
 .admin-number-control {
   width: 100%;
   height: 42px;
@@ -513,6 +534,17 @@
 .admin-panel-api .admin-field-row.split .admin-reasoning-select {
   width: min(246px, 100%);
   margin-left: auto;
+}
+
+.admin-panel-api .admin-field-row.split .admin-switch-row {
+  width: fit-content;
+  margin-left: auto;
+}
+
+.admin-panel-api .admin-field-row.split .admin-switch-group .admin-switch-row {
+  width: 100%;
+  margin-left: 0;
+  justify-content: flex-start;
 }
 
 .admin-reasoning-select {
@@ -615,6 +647,11 @@
   cursor: pointer;
 }
 
+.admin-switch-row.disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 .admin-switch-row input {
   margin: 0;
   width: 15px;
@@ -625,6 +662,24 @@
 .admin-switch-row span {
   font-size: 13px;
   color: #1e293b;
+}
+
+.admin-switch-group {
+  width: min(246px, 100%);
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.admin-switch-row.compact {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 9px;
+}
+
+.admin-switch-row.compact span {
+  font-size: 12px;
 }
 
 .admin-panel.preview {
@@ -839,9 +894,24 @@
     gap: 6px;
   }
 
+  .admin-field-note {
+    padding-left: 0;
+  }
+
   .admin-panel-api .admin-field-row.split .admin-number-control,
   .admin-panel-api .admin-field-row.split .admin-reasoning-select {
     width: 100%;
+  }
+
+  .admin-panel-api .admin-field-row.split .admin-switch-row {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+
+  .admin-switch-group {
+    width: 100%;
+    margin-left: 0;
   }
 
   .admin-preview-chat .messages {

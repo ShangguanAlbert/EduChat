@@ -1,6 +1,8 @@
 export const AGENT_IDS = ["A", "B", "C", "D"];
 
 export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
+  provider: "inherit",
+  model: "",
   protocol: "chat",
   creativityMode: "balanced",
   temperature: 0.6,
@@ -10,9 +12,17 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   contextRounds: 10,
   maxOutputTokens: 4096,
   maxReasoningTokens: 0,
+  enableThinking: true,
   reasoningEffort: "low",
   includeCurrentTime: false,
   injectSafetyPrompt: false,
+  enableWebSearch: false,
+  webSearchMaxKeyword: 2,
+  webSearchResultLimit: 10,
+  webSearchMaxToolCalls: 3,
+  webSearchSourceDouyin: true,
+  webSearchSourceMoji: true,
+  webSearchSourceToutiao: true,
 });
 
 export const CREATIVITY_PRESET_OPTIONS = [
@@ -38,6 +48,8 @@ export function sanitizeSingleRuntimeConfig(raw) {
   const isCustom = creativityMode === "custom";
 
   return {
+    provider: sanitizeProvider(source.provider),
+    model: sanitizeModel(source.model),
     protocol: sanitizeProtocol(source.protocol),
     creativityMode,
     temperature: isCustom
@@ -65,9 +77,47 @@ export function sanitizeSingleRuntimeConfig(raw) {
       0,
       8192,
     ),
+    enableThinking: sanitizeBoolean(
+      source.enableThinking,
+      DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
+    ),
     reasoningEffort: sanitizeReasoningEffort(source.reasoningEffort),
     includeCurrentTime: !!source.includeCurrentTime,
     injectSafetyPrompt: !!source.injectSafetyPrompt,
+    enableWebSearch: sanitizeBoolean(
+      source.enableWebSearch,
+      DEFAULT_AGENT_RUNTIME_CONFIG.enableWebSearch,
+    ),
+    webSearchMaxKeyword: sanitizeInteger(
+      source.webSearchMaxKeyword,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxKeyword,
+      1,
+      50,
+    ),
+    webSearchResultLimit: sanitizeInteger(
+      source.webSearchResultLimit,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchResultLimit,
+      1,
+      50,
+    ),
+    webSearchMaxToolCalls: sanitizeInteger(
+      source.webSearchMaxToolCalls,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxToolCalls,
+      1,
+      10,
+    ),
+    webSearchSourceDouyin: sanitizeBoolean(
+      source.webSearchSourceDouyin,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceDouyin,
+    ),
+    webSearchSourceMoji: sanitizeBoolean(
+      source.webSearchSourceMoji,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceMoji,
+    ),
+    webSearchSourceToutiao: sanitizeBoolean(
+      source.webSearchSourceToutiao,
+      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceToutiao,
+    ),
   };
 }
 
@@ -111,8 +161,26 @@ function sanitizeProtocol(value) {
   const key = String(value || "")
     .trim()
     .toLowerCase();
-  if (key === "responses") return "responses";
+  if (key === "responses" || key === "response") return "responses";
   return "chat";
+}
+
+function sanitizeProvider(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!key) return DEFAULT_AGENT_RUNTIME_CONFIG.provider;
+  if (key === "inherit" || key === "default" || key === "auto") return "inherit";
+  if (key === "openrouter") return "openrouter";
+  if (key === "aliyun" || key === "alibaba" || key === "dashscope") return "aliyun";
+  if (key === "volcengine" || key === "volc" || key === "ark") return "volcengine";
+  return DEFAULT_AGENT_RUNTIME_CONFIG.provider;
+}
+
+function sanitizeModel(value) {
+  return String(value || "")
+    .trim()
+    .slice(0, 180);
 }
 
 function sanitizeCreativityMode(value) {
@@ -137,10 +205,22 @@ function sanitizeInteger(value, fallback, min, max) {
   return Math.min(max, Math.max(min, Math.round(num)));
 }
 
+function sanitizeBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!key) return fallback;
+  if (key === "1" || key === "true" || key === "yes" || key === "on") return true;
+  if (key === "0" || key === "false" || key === "no" || key === "off") return false;
+  return fallback;
+}
+
 function sanitizeReasoningEffort(value) {
   const key = String(value || "")
     .trim()
     .toLowerCase();
+  if (key === "minimal") return "none";
   if (key === "none" || key === "low" || key === "medium" || key === "high") {
     return key;
   }
