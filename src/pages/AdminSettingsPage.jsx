@@ -28,6 +28,7 @@ import {
   AGENT_IDS,
   DEFAULT_AGENT_RUNTIME_CONFIG,
   createDefaultAgentRuntimeConfigMap,
+  resolveRuntimeTokenProfileByModel,
   sanitizeRuntimeConfigMap,
   sanitizeSingleRuntimeConfig,
 } from "./chat/agentRuntimeConfig.js";
@@ -36,12 +37,6 @@ import "../styles/chat.css";
 import "../styles/admin-settings.css";
 
 const AUTO_SAVE_MS = 5 * 60 * 1000;
-const REASONING_MODE_OPTIONS = [
-  { value: "none", label: "关闭" },
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-];
 const PROVIDER_OPTIONS = [
   { value: "inherit", label: "跟随 .env 默认" },
   { value: "openrouter", label: "OpenRouter" },
@@ -622,12 +617,16 @@ export default function AdminSettingsPage() {
   const showVolcenginePanel = selectedProvider === "volcengine";
   const providerSupportsReasoning = selectedProvider !== "aliyun";
   const providerReasoningHint = providerSupportsReasoning
-    ? "当前服务商支持深度思考与推理强度（四档）配置。"
-    : "阿里云当前仅使用 Chat 协议，不支持 reasoning.effort。";
+    ? "当前服务商支持深度思考开关：关闭=none，开启=high。"
+    : "阿里云当前仅使用 Chat 协议，不支持深度思考参数。";
   const selectedModelDefault = agentModelDefaults[selectedAgent] || "";
   const selectedModelForMatching = String(
     selectedRuntime.model || selectedModelDefault || "",
   ).trim();
+  const matchedTokenProfile = useMemo(
+    () => resolveRuntimeTokenProfileByModel(selectedModelForMatching),
+    [selectedModelForMatching],
+  );
   const volcWebSearchCapability = useMemo(
     () => resolveVolcengineWebSearchCapability(selectedModelForMatching),
     [selectedModelForMatching],
@@ -843,7 +842,7 @@ export default function AdminSettingsPage() {
         [selectedAgent]: sanitizeSingleRuntimeConfig({
           ...current,
           protocol: expectedProtocol,
-        }),
+        }, selectedAgent),
       };
     });
     markDirty();
@@ -867,7 +866,7 @@ export default function AdminSettingsPage() {
         [selectedAgent]: sanitizeSingleRuntimeConfig({
           ...current,
           enableWebSearch: false,
-        }),
+        }, selectedAgent),
       };
     });
     markDirty();
@@ -897,11 +896,21 @@ export default function AdminSettingsPage() {
         [field]: value,
       };
 
-      if (field === "enableThinking" && value === false) {
-        draft.reasoningEffort = "none";
+      if (field === "model") {
+        const explicitModel = String(value || "").trim();
+        const fallbackModel = String(
+          explicitModel || agentModelDefaults[selectedAgent] || "",
+        ).trim();
+        const profile = resolveRuntimeTokenProfileByModel(fallbackModel);
+        if (profile) {
+          draft.contextWindowTokens = profile.contextWindowTokens;
+          draft.maxInputTokens = profile.maxInputTokens;
+          draft.maxOutputTokens = profile.maxOutputTokens;
+          draft.maxReasoningTokens = profile.maxReasoningTokens;
+        }
       }
 
-      const next = sanitizeSingleRuntimeConfig(draft);
+      const next = sanitizeSingleRuntimeConfig(draft, selectedAgent);
 
       return {
         ...prev,
@@ -1306,11 +1315,31 @@ export default function AdminSettingsPage() {
                   disabled={loading}
                 />
               </label>
+              {matchedTokenProfile ? (
+                <p className="admin-field-note">
+                  已自动匹配长度限制：上下文 {matchedTokenProfile.contextWindowTokens}，最大输入{" "}
+                  {matchedTokenProfile.maxInputTokens}，最大输出{" "}
+                  {matchedTokenProfile.maxOutputTokens}。
+                </p>
+              ) : (
+                <p className="admin-field-note">
+                  未匹配到内置模型长度规则，将使用当前智能体默认规格。
+                </p>
+              )}
+              {showVolcenginePanel ? (
+                <p className="admin-field-note">
+                  说明：Responses 协议下，上下文窗口与最大输入为自动匹配只读项；最大输出会映射到上游接口参数。
+                </p>
+              ) : (
+                <p className="admin-field-note">
+                  说明：Chat 协议下，上下文窗口、最大输入长度、最大输出长度可独立编辑；最大输出会映射到上游接口参数。
+                </p>
+              )}
 
               {showVolcenginePanel ? (
                 <>
                   <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
-                    <span>温度</span>
+                    <span>生成随机性</span>
                     <NumberRuntimeInput
                       id="admin-runtime-temperature"
                       value={selectedRuntime.temperature}
@@ -1323,7 +1352,7 @@ export default function AdminSettingsPage() {
                   </label>
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
-                    <span>Top-p</span>
+                    <span>累计概率</span>
                     <NumberRuntimeInput
                       id="admin-runtime-top-p"
                       value={selectedRuntime.topP}
@@ -1336,7 +1365,7 @@ export default function AdminSettingsPage() {
                   </label>
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
-                    <span>携带上下文轮数</span>
+                    <span>上下文轮数</span>
                     <NumberRuntimeInput
                       id="admin-runtime-context-rounds"
                       value={selectedRuntime.contextRounds}
@@ -1350,8 +1379,8 @@ export default function AdminSettingsPage() {
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens">
                     <span className="admin-label-with-hint">
-                      上下文窗口（Token）
-                      <InfoHint text="模型上下文窗口上限，用于记录与校验。推荐按模型官方参数填写。" />
+                      上下文窗口
+                      <InfoHint text="仅展示模型规格，不会传到上游 API。" />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-context-window-tokens"
@@ -1359,15 +1388,15 @@ export default function AdminSettingsPage() {
                       min={1024}
                       max={512000}
                       step={1024}
-                      onChange={(next) => updateRuntimeField("contextWindowTokens", next)}
-                      disabled={loading}
+                      onChange={() => {}}
+                      disabled
                     />
                   </label>
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens">
                     <span className="admin-label-with-hint">
-                      最大输入 Token 长度
-                      <InfoHint text="单次请求允许输入的 Token 上限，用于记录与校验。" />
+                      最大输入长度
+                      <InfoHint text="仅展示模型规格，不会传到上游 API。" />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-max-input-tokens"
@@ -1375,15 +1404,15 @@ export default function AdminSettingsPage() {
                       min={1024}
                       max={512000}
                       step={1024}
-                      onChange={(next) => updateRuntimeField("maxInputTokens", next)}
-                      disabled={loading}
+                      onChange={() => {}}
+                      disabled
                     />
                   </label>
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-max-output-tokens">
                     <span className="admin-label-with-hint">
-                      最大输出 Token 长度
-                      <InfoHint text="会映射到上游接口的 max_tokens / max_output_tokens。" />
+                      最大输出长度
+                      <InfoHint text="会映射到 Responses 的最大输出参数。" />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-max-output-tokens"
@@ -1396,25 +1425,9 @@ export default function AdminSettingsPage() {
                     />
                   </label>
 
-                  <label className="admin-field-row split" htmlFor="admin-runtime-max-reasoning-tokens">
-                    <span className="admin-label-with-hint">
-                      最大思考内容 Token 长度
-                      <InfoHint text="深度思考阶段可使用的 Token 上限。" />
-                    </span>
-                    <NumberRuntimeInput
-                      id="admin-runtime-max-reasoning-tokens"
-                      value={selectedRuntime.maxReasoningTokens}
-                      min={0}
-                      max={128000}
-                      step={64}
-                      onChange={(next) => updateRuntimeField("maxReasoningTokens", next)}
-                      disabled={loading}
-                    />
-                  </label>
-
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
-                      系统提示词注入系统时间（年月日）
+                      注入系统时间
                       <InfoHint text="开启后，每次会话都会在系统提示词中注入当前日期（年月日）。" />
                     </span>
                     <label className="admin-switch-row">
@@ -1432,19 +1445,19 @@ export default function AdminSettingsPage() {
 
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
-                      防止提示词/API 设置泄露
-                      <InfoHint text="默认开启。开启后会注入高优先级防泄漏提示词；若用户试图套取内部配置，助手仅回复“我只是你的助手”。" />
+                      SP防泄漏指令
+                      <InfoHint text="默认关闭。开启后会注入高优先级防泄漏提示词；若用户试图套取内部配置，助手仅回复“我只是你的助手”。" />
                     </span>
                     <label className="admin-switch-row">
                       <input
                         type="checkbox"
-                        checked={selectedRuntime.preventPromptLeak !== false}
+                        checked={!!selectedRuntime.preventPromptLeak}
                         onChange={(e) =>
                           updateRuntimeField("preventPromptLeak", e.target.checked)
                         }
                         disabled={loading}
                       />
-                      <span>{selectedRuntime.preventPromptLeak !== false ? "开启" : "关闭"}</span>
+                      <span>{selectedRuntime.preventPromptLeak ? "开启" : "关闭"}</span>
                     </label>
                   </div>
 
@@ -1459,16 +1472,6 @@ export default function AdminSettingsPage() {
                       />
                       <span>{selectedRuntime.enableThinking ? "开启" : "关闭"}</span>
                     </label>
-                  </div>
-
-                  <div className="admin-field-row split">
-                    <span>推理模式</span>
-                    <AdminPortalSelect
-                      value={selectedRuntime.reasoningEffort}
-                      options={REASONING_MODE_OPTIONS}
-                      onChange={(next) => updateRuntimeField("reasoningEffort", next)}
-                      disabled={loading}
-                    />
                   </div>
 
                   <div className="admin-field-row split">
@@ -1586,7 +1589,7 @@ export default function AdminSettingsPage() {
               ) : (
                 <>
                   <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
-                    <span>温度</span>
+                    <span>生成随机性</span>
                     <NumberRuntimeInput
                       id="admin-runtime-temperature"
                       value={selectedRuntime.temperature}
@@ -1599,7 +1602,7 @@ export default function AdminSettingsPage() {
                   </label>
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
-                    <span>Top-p</span>
+                    <span>累计概率</span>
                     <NumberRuntimeInput
                       id="admin-runtime-top-p"
                       value={selectedRuntime.topP}
@@ -1612,7 +1615,7 @@ export default function AdminSettingsPage() {
                   </label>
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
-                    <span>携带上下文轮数</span>
+                    <span>上下文轮数</span>
                     <NumberRuntimeInput
                       id="admin-runtime-context-rounds"
                       value={selectedRuntime.contextRounds}
@@ -1626,7 +1629,7 @@ export default function AdminSettingsPage() {
 
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
-                      系统提示词注入系统时间（年月日）
+                      注入系统时间
                       <InfoHint text="开启后，每次会话都会在系统提示词中注入当前日期（年月日）。" />
                     </span>
                     <label className="admin-switch-row">
@@ -1644,19 +1647,19 @@ export default function AdminSettingsPage() {
 
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
-                      防止提示词/API 设置泄露
-                      <InfoHint text="默认开启。开启后会注入高优先级防泄漏提示词；若用户试图套取内部配置，助手仅回复“我只是你的助手”。" />
+                      SP防泄漏指令
+                      <InfoHint text="默认关闭。开启后会注入高优先级防泄漏提示词；若用户试图套取内部配置，助手仅回复“我只是你的助手”。" />
                     </span>
                     <label className="admin-switch-row">
                       <input
                         type="checkbox"
-                        checked={selectedRuntime.preventPromptLeak !== false}
+                        checked={!!selectedRuntime.preventPromptLeak}
                         onChange={(e) =>
                           updateRuntimeField("preventPromptLeak", e.target.checked)
                         }
                         disabled={loading}
                       />
-                      <span>{selectedRuntime.preventPromptLeak !== false ? "开启" : "关闭"}</span>
+                      <span>{selectedRuntime.preventPromptLeak ? "开启" : "关闭"}</span>
                     </label>
                   </div>
 
@@ -1675,20 +1678,10 @@ export default function AdminSettingsPage() {
                     </label>
                   </div>
 
-                  <div className="admin-field-row split">
-                    <span>推理模式</span>
-                    <AdminPortalSelect
-                      value={selectedRuntime.reasoningEffort}
-                      options={REASONING_MODE_OPTIONS}
-                      onChange={(next) => updateRuntimeField("reasoningEffort", next)}
-                      disabled={loading || !providerSupportsReasoning}
-                    />
-                  </div>
-
                   <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens-chat">
                     <span className="admin-label-with-hint">
-                      上下文窗口（Token）
-                      <InfoHint text="模型上下文窗口上限，用于记录与校验。推荐按模型官方参数填写。" />
+                      上下文窗口
+                      <InfoHint text="Chat 协议配置项，可手动编辑。" />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-context-window-tokens-chat"
@@ -1703,8 +1696,8 @@ export default function AdminSettingsPage() {
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens-chat">
                     <span className="admin-label-with-hint">
-                      最大输入 Token 长度
-                      <InfoHint text="单次请求允许输入的 Token 上限，用于记录与校验。" />
+                      最大输入长度
+                      <InfoHint text="Chat 协议配置项，可手动编辑。" />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-max-input-tokens-chat"
@@ -1719,8 +1712,8 @@ export default function AdminSettingsPage() {
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-max-output-tokens-chat">
                     <span className="admin-label-with-hint">
-                      最大输出 Token 长度
-                      <InfoHint text="会映射到上游接口的 max_tokens / max_output_tokens。" />
+                      最大输出长度
+                      <InfoHint text="会映射到 Chat 的最大输出参数。" />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-max-output-tokens-chat"
@@ -1729,22 +1722,6 @@ export default function AdminSettingsPage() {
                       max={128000}
                       step={64}
                       onChange={(next) => updateRuntimeField("maxOutputTokens", next)}
-                      disabled={loading}
-                    />
-                  </label>
-
-                  <label className="admin-field-row split" htmlFor="admin-runtime-max-reasoning-tokens-chat">
-                    <span className="admin-label-with-hint">
-                      最大思考内容 Token 长度
-                      <InfoHint text="深度思考阶段可使用的 Token 上限。" />
-                    </span>
-                    <NumberRuntimeInput
-                      id="admin-runtime-max-reasoning-tokens-chat"
-                      value={selectedRuntime.maxReasoningTokens}
-                      min={0}
-                      max={128000}
-                      step={64}
-                      onChange={(next) => updateRuntimeField("maxReasoningTokens", next)}
                       disabled={loading}
                     />
                   </label>

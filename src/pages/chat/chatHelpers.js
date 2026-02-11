@@ -95,8 +95,7 @@ export function normalizeReasoningEffort(value) {
   if (v === "none" || v === "off" || v === "no" || v === "false" || v === "0") {
     return "none";
   }
-  if (v === "low" || v === "medium" || v === "high") return v;
-  return "low";
+  return "high";
 }
 
 export function normalizeReasoningLabel(value, fallback = "none") {
@@ -108,8 +107,7 @@ export function normalizeReasoningLabel(value, fallback = "none") {
   if (v === "none" || v === "off" || v === "no" || v === "false" || v === "0") {
     return "none";
   }
-  if (v === "low" || v === "medium" || v === "high") return v;
-  return fallback;
+  return v ? "high" : fallback;
 }
 
 export function formatTimestamp(iso) {
@@ -124,7 +122,7 @@ export function normalizeRuntimeSnapshot(runtime) {
   const agentName = String(runtime.agentName || "-");
   const provider = String(runtime.provider || "pending");
   const model = String(runtime.model || "pending");
-  const requested = normalizeReasoningLabel(runtime.reasoningRequested, "low");
+  const requested = normalizeReasoningLabel(runtime.reasoningRequested, "high");
   const applied = normalizeReasoningLabel(runtime.reasoningApplied, "pending");
   const temperature = Number(runtime.temperature);
   const topP = Number(runtime.topP);
@@ -146,7 +144,7 @@ export function createRuntimeSnapshot({
   agentMeta,
   apiTemperature,
   apiTopP,
-  apiReasoningEffort,
+  enableThinking,
 }) {
   const current = agentMeta[agentId] || agentMeta.A;
   return {
@@ -154,7 +152,7 @@ export function createRuntimeSnapshot({
     agentName: current.name,
     temperature: normalizeTemperature(apiTemperature),
     topP: normalizeTopP(apiTopP),
-    reasoningRequested: normalizeReasoningEffort(apiReasoningEffort),
+    reasoningRequested: enableThinking ? "high" : "none",
     reasoningApplied: "pending",
     provider: "pending",
     model: "pending",
@@ -168,7 +166,7 @@ export function mergeRuntimeWithMeta(runtime, meta) {
     model: String(meta?.model || runtime?.model || "pending"),
     reasoningRequested: normalizeReasoningLabel(
       meta?.reasoningRequested || runtime?.reasoningRequested,
-      "low",
+      "high",
     ),
     reasoningApplied: normalizeReasoningLabel(
       meta?.reasoningApplied || runtime?.reasoningApplied,

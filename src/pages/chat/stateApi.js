@@ -70,3 +70,24 @@ export function saveUserProfile(payload) {
 export function getAuthTokenHeader() {
   return authHeaders();
 }
+
+export async function uploadVolcengineChatFiles({ agentId = "A", files = [] } = {}) {
+  const safeFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  const formData = new FormData();
+  formData.append("agentId", String(agentId || "A"));
+  safeFiles.forEach((file) => {
+    formData.append("files", file);
+  });
+
+  const resp = await fetch("/api/chat/volcengine-files/upload", {
+    method: "POST",
+    headers: authHeaders(),
+    body: formData,
+  });
+  const data = await readJson(resp);
+  if (!resp.ok) {
+    const message = data?.error || data?.message || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+  return data;
+}

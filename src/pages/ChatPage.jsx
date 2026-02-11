@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Info, LogOut, Settings } from "lucide-react";
+import { Info, LogOut } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import Sidebar from "../components/Sidebar.jsx";
 import AgentSelect from "../components/AgentSelect.jsx";
@@ -51,6 +51,7 @@ import {
   saveChatSessionMessages,
   saveChatStateMeta,
   saveUserProfile,
+  uploadVolcengineChatFiles,
 } from "./chat/stateApi.js";
 import {
   createNewSessionRecord,
@@ -71,6 +72,7 @@ const DEFAULT_SESSION_MESSAGES = {
   ],
 };
 const CONTEXT_USER_ROUNDS = 10;
+const VIDEO_EXTENSIONS = new Set(["mp4", "avi", "mov"]);
 
 export default function ChatPage() {
   const navigate = useNavigate();
@@ -87,11 +89,11 @@ export default function ChatPage() {
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [apiTemperature, setApiTemperature] = useState("0.6");
   const [apiTopP, setApiTopP] = useState("1");
-  const [apiReasoningEffort, setApiReasoningEffort] = useState("low");
+  const [apiReasoningEffort, setApiReasoningEffort] = useState("high");
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamError, setStreamError] = useState("");
   const [stateSaveError, setStateSaveError] = useState("");
-  const [lastAppliedReasoning, setLastAppliedReasoning] = useState("low");
+  const [lastAppliedReasoning, setLastAppliedReasoning] = useState("high");
   const [smartContextEnabled, setSmartContextEnabled] = useState(false);
   const [selectedAskText, setSelectedAskText] = useState("");
   const [focusUserMessageId, setFocusUserMessageId] = useState("");
@@ -104,16 +106,6 @@ export default function ChatPage() {
   const [userInfoSaving, setUserInfoSaving] = useState(false);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [bootstrapError, setBootstrapError] = useState("");
-  const [isAdminUser, setIsAdminUser] = useState(() => {
-    try {
-      const raw = localStorage.getItem("auth_user");
-      if (!raw) return false;
-      const parsed = JSON.parse(raw);
-      return String(parsed?.role || "").toLowerCase() === "admin";
-    } catch {
-      return false;
-    }
-  });
 
   const messageListRef = useRef(null);
   const exportWrapRef = useRef(null);
@@ -160,9 +152,9 @@ export default function ChatPage() {
         agentRuntimeConfigs[agentId]?.temperature ??
         DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
       apiTopP: agentRuntimeConfigs[agentId]?.topP ?? DEFAULT_AGENT_RUNTIME_CONFIG.topP,
-      apiReasoningEffort:
-        agentRuntimeConfigs[agentId]?.reasoningEffort ??
-        DEFAULT_AGENT_RUNTIME_CONFIG.reasoningEffort,
+      enableThinking:
+        agentRuntimeConfigs[agentId]?.enableThinking ??
+        DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
     });
 
   function updateAssistantRuntimeFromMeta(sessionId, assistantId, meta) {
@@ -418,10 +410,151 @@ export default function ChatPage() {
     return list.slice(startIdx);
   }
 
-  function toApiMessages(list) {
+  function toApiMessages(
+    list,
+    { useVolcengineResponsesFileRefs = false } = {},
+  ) {
     return list
-      .map((m) => ({ role: m.role, content: m.content || "" }))
-      .filter((m) => m.content.trim().length > 0);
+      .map((m) => {
+        const content = buildApiMessageContentFromMessage(
+          m,
+          useVolcengineResponsesFileRefs,
+        );
+        return {
+          id: String(m?.id || ""),
+          role: m.role,
+          content,
+        };
+      })
+      .filter((m) => {
+        if (m.role === "user") return true;
+        if (typeof m.content === "string") return m.content.trim().length > 0;
+        return Array.isArray(m.content) && m.content.length > 0;
+      });
+  }
+
+  function buildApiMessageContentFromMessage(message, useVolcengineResponsesFileRefs) {
+    const text = String(message?.content || "");
+    if (!useVolcengineResponsesFileRefs || message?.role !== "user") {
+      return text;
+    }
+
+    const refs = Array.isArray(message?.attachments)
+      ? message.attachments
+          .map((attachment) => {
+            const fileId = String(attachment?.fileId || "").trim();
+            const inputType = String(attachment?.inputType || "")
+              .trim()
+              .toLowerCase();
+            if (!fileId) return null;
+            if (
+              inputType !== "input_file" &&
+              inputType !== "input_image" &&
+              inputType !== "input_video"
+            ) {
+              return null;
+            }
+            return { type: inputType, file_id: fileId };
+          })
+          .filter(Boolean)
+      : [];
+    if (refs.length === 0) return text;
+
+    const parts = [];
+    if (text.trim()) {
+      parts.push({ type: "text", text });
+    }
+    parts.push(...refs);
+    return parts;
+  }
+
+  function shouldUseVolcengineFilesApi(runtimeConfig) {
+    const provider = String(runtimeConfig?.provider || "")
+      .trim()
+      .toLowerCase();
+    const protocol = String(runtimeConfig?.protocol || "")
+      .trim()
+      .toLowerCase();
+    return provider === "volcengine" && protocol === "responses";
+  }
+
+  function classifyVolcengineFilesApiType(file) {
+    const mime = String(file?.type || "")
+      .trim()
+      .toLowerCase();
+    const name = String(file?.name || "")
+      .trim()
+      .toLowerCase();
+    const ext = name.includes(".") ? name.split(".").pop() : "";
+
+    if (mime.includes("pdf") || ext === "pdf") return "input_file";
+    if (mime.startsWith("image/")) return "input_image";
+    if (mime.startsWith("video/") || VIDEO_EXTENSIONS.has(ext)) return "input_video";
+    return "";
+  }
+
+  async function onPrepareFiles(pickedFiles) {
+    const safePicked = Array.isArray(pickedFiles) ? pickedFiles.filter(Boolean) : [];
+    if (safePicked.length === 0) return [];
+
+    const runtimeConfig = agentRuntimeConfigs[agent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+    if (!shouldUseVolcengineFilesApi(runtimeConfig)) {
+      return safePicked.map((file) => ({
+        kind: "local",
+        file,
+        name: String(file?.name || ""),
+        size: Number(file?.size || 0),
+        type: String(file?.type || ""),
+      }));
+    }
+
+    const indexedPicked = safePicked.map((file, index) => ({
+      index,
+      file,
+      inputType: classifyVolcengineFilesApiType(file),
+    }));
+    const remoteCandidates = indexedPicked.filter((item) => !!item.inputType);
+    const localCandidates = indexedPicked.filter((item) => !item.inputType);
+    const localItems = localCandidates.map((item) => ({
+      index: item.index,
+      kind: "local",
+      file: item.file,
+      name: String(item.file?.name || ""),
+      size: Number(item.file?.size || 0),
+      type: String(item.file?.type || ""),
+    }));
+
+    if (remoteCandidates.length === 0) {
+      return localItems.sort((a, b) => a.index - b.index);
+    }
+
+    const uploadResult = await uploadVolcengineChatFiles({
+      agentId: agent,
+      files: remoteCandidates.map((item) => item.file),
+    });
+    const remoteRefs = Array.isArray(uploadResult?.files) ? uploadResult.files : [];
+    if (remoteRefs.length !== remoteCandidates.length) {
+      throw new Error("文件上传结果异常，请重试。");
+    }
+
+    const remoteItems = remoteRefs.map((ref, idx) => ({
+      index: remoteCandidates[idx].index,
+      kind: "volc_ref",
+      name: String(ref?.name || remoteCandidates[idx].file?.name || ""),
+      size: Number(ref?.size || remoteCandidates[idx].file?.size || 0),
+      type: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
+      mimeType: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
+      inputType: String(ref?.inputType || remoteCandidates[idx].inputType || ""),
+      fileId: String(ref?.fileId || ""),
+    }));
+
+    return [...localItems, ...remoteItems]
+      .sort((a, b) => a.index - b.index)
+      .map((item) => {
+        const nextItem = { ...item };
+        delete nextItem.index;
+        return nextItem;
+      });
   }
 
   async function onSend(text, files) {
@@ -431,11 +564,52 @@ export default function ChatPage() {
     setStreamError("");
     const askedAt = new Date().toISOString();
 
-    const attachments = (files || []).map((f) => ({
-      name: f.name,
-      size: f.size,
-      type: f.type,
-    }));
+    const fileItems = Array.isArray(files) ? files.filter(Boolean) : [];
+    const localFiles = [];
+    const volcengineFileRefs = [];
+    const attachments = fileItems.map((item) => {
+      if (item?.kind === "volc_ref") {
+        const fileId = String(item?.fileId || "").trim();
+        const inputType = String(item?.inputType || "").trim().toLowerCase();
+        if (
+          fileId &&
+          (inputType === "input_file" ||
+            inputType === "input_image" ||
+            inputType === "input_video")
+        ) {
+          volcengineFileRefs.push({
+            fileId,
+            inputType,
+            name: String(item?.name || ""),
+            mimeType: String(item?.mimeType || item?.type || ""),
+            size: Number(item?.size || 0),
+          });
+        }
+        return {
+          name: String(item?.name || "文件"),
+          size: Number(item?.size || 0),
+          type: String(item?.mimeType || item?.type || ""),
+          fileId,
+          inputType,
+        };
+      }
+
+      const rawFile = item?.kind === "local" ? item.file : item;
+      if (rawFile instanceof File) {
+        localFiles.push(rawFile);
+        return {
+          name: rawFile.name,
+          size: rawFile.size,
+          type: rawFile.type,
+        };
+      }
+
+      return {
+        name: String(item?.name || "文件"),
+        size: Number(item?.size || 0),
+        type: String(item?.type || ""),
+      };
+    });
 
     const userMsg = {
       id: `u${Date.now()}`,
@@ -473,6 +647,9 @@ export default function ChatPage() {
 
     const historyForApi = toApiMessages(
       pickRecentRounds(currentHistory, runtimeConfig.contextRounds || CONTEXT_USER_ROUNDS),
+      {
+        useVolcengineResponsesFileRefs: shouldUseVolcengineFilesApi(runtimeConfig),
+      },
     );
 
     const formData = new FormData();
@@ -482,17 +659,19 @@ export default function ChatPage() {
       String(normalizeTemperature(runtimeConfig.temperature)),
     );
     formData.append("topP", String(normalizeTopP(runtimeConfig.topP)));
-    formData.append("reasoningEffort", runtimeConfig.reasoningEffort);
     formData.append("sessionId", currentSessionId);
     formData.append("smartContextEnabled", String(smartContextEnabled));
     formData.append("contextMode", "append");
     formData.append("messages", JSON.stringify(historyForApi));
 
-    (files || []).forEach((f) => formData.append("files", f));
+    localFiles.forEach((f) => formData.append("files", f));
+    if (volcengineFileRefs.length > 0) {
+      formData.append("volcengineFileRefs", JSON.stringify(volcengineFileRefs));
+    }
 
     setFocusUserMessageId(userMsg.id);
     setIsStreaming(true);
-    streamReasoningEnabledRef.current = runtimeConfig.reasoningEffort !== "none";
+    streamReasoningEnabledRef.current = !!runtimeConfig.enableThinking;
     streamTargetRef.current = { sessionId: currentSessionId, assistantId };
     streamBufferRef.current = { content: "", reasoning: "", firstTextAt: "" };
 
@@ -616,6 +795,9 @@ export default function ChatPage() {
         list.slice(0, promptIndex + 1),
         runtimeConfig.contextRounds || CONTEXT_USER_ROUNDS,
       ),
+      {
+        useVolcengineResponsesFileRefs: shouldUseVolcengineFilesApi(runtimeConfig),
+      },
     );
 
     const newAssistantId = `a${Date.now()}-regen`;
@@ -642,7 +824,6 @@ export default function ChatPage() {
       String(normalizeTemperature(runtimeConfig.temperature)),
     );
     formData.append("topP", String(normalizeTopP(runtimeConfig.topP)));
-    formData.append("reasoningEffort", runtimeConfig.reasoningEffort);
     formData.append("sessionId", currentSessionId);
     formData.append("smartContextEnabled", String(smartContextEnabled));
     formData.append("contextMode", "regenerate");
@@ -650,7 +831,7 @@ export default function ChatPage() {
 
     setFocusUserMessageId(promptMessageId);
     setIsStreaming(true);
-    streamReasoningEnabledRef.current = runtimeConfig.reasoningEffort !== "none";
+    streamReasoningEnabledRef.current = !!runtimeConfig.enableThinking;
     streamTargetRef.current = {
       sessionId: currentSessionId,
       assistantId: newAssistantId,
@@ -761,7 +942,7 @@ export default function ChatPage() {
       activeAgentName: activeAgent.name,
       apiTemperature: String(activeRuntimeConfig.temperature),
       apiTopP: String(activeRuntimeConfig.topP),
-      apiReasoningEffort: activeRuntimeConfig.reasoningEffort,
+      apiReasoningEffort: activeRuntimeConfig.enableThinking ? "high" : "none",
       lastAppliedReasoning,
     });
 
@@ -912,9 +1093,9 @@ export default function ChatPage() {
         const nextRuntime = nextRuntimeConfigs[nextAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
         const nextApiTemperature = String(normalizeTemperature(nextRuntime.temperature));
         const nextApiTopP = String(normalizeTopP(nextRuntime.topP));
-        const nextApiReasoning = normalizeReasoningEffort(nextRuntime.reasoningEffort);
+        const nextApiReasoning = nextRuntime.enableThinking ? "high" : "none";
         const nextAppliedReasoning = normalizeReasoningEffort(
-          stateSettings.lastAppliedReasoning ?? "low",
+          stateSettings.lastAppliedReasoning ?? "high",
         );
         const nextSmartContextEnabled = !!stateSettings.smartContextEnabled;
 
@@ -945,8 +1126,6 @@ export default function ChatPage() {
         setSmartContextEnabled(nextSmartContextEnabled);
 
         const profile = sanitizeUserInfo(data?.profile);
-        const role = String(data?.user?.role || "").toLowerCase();
-        setIsAdminUser(role === "admin");
         setUserInfo(profile);
         if (!isUserInfoComplete(profile)) {
           setForceUserInfoModal(true);
@@ -988,9 +1167,7 @@ export default function ChatPage() {
   useEffect(() => {
     setApiTemperature(String(normalizeTemperature(activeRuntimeConfig.temperature)));
     setApiTopP(String(normalizeTopP(activeRuntimeConfig.topP)));
-    setApiReasoningEffort(
-      normalizeReasoningEffort(activeRuntimeConfig.reasoningEffort),
-    );
+    setApiReasoningEffort(activeRuntimeConfig.enableThinking ? "high" : "none");
   }, [activeRuntimeConfig]);
 
   useEffect(() => {
@@ -1250,6 +1427,7 @@ export default function ChatPage() {
 
           <MessageInput
             onSend={onSend}
+            onPrepareFiles={onPrepareFiles}
             disabled={isStreaming || interactionLocked}
             quoteText={selectedAskText}
             onClearQuote={() => setSelectedAskText("")}
@@ -1260,19 +1438,6 @@ export default function ChatPage() {
           </p>
         </div>
       </div>
-
-      {isAdminUser && (
-        <button
-          type="button"
-          className="chat-admin-entry"
-          onClick={() => navigate("/admin/settings")}
-          title="管理员设置"
-          aria-label="管理员设置"
-        >
-          <Settings size={16} />
-          <span>管理员设置</span>
-        </button>
-      )}
 
       <ExportUserInfoModal
         open={showUserInfoModal}

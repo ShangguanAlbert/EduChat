@@ -760,29 +760,6 @@ select.group-modal-input{
   opacity: 1;
 }
 
-.chat-admin-entry{
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 260;
-  border: 0;
-  border-radius: 12px;
-  padding: 10px 12px;
-  background: #111b31;
-  color: #fff;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.22);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.chat-admin-entry:hover{
-  background: #1a2744;
-}
-
 /* Messages */
 .messages{
   flex:1;
@@ -1124,6 +1101,16 @@ select.group-modal-input{
   display: block;
 }
 
+.composer-file-status{
+  margin: 0 2px 8px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.composer-file-status.error{
+  color: #b91c1c;
+}
+
 .composer-row{
   display:flex;
   align-items:center;
@@ -1230,7 +1217,6 @@ select.group-modal-input{
   .sidebar{ width: 260px; }
   .chat-input-wrap{ left: 260px; }
   .chat-status{ max-width: 280px; }
-  .chat-admin-entry{ right: 12px; bottom: 12px; }
   .smart-context-label{ display:none; }
 }
 
@@ -1245,10 +1231,6 @@ select.group-modal-input{
   }
   .chat-topbar-left{
     gap:8px;
-  }
-  .chat-admin-entry{
-    bottom: 84px;
-    right: 12px;
   }
 }
 

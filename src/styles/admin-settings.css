@@ -744,9 +744,16 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 auto;
   color: #64748b;
   cursor: help;
   outline: none;
+}
+
+.admin-info-hint > svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
 }
 
 .admin-info-hint:hover,

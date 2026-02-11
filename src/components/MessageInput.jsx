@@ -55,6 +55,10 @@ const ACCEPT_UPLOAD_TYPES = [
   ".vue",
   ".svelte",
   "image/*",
+  ".mp4",
+  ".avi",
+  ".mov",
+  "video/*",
 ].join(",");
 
 export default function MessageInput({
@@ -63,9 +67,12 @@ export default function MessageInput({
   quoteText = "",
   onClearQuote,
   onConsumeQuote,
+  onPrepareFiles,
 }) {
   const [text, setText] = useState("");
   const [files, setFiles] = useState([]);
+  const [preparingFiles, setPreparingFiles] = useState(false);
+  const [prepareError, setPrepareError] = useState("");
   const fileRef = useRef(null);
   const textRef = useRef(null);
 
@@ -75,21 +82,41 @@ export default function MessageInput({
   }, [text, files, hasQuote]);
 
   function submit() {
-    if (!canSend || disabled) return;
+    if (!canSend || disabled || preparingFiles) return;
 
     const t = buildFinalPrompt(text.trim(), quoteText.trim());
     onSend(t, files);
 
     setText("");
     setFiles([]);
+    setPrepareError("");
     onConsumeQuote?.();
     if (fileRef.current) fileRef.current.value = "";
   }
 
-  function onPickFiles(e) {
+  async function onPickFiles(e) {
     const picked = Array.from(e.target.files || []);
     if (!picked.length) return;
-    setFiles((prev) => [...prev, ...picked]);
+    setPrepareError("");
+
+    if (typeof onPrepareFiles !== "function") {
+      setFiles((prev) => [...prev, ...picked]);
+      return;
+    }
+
+    setPreparingFiles(true);
+    try {
+      const prepared = await onPrepareFiles(picked);
+      const next = Array.isArray(prepared) ? prepared.filter(Boolean) : [];
+      if (next.length > 0) {
+        setFiles((prev) => [...prev, ...next]);
+      }
+    } catch (error) {
+      setPrepareError(error?.message || "文件处理失败，请重试。");
+    } finally {
+      setPreparingFiles(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
   }
 
   function removeFile(idx) {
@@ -133,9 +160,9 @@ export default function MessageInput({
       {files.length > 0 && (
         <div className="attach-bar">
           {files.map((f, idx) => (
-            <div className="attach-chip" key={`${f.name}-${idx}`}>
-              <span className="attach-name" title={f.name}>
-                {f.name}
+            <div className="attach-chip" key={`${readFileName(f)}-${idx}`}>
+              <span className="attach-name" title={readFileName(f)}>
+                {readFileName(f)}
               </span>
               <button
                 type="button"
@@ -143,7 +170,7 @@ export default function MessageInput({
                 onClick={() => removeFile(idx)}
                 aria-label="移除附件"
                 title="移除"
-                disabled={disabled}
+                disabled={disabled || preparingFiles}
               >
                 <X size={14} />
               </button>
@@ -151,6 +178,9 @@ export default function MessageInput({
           ))}
         </div>
       )}
+
+      {preparingFiles && <p className="composer-file-status">文件上传中，请稍后</p>}
+      {prepareError && <p className="composer-file-status error">{prepareError}</p>}
 
       <div className="composer-row">
         <input
@@ -167,7 +197,7 @@ export default function MessageInput({
           type="button"
           className="icon-btn"
           onClick={() => fileRef.current?.click()}
-          disabled={disabled}
+          disabled={disabled || preparingFiles}
           title="添加附件"
           aria-label="添加附件"
         >
@@ -194,7 +224,7 @@ export default function MessageInput({
           type="button"
           className="send-icon"
           onClick={submit}
-          disabled={!canSend || disabled}
+          disabled={!canSend || disabled || preparingFiles}
           title="发送"
           aria-label="发送"
         >
@@ -203,6 +233,10 @@ export default function MessageInput({
       </div>
     </div>
   );
+}
+
+function readFileName(fileLike) {
+  return String(fileLike?.name || fileLike?.filename || "未命名文件");
 }
 
 function buildFinalPrompt(text, quoteText) {

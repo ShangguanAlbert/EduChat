@@ -43,6 +43,7 @@ const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
 const RUNTIME_MAX_INPUT_TOKENS = 512000;
 const RUNTIME_MAX_OUTPUT_TOKENS = 128000;
 const RUNTIME_MAX_REASONING_TOKENS = 128000;
+const UPLOADED_FILE_CONTEXT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   provider: "inherit",
   model: "",
@@ -58,9 +59,8 @@ const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   maxOutputTokens: 4096,
   maxReasoningTokens: 0,
   enableThinking: true,
-  reasoningEffort: "low",
   includeCurrentTime: false,
-  preventPromptLeak: true,
+  preventPromptLeak: false,
   injectSafetyPrompt: false,
   enableWebSearch: false,
   webSearchMaxKeyword: 2,
@@ -109,6 +109,248 @@ const AGENT_RUNTIME_DEFAULTS = Object.freeze({
     ...AGENT_RUNTIME_DEFAULT_OVERRIDES.D,
   }),
 });
+const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
+  {
+    id: "doubao-seed-1-8-251228",
+    aliases: ["doubao-seed-1-8-251228", "doubao-seed-1-8"],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-seed-1-6-251015",
+    aliases: ["doubao-seed-1-6-251015", "doubao-seed-1-6"],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 64000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-seed-1-6-250615",
+    aliases: ["doubao-seed-1-6-250615"],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-seed-1-6-lite-251015",
+    aliases: ["doubao-seed-1-6-lite-251015", "doubao-seed-1-6-lite"],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-seed-1-6-flash-250828",
+    aliases: [
+      "doubao-seed-1-6-flash-250828",
+      "doubao-seed-1-6-flash-250715",
+      "doubao-seed-1-6-flash-250615",
+      "doubao-seed-1-6-flash",
+    ],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-seed-1-6-vision-250815",
+    aliases: ["doubao-seed-1-6-vision-250815", "doubao-seed-1-6-vision"],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-seed-1-6-thinking-250715",
+    aliases: [
+      "doubao-seed-1-6-thinking-250715",
+      "doubao-seed-1-6-thinking-250615",
+      "doubao-seed-1-6-thinking",
+    ],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-seed-code-preview-251028",
+    aliases: ["doubao-seed-code-preview-251028", "doubao-seed-code"],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "glm-4-7-251222",
+    aliases: ["glm-4-7-251222", "glm-4-7"],
+    contextWindowTokens: 200000,
+    maxInputTokens: 200000,
+    maxOutputTokens: 128000,
+    maxReasoningTokens: 128000,
+  },
+  {
+    id: "deepseek-v3-2-251201",
+    aliases: ["deepseek-v3-2-251201", "deepseek-v3-2"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "deepseek-v3-1-terminus",
+    aliases: ["deepseek-v3-1-terminus", "deepseek-v3-1"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "deepseek-v3-1-250821",
+    aliases: ["deepseek-v3-1-250821"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "deepseek-v3-250324",
+    aliases: ["deepseek-v3-250324", "deepseek-v3"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 0,
+  },
+  {
+    id: "deepseek-r1-250528",
+    aliases: ["deepseek-r1-250528", "deepseek-r1"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "kimi-k2-thinking-251104",
+    aliases: ["kimi-k2-thinking-251104", "kimi-k2-thinking"],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "kimi-k2-250905",
+    aliases: ["kimi-k2-250905", "kimi-k2"],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 0,
+  },
+  {
+    id: "doubao-1-5-thinking-pro-250415",
+    aliases: ["doubao-1-5-thinking-pro-250415", "doubao-1-5-thinking-pro"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-1-5-thinking-pro-m-250428",
+    aliases: ["doubao-1-5-thinking-pro-m-250428", "doubao-1-5-thinking-pro-m"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-1-5-thinking-vision-pro-250428",
+    aliases: [
+      "doubao-1-5-thinking-vision-pro-250428",
+      "doubao-1-5-thinking-vision-pro",
+    ],
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-1-5-ui-tars-250428",
+    aliases: ["doubao-1-5-ui-tars-250428", "doubao-1-5-ui-tars"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-1-5-vision-pro-250328",
+    aliases: ["doubao-1-5-vision-pro-250328", "doubao-1-5-vision-pro"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-1-5-pro-32k-250115",
+    aliases: ["doubao-1-5-pro-32k-250115", "doubao-1-5-pro-32k"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 128000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 0,
+  },
+  {
+    id: "doubao-1-5-lite-32k-250115",
+    aliases: ["doubao-1-5-lite-32k-250115", "doubao-1-5-lite-32k"],
+    contextWindowTokens: 32000,
+    maxInputTokens: 32000,
+    maxOutputTokens: 12000,
+    maxReasoningTokens: 0,
+  },
+  {
+    id: "doubao-1-5-pro-32k-character-250715",
+    aliases: [
+      "doubao-1-5-pro-32k-character-250715",
+      "doubao-1-5-pro-32k-character-250228",
+      "doubao-1-5-pro-32k-character",
+    ],
+    contextWindowTokens: 32000,
+    maxInputTokens: 32000,
+    maxOutputTokens: 12000,
+    maxReasoningTokens: 0,
+  },
+  {
+    id: "doubao-1-5-vision-pro-32k-250115",
+    aliases: ["doubao-1-5-vision-pro-32k-250115", "doubao-1-5-vision-pro-32k"],
+    contextWindowTokens: 32000,
+    maxInputTokens: 32000,
+    maxOutputTokens: 12000,
+    maxReasoningTokens: 0,
+  },
+  {
+    id: "doubao-1-5-vision-lite-250315",
+    aliases: ["doubao-1-5-vision-lite-250315", "doubao-1-5-vision-lite"],
+    contextWindowTokens: 128000,
+    maxInputTokens: 128000,
+    maxOutputTokens: 16000,
+    maxReasoningTokens: 0,
+  },
+  {
+    id: "doubao-lite-32k-character-250228",
+    aliases: ["doubao-lite-32k-character-250228", "doubao-lite-32k-character"],
+    contextWindowTokens: 32000,
+    maxInputTokens: 32000,
+    maxOutputTokens: 4000,
+    maxReasoningTokens: 0,
+  },
+  {
+    id: "doubao-seed-translation-250915",
+    aliases: ["doubao-seed-translation-250915", "doubao-seed-translation"],
+    contextWindowTokens: 4000,
+    maxInputTokens: 1000,
+    maxOutputTokens: 3000,
+    maxReasoningTokens: 0,
+  },
+]);
 const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = Object.freeze([
   {
     id: "doubao-seed-1-8-251228",
@@ -221,6 +463,7 @@ const TEXT_EXTENSIONS = new Set([
 const WORD_EXTENSIONS = new Set(["docx", "doc"]);
 const EXCEL_EXTENSIONS = new Set(["xlsx", "xls"]);
 const PDF_EXTENSIONS = new Set(["pdf"]);
+const VIDEO_EXTENSIONS = new Set(["mp4", "avi", "mov"]);
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { files: MAX_FILES, fileSize: MAX_FILE_SIZE_BYTES },
@@ -309,8 +552,8 @@ const chatStateSchema = new mongoose.Schema(
           agent: { type: String, default: "A" },
           apiTemperature: { type: Number, default: 0.6 },
           apiTopP: { type: Number, default: 1 },
-          apiReasoningEffort: { type: String, default: "low" },
-          lastAppliedReasoning: { type: String, default: "low" },
+          apiReasoningEffort: { type: String, default: "high" },
+          lastAppliedReasoning: { type: String, default: "high" },
           smartContextEnabled: { type: Boolean, default: false },
         },
         { _id: false },
@@ -319,8 +562,8 @@ const chatStateSchema = new mongoose.Schema(
         agent: "A",
         apiTemperature: 0.6,
         apiTopP: 1,
-        apiReasoningEffort: "low",
-        lastAppliedReasoning: "low",
+        apiReasoningEffort: "high",
+        lastAppliedReasoning: "high",
         smartContextEnabled: false,
       }),
     },
@@ -333,6 +576,36 @@ const chatStateSchema = new mongoose.Schema(
 
 const ChatState =
   mongoose.models.ChatState || mongoose.model("ChatState", chatStateSchema);
+
+const uploadedFileContextSchema = new mongoose.Schema(
+  {
+    userId: { type: String, required: true, index: true },
+    sessionId: { type: String, required: true, index: true },
+    messageId: { type: String, required: true, index: true },
+    content: {
+      type: mongoose.Schema.Types.Mixed,
+      default: "",
+    },
+    expiresAt: { type: Date, required: true },
+  },
+  {
+    timestamps: true,
+    collection: "uploaded_file_contexts",
+    autoIndex: false,
+  },
+);
+uploadedFileContextSchema.index(
+  { userId: 1, sessionId: 1, messageId: 1 },
+  { unique: true, name: "ux_uploaded_file_context_user_session_message" },
+);
+uploadedFileContextSchema.index(
+  { expiresAt: 1 },
+  { expireAfterSeconds: 0, name: "ttl_uploaded_file_context_expires_at" },
+);
+
+const UploadedFileContext =
+  mongoose.models.UploadedFileContext ||
+  mongoose.model("UploadedFileContext", uploadedFileContextSchema);
 
 const runtimeConfigSchema = new mongoose.Schema(
   {
@@ -376,10 +649,6 @@ const runtimeConfigSchema = new mongoose.Schema(
     enableThinking: {
       type: Boolean,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
-    },
-    reasoningEffort: {
-      type: String,
-      default: DEFAULT_AGENT_RUNTIME_CONFIG.reasoningEffort,
     },
     includeCurrentTime: {
       type: Boolean,
@@ -962,10 +1231,14 @@ app.get("/api/auth/admin/export/chats-zip", async (req, res) => {
 app.delete("/api/auth/admin/chats", async (req, res) => {
   if (!(await authenticateAdminRequest(req, res))) return;
 
-  const result = await ChatState.deleteMany({});
+  const [chatStateResult, uploadedContextResult] = await Promise.all([
+    ChatState.deleteMany({}),
+    UploadedFileContext.deleteMany({}),
+  ]);
   res.json({
     ok: true,
-    deletedCount: Number(result?.deletedCount || 0),
+    deletedCount: Number(chatStateResult?.deletedCount || 0),
+    deletedUploadedFileContextCount: Number(uploadedContextResult?.deletedCount || 0),
   });
 });
 
@@ -994,6 +1267,77 @@ app.post(
 );
 
 app.post(
+  "/api/chat/volcengine-files/upload",
+  requireChatAuth,
+  upload.array("files", MAX_FILES),
+  async (req, res) => {
+    const agentId = sanitizeAgent(req.body?.agentId || "A");
+    const files = Array.isArray(req.files) ? req.files.filter(Boolean) : [];
+    if (files.length === 0) {
+      res.json({ ok: true, files: [] });
+      return;
+    }
+
+    const runtimeConfig = await getResolvedAgentRuntimeConfig(agentId);
+    const provider = getProviderByAgent(agentId, runtimeConfig);
+    const protocol = resolveRequestProtocol(runtimeConfig.protocol, provider).value;
+    if (provider !== "volcengine" || protocol !== "responses") {
+      res.status(400).json({ error: "当前智能体不是火山引擎 Responses 协议，不能使用 Files API 上传。" });
+      return;
+    }
+
+    const providerConfig = getProviderConfig("volcengine");
+    if (!providerConfig.apiKey) {
+      res.status(500).json({ error: providerConfig.missingKeyMessage });
+      return;
+    }
+    if (!providerConfig.filesEndpoint) {
+      res.status(500).json({ error: "未配置火山引擎 Files API 端点。" });
+      return;
+    }
+
+    try {
+      const model = getModelByAgent(agentId, runtimeConfig);
+      const uploaded = [];
+      for (const file of files) {
+        const inputType = classifyVolcengineFileInputType(file);
+        if (!inputType) {
+          res.status(400).json({
+            error: `文件类型不支持 Files API 上传：${file.originalname || "未命名文件"}`,
+          });
+          return;
+        }
+
+        const result = await uploadVolcengineFileAndWaitActive({
+          file,
+          inputType,
+          model,
+          filesEndpoint: providerConfig.filesEndpoint,
+          apiKey: providerConfig.apiKey,
+        });
+
+        uploaded.push({
+          fileId: result.fileId,
+          inputType,
+          name: String(file.originalname || ""),
+          mimeType: String(file.mimetype || ""),
+          size: Number(file.size || 0),
+        });
+      }
+
+      res.json({
+        ok: true,
+        files: uploaded,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "火山文件上传失败，请稍后重试。",
+      });
+    }
+  },
+);
+
+app.post(
   "/api/chat/stream",
   requireChatAuth,
   upload.array("files", MAX_FILES),
@@ -1002,6 +1346,9 @@ app.post(
     const sessionId = sanitizeId(req.body?.sessionId, "");
     const smartContextEnabled = sanitizeRuntimeBoolean(req.body?.smartContextEnabled, false);
     const contextMode = sanitizeSmartContextMode(req.body?.contextMode);
+    const volcengineFileRefs = readRequestVolcengineFileRefs(
+      req.body?.volcengineFileRefs,
+    );
     let messages = [];
     try {
       messages = JSON.parse(req.body.messages || "[]");
@@ -1020,6 +1367,7 @@ app.post(
       smartContextEnabled,
       contextMode,
       attachUploadedFiles: true,
+      volcengineFileRefs,
     });
   },
 );
@@ -1078,10 +1426,273 @@ function normalizeMessages(messages) {
         (m.role === "user" || m.role === "assistant" || m.role === "system"),
     )
     .map((m) => ({
+      id: sanitizeId(m.id, ""),
       role: m.role,
-      content: typeof m.content === "string" ? m.content : "",
+      content: normalizeMessageContent(m.content),
     }))
-    .filter((m) => m.content.trim().length > 0);
+    .filter(
+      (m) => hasUsableMessageContent(m.content) || (m.role === "user" && !!m.id),
+    );
+}
+
+function normalizeMessageContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  const parts = [];
+  content.slice(0, 80).forEach((part) => {
+    if (!part || typeof part !== "object") return;
+    const type = String(part.type || "")
+      .trim()
+      .toLowerCase();
+
+    if (type === "text" || type === "input_text" || type === "output_text") {
+      const text = typeof part.text === "string" ? part.text : "";
+      if (text.trim()) {
+        parts.push({ type: "text", text });
+      }
+      return;
+    }
+
+    if (type === "image_url" || type === "input_image") {
+      const fileId = String(part.file_id || part.fileId || "").trim();
+      if (fileId) {
+        parts.push({ type: "input_image", file_id: fileId });
+        return;
+      }
+      const imageUrl = extractInputImageUrl(part);
+      if (!imageUrl) return;
+      parts.push({ type: "image_url", image_url: { url: imageUrl } });
+      return;
+    }
+
+    if (type === "input_file" || type === "input_video") {
+      const fileId = String(part.file_id || part.fileId || "").trim();
+      if (!fileId) return;
+      parts.push({ type, file_id: fileId });
+    }
+  });
+
+  return parts;
+}
+
+function hasUsableMessageContent(content) {
+  if (typeof content === "string") {
+    return content.trim().length > 0;
+  }
+  return Array.isArray(content) && content.length > 0;
+}
+
+function cloneNormalizedMessageContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => {
+    const type = String(part?.type || "")
+      .trim()
+      .toLowerCase();
+    if (type === "text") {
+      return { type: "text", text: String(part?.text || "") };
+    }
+    if (type === "input_file" || type === "input_video" || type === "input_image") {
+      const fileId = String(part?.file_id || part?.fileId || "").trim();
+      if (fileId) {
+        return { type, file_id: fileId };
+      }
+    }
+    const imageUrl = extractInputImageUrl(part);
+    if (imageUrl) {
+      return { type: "image_url", image_url: { url: imageUrl } };
+    }
+    return null;
+  }).filter(Boolean);
+}
+
+function resolveUploadedFileContextIdentity({ userId, sessionId, messageId }) {
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  const safeMessageId = sanitizeId(messageId, "");
+  if (!safeUserId || !safeSessionId || !safeMessageId) return null;
+  return {
+    userId: safeUserId,
+    sessionId: safeSessionId,
+    messageId: safeMessageId,
+  };
+}
+
+function buildUploadedFileContextExpireAt() {
+  return new Date(Date.now() + UPLOADED_FILE_CONTEXT_CACHE_TTL_MS);
+}
+
+async function saveUploadedFileContext({ userId, sessionId, messageId, content }) {
+  const identity = resolveUploadedFileContextIdentity({
+    userId,
+    sessionId,
+    messageId,
+  });
+  if (!identity) return;
+  const normalized = normalizeMessageContent(content);
+  if (!hasUsableMessageContent(normalized)) return;
+  const clonedContent = cloneNormalizedMessageContent(normalized);
+
+  try {
+    await UploadedFileContext.findOneAndUpdate(
+      {
+        userId: identity.userId,
+        sessionId: identity.sessionId,
+        messageId: identity.messageId,
+      },
+      {
+        $set: {
+          content: clonedContent,
+          expiresAt: buildUploadedFileContextExpireAt(),
+        },
+        $setOnInsert: {
+          userId: identity.userId,
+          sessionId: identity.sessionId,
+          messageId: identity.messageId,
+        },
+      },
+      { upsert: true, setDefaultsOnInsert: true },
+    );
+  } catch (error) {
+    console.warn(
+      `Failed to persist uploaded file context (${identity.userId}/${identity.sessionId}/${identity.messageId}):`,
+      error?.message || error,
+    );
+  }
+}
+
+async function rehydrateUploadedFileContexts(messages, { userId, sessionId }) {
+  if (!Array.isArray(messages) || messages.length === 0) return;
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  if (!safeUserId || !safeSessionId) return;
+
+  const targets = [];
+  const messageIds = [];
+  const seenMessageIds = new Set();
+
+  messages.forEach((msg) => {
+    if (!msg || msg.role !== "user") return;
+    const messageId = sanitizeId(msg.id, "");
+    if (!messageId) return;
+    targets.push({ msg, messageId });
+    if (seenMessageIds.has(messageId)) return;
+    seenMessageIds.add(messageId);
+    messageIds.push(messageId);
+  });
+  if (messageIds.length === 0) return;
+
+  let docs = [];
+  try {
+    docs = await UploadedFileContext.find(
+      {
+        userId: safeUserId,
+        sessionId: safeSessionId,
+        messageId: { $in: messageIds },
+        expiresAt: { $gt: new Date() },
+      },
+      { messageId: 1, content: 1 },
+    ).lean();
+  } catch (error) {
+    console.warn(
+      `Failed to read uploaded file context (${safeUserId}/${safeSessionId}):`,
+      error?.message || error,
+    );
+    return;
+  }
+  if (!Array.isArray(docs) || docs.length === 0) return;
+
+  const contentByMessageId = new Map();
+  docs.forEach((doc) => {
+    const messageId = sanitizeId(doc?.messageId, "");
+    if (!messageId) return;
+    const normalized = normalizeMessageContent(doc?.content);
+    if (!hasUsableMessageContent(normalized)) return;
+    contentByMessageId.set(messageId, cloneNormalizedMessageContent(normalized));
+  });
+  if (contentByMessageId.size === 0) return;
+
+  targets.forEach(({ msg, messageId }) => {
+    const content = contentByMessageId.get(messageId);
+    if (!content) return;
+    msg.content = content;
+  });
+}
+
+function sanitizeVolcengineFileRefsPayload(input) {
+  const source = Array.isArray(input) ? input : [];
+  return source
+    .slice(0, MAX_FILES)
+    .map((item) => {
+      const fileId = sanitizeText(item?.fileId, "", 160);
+      const inputType = String(item?.inputType || "")
+        .trim()
+        .toLowerCase();
+      if (!fileId) return null;
+      if (
+        inputType !== "input_file" &&
+        inputType !== "input_image" &&
+        inputType !== "input_video"
+      ) {
+        return null;
+      }
+      return {
+        fileId,
+        inputType,
+      };
+    })
+    .filter(Boolean);
+}
+
+function attachVolcengineFileRefsToLatestUserMessage(messages, fileRefs) {
+  const safeRefs = sanitizeVolcengineFileRefsPayload(fileRefs);
+  if (safeRefs.length === 0 || !Array.isArray(messages) || messages.length === 0) return null;
+
+  let idx = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) return null;
+
+  const msg = messages[idx];
+  const existing = normalizeMessageContent(msg.content);
+  const parts = Array.isArray(existing)
+    ? cloneNormalizedMessageContent(existing)
+    : existing
+      ? [{ type: "text", text: String(existing || "") }]
+      : [];
+
+  const existingRefKeys = new Set();
+  parts.forEach((part) => {
+    const type = String(part?.type || "")
+      .trim()
+      .toLowerCase();
+    if (type !== "input_file" && type !== "input_image" && type !== "input_video") return;
+    const fileId = String(part?.file_id || part?.fileId || "").trim();
+    if (!fileId) return;
+    existingRefKeys.add(`${type}::${fileId}`);
+  });
+
+  safeRefs.forEach((ref) => {
+    const key = `${ref.inputType}::${ref.fileId}`;
+    if (existingRefKeys.has(key)) return;
+    existingRefKeys.add(key);
+    parts.push({
+      type: ref.inputType,
+      file_id: ref.fileId,
+    });
+  });
+
+  if (parts.length === 0) return null;
+  msg.content = parts;
+  return {
+    messageId: sanitizeId(msg.id, ""),
+    content: cloneNormalizedMessageContent(parts),
+  };
 }
 
 async function attachFilesToLatestUserMessage(messages, files) {
@@ -1142,7 +1753,13 @@ async function attachFilesToLatestUserMessage(messages, files) {
 
   if (parts.length > 0) {
     msg.content = parts;
+    return {
+      messageId: sanitizeId(msg.id, ""),
+      content: cloneNormalizedMessageContent(parts),
+    };
   }
+
+  return null;
 }
 
 async function streamAgentResponse({
@@ -1150,6 +1767,7 @@ async function streamAgentResponse({
   agentId,
   messages,
   files = [],
+  volcengineFileRefs = [],
   runtimeConfig = null,
   chatUserId = "",
   sessionId = "",
@@ -1167,6 +1785,8 @@ async function streamAgentResponse({
     return;
   }
   const protocol = protocolInfo.value;
+  const shouldUsePersistentFileContext =
+    provider === "volcengine" && protocol === "responses";
   const providerConfig = getProviderConfig(provider);
   if (!providerConfig.apiKey) {
     res.status(500).json({
@@ -1186,11 +1806,7 @@ async function streamAgentResponse({
   }
 
   const thinkingEnabled = sanitizeEnableThinking(config.enableThinking);
-  const reasoningEffortRequested = thinkingEnabled
-    ? normalizeReasoningEffort(
-        config.reasoningEffort ?? process.env.DEFAULT_REASONING_EFFORT ?? "low",
-      )
-    : "none";
+  const reasoningEffortRequested = thinkingEnabled ? "high" : "none";
   const reasoning = resolveReasoningPolicy(
     model,
     reasoningEffortRequested,
@@ -1215,6 +1831,7 @@ async function streamAgentResponse({
   });
 
   let safeMessages = normalizeMessages(messages);
+  const safeVolcengineFileRefs = sanitizeVolcengineFileRefsPayload(volcengineFileRefs);
   if (
     safeMessages.length === 0 &&
     attachUploadedFiles &&
@@ -1227,6 +1844,13 @@ async function streamAgentResponse({
   if (safeMessages.length === 0) {
     res.status(400).json({ error: "Messages cannot be empty" });
     return;
+  }
+
+  if (shouldUsePersistentFileContext) {
+    await rehydrateUploadedFileContexts(safeMessages, {
+      userId: chatUserId,
+      sessionId,
+    });
   }
 
   const narrowedMessages = pickRecentUserRounds(
@@ -1285,13 +1909,61 @@ async function streamAgentResponse({
   }
 
   let requestMessages = [...narrowedMessages];
+  if (
+    attachUploadedFiles &&
+    files.length > 0 &&
+    !requestMessages.some((item) => item?.role === "user")
+  ) {
+    requestMessages.push({
+      role: "user",
+      content: "请基于附件内容进行分析和回答。",
+    });
+  }
+  if (
+    shouldUsePersistentFileContext &&
+    safeVolcengineFileRefs.length > 0 &&
+    !requestMessages.some((item) => item?.role === "user")
+  ) {
+    requestMessages.push({
+      role: "user",
+      content: "请基于附件内容进行分析和回答。",
+    });
+  }
 
+  let uploadedFileContextRecord = null;
   if (attachUploadedFiles && files.length > 0) {
-    await attachFilesToLatestUserMessage(requestMessages, files);
+    uploadedFileContextRecord = await attachFilesToLatestUserMessage(
+      requestMessages,
+      files,
+    );
+    if (shouldUsePersistentFileContext && uploadedFileContextRecord?.messageId) {
+      await saveUploadedFileContext({
+        userId: chatUserId,
+        sessionId,
+        messageId: uploadedFileContextRecord.messageId,
+        content: uploadedFileContextRecord.content,
+      });
+    }
+  }
+  if (
+    shouldUsePersistentFileContext &&
+    safeVolcengineFileRefs.length > 0
+  ) {
+    // Files API 文件（PDF/图片/视频）由火山侧保存 7 天，这里只在本次请求挂载 file_id，
+    // 不再写入本地附件上下文库；本地库仅用于非 Files API 的本地解析文件。
+    attachVolcengineFileRefsToLatestUserMessage(
+      requestMessages,
+      safeVolcengineFileRefs,
+    );
   }
   if (smartContextRuntime.usePreviousResponseId) {
     requestMessages = extractSmartContextIncrementalMessages(requestMessages);
   }
+
+  const providerMessages = requestMessages.map((msg) => ({
+    role: msg.role,
+    content: msg.content,
+  }));
 
   const promptLeakGuardEnabled = sanitizeRuntimeBoolean(
     config.preventPromptLeak,
@@ -1304,7 +1976,7 @@ async function streamAgentResponse({
     protocol === "responses"
       ? buildResponsesRequestPayload({
           model,
-          messages: requestMessages,
+          messages: providerMessages,
           instructions: composedSystemPrompt,
           config,
           thinkingEnabled,
@@ -1315,7 +1987,7 @@ async function streamAgentResponse({
         })
       : buildChatRequestPayload({
           model,
-          messages: requestMessages,
+          messages: providerMessages,
           systemPrompt: composedSystemPrompt,
           config,
           reasoning,
@@ -1967,16 +2639,7 @@ function buildChatRequestPayload({ model, messages, systemPrompt, config, reason
     ),
   };
   if (reasoning.enabled) {
-    const safeMaxReasoningTokens = sanitizeRuntimeInteger(
-      config.maxReasoningTokens,
-      DEFAULT_AGENT_RUNTIME_CONFIG.maxReasoningTokens,
-      0,
-      RUNTIME_MAX_REASONING_TOKENS,
-    );
-    payload.reasoning = {
-      effort: reasoning.effort,
-      ...(safeMaxReasoningTokens > 0 ? { max_tokens: safeMaxReasoningTokens } : {}),
-    };
+    payload.reasoning = { effort: reasoning.effort };
   }
   return payload;
 }
@@ -2016,17 +2679,10 @@ function buildResponsesRequestPayload({
   }
 
   if (supportsReasoningEffort) {
-    const safeMaxReasoningTokens = sanitizeRuntimeInteger(
-      config.maxReasoningTokens,
-      DEFAULT_AGENT_RUNTIME_CONFIG.maxReasoningTokens,
-      0,
-      RUNTIME_MAX_REASONING_TOKENS,
-    );
     payload.reasoning = {
       effort: thinkingEnabled
         ? mapReasoningEffortToResponses(reasoning.effort)
         : "minimal",
-      ...(safeMaxReasoningTokens > 0 ? { max_tokens: safeMaxReasoningTokens } : {}),
     };
   }
 
@@ -2228,6 +2884,43 @@ function matchModelCandidates(candidates, aliasRaw) {
   return candidates.some((candidate) => candidate === alias || candidate.includes(alias));
 }
 
+function resolveRuntimeTokenProfileByModel(model) {
+  const candidates = getNormalizedModelCandidates(model);
+  if (candidates.length === 0) return null;
+
+  let best = null;
+  RESPONSE_MODEL_TOKEN_PROFILES.forEach((profile) => {
+    const aliases = Array.isArray(profile.aliases) ? profile.aliases : [];
+    aliases.forEach((aliasRaw) => {
+      const alias = String(aliasRaw || "")
+        .trim()
+        .toLowerCase();
+      if (!alias) return;
+
+      candidates.forEach((candidate) => {
+        if (!candidate) return;
+        const exact = candidate === alias;
+        const includes = !exact && candidate.includes(alias);
+        if (!exact && !includes) return;
+
+        const score = (exact ? 1000 : 100) + alias.length;
+        if (!best || score > best.score) {
+          best = { profile, score };
+        }
+      });
+    });
+  });
+
+  if (!best) return null;
+  return {
+    contextWindowTokens: best.profile.contextWindowTokens,
+    maxInputTokens: best.profile.maxInputTokens,
+    maxOutputTokens: best.profile.maxOutputTokens,
+    maxReasoningTokens: best.profile.maxReasoningTokens,
+    matchedModelId: best.profile.id,
+  };
+}
+
 function buildResponsesInputItems(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return "";
 
@@ -2275,9 +2968,22 @@ function normalizeResponsesMessageContent(content) {
     }
 
     if (type === "image_url" || type === "input_image") {
+      const fileId = String(part.file_id || part.fileId || "").trim();
+      if (fileId) {
+        parts.push({ type: "input_image", file_id: fileId });
+        continue;
+      }
       const imageUrl = extractInputImageUrl(part);
       if (imageUrl) {
         parts.push({ type: "input_image", image_url: imageUrl });
+      }
+      continue;
+    }
+
+    if (type === "input_file" || type === "input_video") {
+      const fileId = String(part.file_id || part.fileId || "").trim();
+      if (fileId) {
+        parts.push({ type, file_id: fileId });
       }
     }
   }
@@ -2309,8 +3015,7 @@ function mapReasoningEffortToResponses(effort) {
     .trim()
     .toLowerCase();
   if (key === "none") return "minimal";
-  if (key === "low" || key === "medium" || key === "high") return key;
-  return "medium";
+  return "high";
 }
 
 function supportsVolcengineResponsesReasoningEffort(model) {
@@ -2625,6 +3330,141 @@ async function parseFileContent(file) {
   }
 
   return { text: "", hint: "暂未支持该格式的结构化解析。" };
+}
+
+function classifyVolcengineFileInputType(file) {
+  const mime = String(file?.mimetype || "")
+    .trim()
+    .toLowerCase();
+  const ext = getFileExtension(file?.originalname);
+
+  if (mime.includes("pdf") || ext === "pdf") return "input_file";
+  if (mime.startsWith("image/")) return "input_image";
+  if (mime.startsWith("video/") || VIDEO_EXTENSIONS.has(ext)) return "input_video";
+  return "";
+}
+
+async function uploadVolcengineFileAndWaitActive({
+  file,
+  inputType,
+  model,
+  filesEndpoint,
+  apiKey,
+}) {
+  const safeFileName = String(file?.originalname || "upload.bin");
+  const safeMime = String(file?.mimetype || "application/octet-stream");
+  const safeBuffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from([]);
+  const form = new FormData();
+  form.append("purpose", "user_data");
+  form.append("file", new Blob([safeBuffer], { type: safeMime }), safeFileName);
+
+  if (inputType === "input_video") {
+    const rawFps = Number(process.env.VOLCENGINE_FILES_VIDEO_FPS || "0.3");
+    const safeFps = Number.isFinite(rawFps)
+      ? Math.min(5, Math.max(0.2, rawFps))
+      : 0.3;
+    form.append("preprocess_configs[video][fps]", String(safeFps));
+    const safeModel = sanitizeRuntimeModel(model);
+    if (safeModel) {
+      form.append("preprocess_configs[video][model]", safeModel);
+    }
+  }
+
+  let uploadResp;
+  try {
+    uploadResp = await fetch(filesEndpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: form,
+    });
+  } catch (error) {
+    throw new Error(`火山 Files API 上传失败: ${error?.message || "network error"}`);
+  }
+
+  const uploadDetail = await uploadResp.text();
+  if (!uploadResp.ok) {
+    throw new Error(
+      formatProviderUpstreamError("volcengine", "files", uploadResp.status, uploadDetail),
+    );
+  }
+
+  let uploadJson = {};
+  try {
+    uploadJson = JSON.parse(uploadDetail || "{}");
+  } catch {
+    uploadJson = {};
+  }
+
+  const fileId = sanitizeText(uploadJson?.id, "", 160);
+  if (!fileId) {
+    throw new Error("火山 Files API 返回异常：缺少 file_id。");
+  }
+
+  return waitForVolcengineFileActive({
+    fileId,
+    filesEndpoint,
+    apiKey,
+  });
+}
+
+async function waitForVolcengineFileActive({ fileId, filesEndpoint, apiKey }) {
+  const timeoutMs = 5 * 60 * 1000;
+  const pollMs = 1500;
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = "processing";
+
+  while (Date.now() < deadline) {
+    const meta = await retrieveVolcengineFileMeta({ fileId, filesEndpoint, apiKey });
+    const status = String(meta?.status || "")
+      .trim()
+      .toLowerCase();
+    if (status) {
+      lastStatus = status;
+    }
+    if (status === "active") {
+      return { fileId };
+    }
+    if (status === "failed") {
+      const errorMessage =
+        sanitizeText(meta?.error?.message, "", 600) || "文件预处理失败";
+      throw new Error(`文件处理失败（${fileId}）：${errorMessage}`);
+    }
+    await sleepMs(pollMs);
+  }
+
+  throw new Error(`文件处理超时（${fileId}），当前状态：${lastStatus}`);
+}
+
+async function retrieveVolcengineFileMeta({ fileId, filesEndpoint, apiKey }) {
+  const url = `${filesEndpoint}/${encodeURIComponent(fileId)}`;
+  let resp;
+  try {
+    resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+  } catch (error) {
+    throw new Error(`查询文件状态失败（${fileId}）：${error?.message || "network error"}`);
+  }
+
+  const detail = await resp.text();
+  if (!resp.ok) {
+    throw new Error(formatProviderUpstreamError("volcengine", "files", resp.status, detail));
+  }
+
+  try {
+    return JSON.parse(detail || "{}");
+  } catch {
+    return {};
+  }
+}
+
+async function sleepMs(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function getFileExtension(filename) {
@@ -3318,10 +4158,16 @@ function sanitizeAgentRuntimeConfigsPayload(input) {
 
 function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
   const source = raw && typeof raw === "object" ? raw : {};
-  const defaults = getDefaultRuntimeConfigByAgent(sanitizeAgent(agentId));
+  const normalizedAgentId = sanitizeAgent(agentId);
+  const defaults = getDefaultRuntimeConfigByAgent(normalizedAgentId);
   const provider = sanitizeRuntimeProvider(source.provider);
-  const model = sanitizeRuntimeModel(source.model);
   const protocol = sanitizeRuntimeProtocol(source.protocol);
+  const model = sanitizeRuntimeModel(source.model);
+  const modelForMatching =
+    model || getModelByAgent(normalizedAgentId, { model: "" });
+  const tokenProfile = resolveRuntimeTokenProfileByModel(modelForMatching);
+  const tokenDefaults = tokenProfile || defaults;
+  const lockTokenFields = protocol === "responses";
   const creativityMode = sanitizeCreativityMode(source.creativityMode);
   const temperature = sanitizeRuntimeNumber(
     source.temperature,
@@ -3354,26 +4200,26 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     RUNTIME_CONTEXT_ROUNDS_MAX,
   );
   const contextWindowTokens = sanitizeRuntimeInteger(
-    source.contextWindowTokens,
-    defaults.contextWindowTokens,
+    lockTokenFields ? tokenDefaults.contextWindowTokens : source.contextWindowTokens,
+    tokenDefaults.contextWindowTokens,
     1024,
     RUNTIME_MAX_CONTEXT_WINDOW_TOKENS,
   );
   const maxInputTokens = sanitizeRuntimeInteger(
-    source.maxInputTokens,
-    defaults.maxInputTokens,
+    lockTokenFields ? tokenDefaults.maxInputTokens : source.maxInputTokens,
+    tokenDefaults.maxInputTokens,
     1024,
     RUNTIME_MAX_INPUT_TOKENS,
   );
   const maxOutputTokens = sanitizeRuntimeInteger(
     source.maxOutputTokens,
-    defaults.maxOutputTokens,
+    tokenDefaults.maxOutputTokens,
     64,
     RUNTIME_MAX_OUTPUT_TOKENS,
   );
   const maxReasoningTokens = sanitizeRuntimeInteger(
-    source.maxReasoningTokens,
-    defaults.maxReasoningTokens,
+    lockTokenFields ? tokenDefaults.maxReasoningTokens : source.maxReasoningTokens,
+    tokenDefaults.maxReasoningTokens,
     0,
     RUNTIME_MAX_REASONING_TOKENS,
   );
@@ -3381,7 +4227,6 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     source.enableThinking,
     defaults.enableThinking,
   );
-  const reasoningEffort = normalizeReasoningEffort(source.reasoningEffort);
   const includeCurrentTime = sanitizeRuntimeBoolean(
     source.includeCurrentTime,
     defaults.includeCurrentTime,
@@ -3444,7 +4289,6 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     maxOutputTokens,
     maxReasoningTokens,
     enableThinking,
-    reasoningEffort,
     includeCurrentTime,
     preventPromptLeak,
     injectSafetyPrompt,
@@ -3641,24 +4485,6 @@ function getProviderByAgent(agentId, runtimeConfig = null) {
   return normalizeProvider(map[targetAgent] || map.A);
 }
 
-function normalizeReasoningEffort(v) {
-  const key = String(v || "")
-    .trim()
-    .toLowerCase();
-  if (
-    key === "none" ||
-    key === "minimal" ||
-    key === "off" ||
-    key === "no" ||
-    key === "false" ||
-    key === "0"
-  ) {
-    return "none";
-  }
-  if (key === "low" || key === "medium" || key === "high") return key;
-  return "low";
-}
-
 function resolveReasoningPolicy(model, requested, provider) {
   const supports = modelSupportsReasoning(model);
   const requires = modelRequiresReasoning(model);
@@ -3669,7 +4495,7 @@ function resolveReasoningPolicy(model, requested, provider) {
   }
 
   if (requires && requested === "none") {
-    return { enabled: true, effort: "low", forced: true };
+    return { enabled: true, effort: "high", forced: true };
   }
 
   if (!supports) {
@@ -3680,7 +4506,7 @@ function resolveReasoningPolicy(model, requested, provider) {
     return { enabled: false, effort: "none", forced: false };
   }
 
-  return { enabled: true, effort: requested, forced: false };
+  return { enabled: true, effort: "high", forced: false };
 }
 
 function modelSupportsReasoning(model) {
@@ -3733,6 +4559,9 @@ function getProviderConfig(provider) {
       responsesEndpoint:
         process.env.VOLCENGINE_RESPONSES_ENDPOINT ||
         "https://ark.cn-beijing.volces.com/api/v3/responses",
+      filesEndpoint:
+        process.env.VOLCENGINE_FILES_ENDPOINT ||
+        "https://ark.cn-beijing.volces.com/api/v3/files",
       apiKey: readEnvApiKey("VOLCENGINE_API_KEY", "ARK_API_KEY"),
       missingKeyMessage:
         "未检测到火山引擎 API Key。请在 .env 中配置 VOLCENGINE_API_KEY（或 ARK_API_KEY）。",
@@ -3995,6 +4824,11 @@ function readRequestMessages(rawMessages) {
   return Array.isArray(parsed) ? parsed : [];
 }
 
+function readRequestVolcengineFileRefs(raw) {
+  const parsed = readJsonLikeField(raw, []);
+  return Array.isArray(parsed) ? sanitizeVolcengineFileRefsPayload(parsed) : [];
+}
+
 function defaultChatState() {
   return {
     activeId: "s1",
@@ -4014,8 +4848,8 @@ function defaultChatState() {
       agent: "A",
       apiTemperature: 0.6,
       apiTopP: 1,
-      apiReasoningEffort: "low",
-      lastAppliedReasoning: "low",
+      apiReasoningEffort: "high",
+      lastAppliedReasoning: "high",
       smartContextEnabled: false,
     },
   };
@@ -4079,8 +4913,8 @@ function sanitizeStateSettings(raw) {
   const agent = sanitizeAgent(source.agent);
   const apiTemperature = sanitizeNumber(source.apiTemperature, 0.6, 0, 2);
   const apiTopP = sanitizeNumber(source.apiTopP, 1, 0, 1);
-  const apiReasoningEffort = sanitizeReasoning(source.apiReasoningEffort, "low");
-  const lastAppliedReasoning = sanitizeReasoning(source.lastAppliedReasoning, "low");
+  const apiReasoningEffort = sanitizeReasoning(source.apiReasoningEffort, "high");
+  const lastAppliedReasoning = sanitizeReasoning(source.lastAppliedReasoning, "high");
   const smartContextEnabled = sanitizeRuntimeBoolean(source.smartContextEnabled, false);
 
   return {
@@ -4173,11 +5007,26 @@ function sanitizeMessage(msg, idx) {
     ? msg.role
     : "assistant";
   const attachments = Array.isArray(msg?.attachments)
-    ? msg.attachments.slice(0, 8).map((a) => ({
-        name: sanitizeText(a?.name, "文件", 120),
-        type: sanitizeText(a?.type, "", 120),
-        size: Number.isFinite(Number(a?.size)) ? Number(a.size) : undefined,
-      }))
+    ? msg.attachments.slice(0, 8).map((a) => {
+        const fileId = sanitizeText(a?.fileId, "", 160);
+        const inputType = String(a?.inputType || "")
+          .trim()
+          .toLowerCase();
+        const safeInputType =
+          inputType === "input_file" ||
+          inputType === "input_image" ||
+          inputType === "input_video"
+            ? inputType
+            : "";
+
+        return {
+          name: sanitizeText(a?.name, "文件", 120),
+          type: sanitizeText(a?.type, "", 120),
+          size: Number.isFinite(Number(a?.size)) ? Number(a.size) : undefined,
+          ...(fileId ? { fileId } : {}),
+          ...(fileId && safeInputType ? { inputType: safeInputType } : {}),
+        };
+      })
     : [];
 
   return {
@@ -4315,12 +5164,21 @@ function sanitizeAgent(value) {
   return "A";
 }
 
-function sanitizeReasoning(value, fallback = "low") {
+function sanitizeReasoning(value, fallback = "high") {
   const key = String(value || "")
     .trim()
     .toLowerCase();
-  if (key === "none" || key === "low" || key === "medium" || key === "high") return key;
-  return fallback;
+  if (
+    key === "none" ||
+    key === "off" ||
+    key === "no" ||
+    key === "false" ||
+    key === "0"
+  ) {
+    return "none";
+  }
+  if (!key) return fallback;
+  return "high";
 }
 
 function sanitizeNumber(value, fallback, min, max) {
@@ -4332,10 +5190,109 @@ function sanitizeNumber(value, fallback, min, max) {
 async function startServer() {
   await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 6000 });
   console.log(`Mongo connected: ${mongoUri}`);
+  await ensureUploadedFileContextIndexes().catch((error) => {
+    console.warn(
+      "Failed to ensure uploaded file context indexes:",
+      error?.message || error,
+    );
+  });
 
   app.listen(port, () => {
     console.log(`API server listening on http://localhost:${port}`);
   });
+}
+
+async function ensureUploadedFileContextIndexes() {
+  const collection = UploadedFileContext.collection;
+  let existingIndexes = await collection.indexes();
+
+  const needUniqueIndex = !hasEquivalentMongoIndex(existingIndexes, {
+    key: { userId: 1, sessionId: 1, messageId: 1 },
+    unique: true,
+  });
+  if (needUniqueIndex) {
+    await collection.createIndex(
+      { userId: 1, sessionId: 1, messageId: 1 },
+      {
+        unique: true,
+        name: "ux_uploaded_file_context_user_session_message",
+      },
+    );
+    existingIndexes = await collection.indexes();
+  }
+
+  await ensureUploadedFileContextTtlIndex(collection, existingIndexes);
+}
+
+function hasEquivalentMongoIndex(existingIndexes, { key, unique, expireAfterSeconds }) {
+  const list = Array.isArray(existingIndexes) ? existingIndexes : [];
+  return list.some((index) => {
+    if (!hasSameMongoIndexKey(index?.key, key)) return false;
+
+    if (unique !== undefined) {
+      if (!!index?.unique !== !!unique) return false;
+    }
+
+    if (expireAfterSeconds !== undefined) {
+      const currentExpire = Number(index?.expireAfterSeconds);
+      if (!Number.isFinite(currentExpire)) return false;
+      if (currentExpire !== Number(expireAfterSeconds)) return false;
+    }
+
+    return true;
+  });
+}
+
+function hasSameMongoIndexKey(a, b) {
+  const aEntries = Object.entries(a || {});
+  const bEntries = Object.entries(b || {});
+  if (aEntries.length !== bEntries.length) return false;
+  for (let i = 0; i < aEntries.length; i += 1) {
+    const [aKey, aValue] = aEntries[i];
+    const [bKey, bValue] = bEntries[i] || [];
+    if (aKey !== bKey) return false;
+    if (Number(aValue) !== Number(bValue)) return false;
+  }
+  return true;
+}
+
+async function ensureUploadedFileContextTtlIndex(collection, existingIndexes) {
+  const ttlSpec = { key: { expiresAt: 1 }, expireAfterSeconds: 0 };
+  if (hasEquivalentMongoIndex(existingIndexes, ttlSpec)) {
+    return;
+  }
+
+  const sameKeyIndex = findMongoIndexByKey(existingIndexes, ttlSpec.key);
+  if (sameKeyIndex?.name) {
+    try {
+      await collection.db.command({
+        collMod: collection.collectionName,
+        index: {
+          name: sameKeyIndex.name,
+          expireAfterSeconds: 0,
+        },
+      });
+      return;
+    } catch (error) {
+      // 某些 Mongo 版本不支持把普通索引直接转成 TTL，降级为删旧建新。
+      if (String(sameKeyIndex.name) !== "_id_") {
+        await collection.dropIndex(sameKeyIndex.name);
+      }
+    }
+  }
+
+  await collection.createIndex(
+    { expiresAt: 1 },
+    {
+      expireAfterSeconds: 0,
+      name: "ttl_uploaded_file_context_expires_at",
+    },
+  );
+}
+
+function findMongoIndexByKey(existingIndexes, key) {
+  const list = Array.isArray(existingIndexes) ? existingIndexes : [];
+  return list.find((index) => hasSameMongoIndexKey(index?.key, key)) || null;
 }
 
 function normalizeUsername(input) {
@@ -4523,7 +5480,7 @@ function appendUserChatSection(lines, user, state, userIndex = 1) {
 
   lines.push(`当前激活会话ID: ${state.activeId || "-"}`);
   lines.push(
-    `当前设置: agent=${state.settings?.agent || "-"}, temperature=${formatMaybeNumber(state.settings?.apiTemperature)}, topP=${formatMaybeNumber(state.settings?.apiTopP)}, reasoningEffort=${state.settings?.apiReasoningEffort || "-"}, lastAppliedReasoning=${state.settings?.lastAppliedReasoning || "-"}`,
+    `当前设置: agent=${state.settings?.agent || "-"}, temperature=${formatMaybeNumber(state.settings?.apiTemperature)}, topP=${formatMaybeNumber(state.settings?.apiTopP)}, thinkingMode=${state.settings?.apiReasoningEffort || "-"}, lastAppliedReasoning=${state.settings?.lastAppliedReasoning || "-"}`,
   );
   lines.push(`分组数: ${groups.length}`);
   if (groups.length > 0) {
