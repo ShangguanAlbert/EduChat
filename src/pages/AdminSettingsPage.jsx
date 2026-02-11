@@ -61,8 +61,8 @@ const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = [
     supportsThinking: true,
   },
   {
-    id: "doubao-seed-1-6-250615",
-    aliases: ["doubao-seed-1-6-250615", "doubao-seed-1-6"],
+    id: "doubao-seed-1-6-251015",
+    aliases: ["doubao-seed-1-6-251015", "doubao-seed-1-6-250615", "doubao-seed-1-6"],
     supportsThinking: true,
   },
   {
@@ -94,19 +94,19 @@ const VOLCENGINE_WEB_SEARCH_SOURCE_OPTIONS = [
 
 function createDefaultAgentProviderMap() {
   return {
-    A: "openrouter",
-    B: "openrouter",
-    C: "openrouter",
+    A: "volcengine",
+    B: "volcengine",
+    C: "volcengine",
     D: "openrouter",
   };
 }
 
 function createDefaultAgentModelMap() {
   return {
-    A: "",
-    B: "",
-    C: "",
-    D: "",
+    A: "doubao-seed-1-6-251015",
+    B: "glm-4-7-251222",
+    C: "deepseek-v3-2-251201",
+    D: "z-ai/glm-4.7-flash",
   };
 }
 
@@ -620,6 +620,10 @@ export default function AdminSettingsPage() {
         ? "阿里云 DashScope"
         : "OpenRouter";
   const showVolcenginePanel = selectedProvider === "volcengine";
+  const providerSupportsReasoning = selectedProvider !== "aliyun";
+  const providerReasoningHint = providerSupportsReasoning
+    ? "当前服务商支持深度思考与推理强度（四档）配置。"
+    : "阿里云当前仅使用 Chat 协议，不支持 reasoning.effort。";
   const selectedModelDefault = agentModelDefaults[selectedAgent] || "";
   const selectedModelForMatching = String(
     selectedRuntime.model || selectedModelDefault || "",
@@ -1344,6 +1348,70 @@ export default function AdminSettingsPage() {
                     />
                   </label>
 
+                  <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens">
+                    <span className="admin-label-with-hint">
+                      上下文窗口（Token）
+                      <InfoHint text="模型上下文窗口上限，用于记录与校验。推荐按模型官方参数填写。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-context-window-tokens"
+                      value={selectedRuntime.contextWindowTokens}
+                      min={1024}
+                      max={512000}
+                      step={1024}
+                      onChange={(next) => updateRuntimeField("contextWindowTokens", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens">
+                    <span className="admin-label-with-hint">
+                      最大输入 Token 长度
+                      <InfoHint text="单次请求允许输入的 Token 上限，用于记录与校验。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-max-input-tokens"
+                      value={selectedRuntime.maxInputTokens}
+                      min={1024}
+                      max={512000}
+                      step={1024}
+                      onChange={(next) => updateRuntimeField("maxInputTokens", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-max-output-tokens">
+                    <span className="admin-label-with-hint">
+                      最大输出 Token 长度
+                      <InfoHint text="会映射到上游接口的 max_tokens / max_output_tokens。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-max-output-tokens"
+                      value={selectedRuntime.maxOutputTokens}
+                      min={64}
+                      max={128000}
+                      step={64}
+                      onChange={(next) => updateRuntimeField("maxOutputTokens", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-max-reasoning-tokens">
+                    <span className="admin-label-with-hint">
+                      最大思考内容 Token 长度
+                      <InfoHint text="深度思考阶段可使用的 Token 上限。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-max-reasoning-tokens"
+                      value={selectedRuntime.maxReasoningTokens}
+                      min={0}
+                      max={128000}
+                      step={64}
+                      onChange={(next) => updateRuntimeField("maxReasoningTokens", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
                       系统提示词注入系统时间（年月日）
@@ -1592,10 +1660,104 @@ export default function AdminSettingsPage() {
                     </label>
                   </div>
 
+                  <div className="admin-field-row split">
+                    <span>深度思考</span>
+                    <label
+                      className={`admin-switch-row ${providerSupportsReasoning ? "" : "disabled"}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!!selectedRuntime.enableThinking}
+                        onChange={(e) => updateRuntimeField("enableThinking", e.target.checked)}
+                        disabled={loading || !providerSupportsReasoning}
+                      />
+                      <span>{selectedRuntime.enableThinking ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>推理模式</span>
+                    <AdminPortalSelect
+                      value={selectedRuntime.reasoningEffort}
+                      options={REASONING_MODE_OPTIONS}
+                      onChange={(next) => updateRuntimeField("reasoningEffort", next)}
+                      disabled={loading || !providerSupportsReasoning}
+                    />
+                  </div>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens-chat">
+                    <span className="admin-label-with-hint">
+                      上下文窗口（Token）
+                      <InfoHint text="模型上下文窗口上限，用于记录与校验。推荐按模型官方参数填写。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-context-window-tokens-chat"
+                      value={selectedRuntime.contextWindowTokens}
+                      min={1024}
+                      max={512000}
+                      step={1024}
+                      onChange={(next) => updateRuntimeField("contextWindowTokens", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens-chat">
+                    <span className="admin-label-with-hint">
+                      最大输入 Token 长度
+                      <InfoHint text="单次请求允许输入的 Token 上限，用于记录与校验。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-max-input-tokens-chat"
+                      value={selectedRuntime.maxInputTokens}
+                      min={1024}
+                      max={512000}
+                      step={1024}
+                      onChange={(next) => updateRuntimeField("maxInputTokens", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-max-output-tokens-chat">
+                    <span className="admin-label-with-hint">
+                      最大输出 Token 长度
+                      <InfoHint text="会映射到上游接口的 max_tokens / max_output_tokens。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-max-output-tokens-chat"
+                      value={selectedRuntime.maxOutputTokens}
+                      min={64}
+                      max={128000}
+                      step={64}
+                      onChange={(next) => updateRuntimeField("maxOutputTokens", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-runtime-max-reasoning-tokens-chat">
+                    <span className="admin-label-with-hint">
+                      最大思考内容 Token 长度
+                      <InfoHint text="深度思考阶段可使用的 Token 上限。" />
+                    </span>
+                    <NumberRuntimeInput
+                      id="admin-runtime-max-reasoning-tokens-chat"
+                      value={selectedRuntime.maxReasoningTokens}
+                      min={0}
+                      max={128000}
+                      step={64}
+                      onChange={(next) => updateRuntimeField("maxReasoningTokens", next)}
+                      disabled={loading}
+                    />
+                  </label>
+
                   <p className="admin-field-note">
                     当前服务商：{selectedProviderName}
                     {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
                     该服务商当前仅使用 Chat 协议，Responses 参数已自动隐藏。
+                  </p>
+                  <p
+                    className={`admin-field-note ${providerSupportsReasoning ? "" : "warning"}`}
+                  >
+                    {providerReasoningHint}
                   </p>
                 </>
               )}

@@ -1,4 +1,8 @@
 export const AGENT_IDS = ["A", "B", "C", "D"];
+const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
+const RUNTIME_MAX_INPUT_TOKENS = 512000;
+const RUNTIME_MAX_OUTPUT_TOKENS = 128000;
+const RUNTIME_MAX_REASONING_TOKENS = 128000;
 
 export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   provider: "inherit",
@@ -10,6 +14,8 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   frequencyPenalty: 0,
   presencePenalty: 0,
   contextRounds: 10,
+  contextWindowTokens: 128000,
+  maxInputTokens: 96000,
   maxOutputTokens: 4096,
   maxReasoningTokens: 0,
   enableThinking: true,
@@ -25,6 +31,50 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   webSearchSourceMoji: true,
   webSearchSourceToutiao: true,
 });
+const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
+  A: Object.freeze({
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 64000,
+    maxReasoningTokens: 32000,
+  }),
+  B: Object.freeze({
+    contextWindowTokens: 200000,
+    maxInputTokens: 200000,
+    maxOutputTokens: 128000,
+    maxReasoningTokens: 128000,
+  }),
+  C: Object.freeze({
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  }),
+  D: Object.freeze({}),
+});
+const AGENT_RUNTIME_DEFAULTS = Object.freeze({
+  A: Object.freeze({
+    ...DEFAULT_AGENT_RUNTIME_CONFIG,
+    ...AGENT_RUNTIME_DEFAULT_OVERRIDES.A,
+  }),
+  B: Object.freeze({
+    ...DEFAULT_AGENT_RUNTIME_CONFIG,
+    ...AGENT_RUNTIME_DEFAULT_OVERRIDES.B,
+  }),
+  C: Object.freeze({
+    ...DEFAULT_AGENT_RUNTIME_CONFIG,
+    ...AGENT_RUNTIME_DEFAULT_OVERRIDES.C,
+  }),
+  D: Object.freeze({
+    ...DEFAULT_AGENT_RUNTIME_CONFIG,
+    ...AGENT_RUNTIME_DEFAULT_OVERRIDES.D,
+  }),
+});
+
+function getDefaultRuntimeConfigByAgent(agentId = "A") {
+  const key = AGENT_IDS.includes(agentId) ? agentId : "A";
+  return AGENT_RUNTIME_DEFAULTS[key] || AGENT_RUNTIME_DEFAULTS.A;
+}
 
 export const CREATIVITY_PRESET_OPTIONS = [
   { value: "precise", label: "精确模式" },
@@ -34,16 +84,16 @@ export const CREATIVITY_PRESET_OPTIONS = [
 ];
 
 export function createDefaultAgentRuntimeConfigMap() {
-  return {
-    A: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
-    B: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
-    C: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
-    D: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
-  };
+  const next = {};
+  AGENT_IDS.forEach((agentId) => {
+    next[agentId] = { ...getDefaultRuntimeConfigByAgent(agentId) };
+  });
+  return next;
 }
 
-export function sanitizeSingleRuntimeConfig(raw) {
+export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
   const source = raw && typeof raw === "object" ? raw : {};
+  const defaults = getDefaultRuntimeConfigByAgent(agentId);
   const creativityMode = sanitizeCreativityMode(source.creativityMode);
   const preset = getPresetDefaults(creativityMode);
   const isCustom = creativityMode === "custom";
@@ -54,80 +104,92 @@ export function sanitizeSingleRuntimeConfig(raw) {
     protocol: sanitizeProtocol(source.protocol),
     creativityMode,
     temperature: isCustom
-      ? sanitizeNumber(source.temperature, DEFAULT_AGENT_RUNTIME_CONFIG.temperature, 0, 2)
+      ? sanitizeNumber(source.temperature, defaults.temperature, 0, 2)
       : preset.temperature,
     topP: isCustom
-      ? sanitizeNumber(source.topP, DEFAULT_AGENT_RUNTIME_CONFIG.topP, 0, 1)
+      ? sanitizeNumber(source.topP, defaults.topP, 0, 1)
       : preset.topP,
     frequencyPenalty: isCustom
-      ? sanitizeNumber(source.frequencyPenalty, DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty, -2, 2)
+      ? sanitizeNumber(source.frequencyPenalty, defaults.frequencyPenalty, -2, 2)
       : preset.frequencyPenalty,
     presencePenalty: isCustom
-      ? sanitizeNumber(source.presencePenalty, DEFAULT_AGENT_RUNTIME_CONFIG.presencePenalty, -2, 2)
+      ? sanitizeNumber(source.presencePenalty, defaults.presencePenalty, -2, 2)
       : preset.presencePenalty,
-    contextRounds: sanitizeInteger(source.contextRounds, DEFAULT_AGENT_RUNTIME_CONFIG.contextRounds, 1, 20),
+    contextRounds: sanitizeInteger(source.contextRounds, defaults.contextRounds, 1, 20),
+    contextWindowTokens: sanitizeInteger(
+      source.contextWindowTokens,
+      defaults.contextWindowTokens,
+      1024,
+      RUNTIME_MAX_CONTEXT_WINDOW_TOKENS,
+    ),
+    maxInputTokens: sanitizeInteger(
+      source.maxInputTokens,
+      defaults.maxInputTokens,
+      1024,
+      RUNTIME_MAX_INPUT_TOKENS,
+    ),
     maxOutputTokens: sanitizeInteger(
       source.maxOutputTokens,
-      DEFAULT_AGENT_RUNTIME_CONFIG.maxOutputTokens,
+      defaults.maxOutputTokens,
       64,
-      8192,
+      RUNTIME_MAX_OUTPUT_TOKENS,
     ),
     maxReasoningTokens: sanitizeInteger(
       source.maxReasoningTokens,
-      DEFAULT_AGENT_RUNTIME_CONFIG.maxReasoningTokens,
+      defaults.maxReasoningTokens,
       0,
-      8192,
+      RUNTIME_MAX_REASONING_TOKENS,
     ),
     enableThinking: sanitizeBoolean(
       source.enableThinking,
-      DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
+      defaults.enableThinking,
     ),
     reasoningEffort: sanitizeReasoningEffort(source.reasoningEffort),
     includeCurrentTime: sanitizeBoolean(
       source.includeCurrentTime,
-      DEFAULT_AGENT_RUNTIME_CONFIG.includeCurrentTime,
+      defaults.includeCurrentTime,
     ),
     preventPromptLeak: sanitizeBoolean(
       source.preventPromptLeak,
-      DEFAULT_AGENT_RUNTIME_CONFIG.preventPromptLeak,
+      defaults.preventPromptLeak,
     ),
     injectSafetyPrompt: sanitizeBoolean(
       source.injectSafetyPrompt,
-      DEFAULT_AGENT_RUNTIME_CONFIG.injectSafetyPrompt,
+      defaults.injectSafetyPrompt,
     ),
     enableWebSearch: sanitizeBoolean(
       source.enableWebSearch,
-      DEFAULT_AGENT_RUNTIME_CONFIG.enableWebSearch,
+      defaults.enableWebSearch,
     ),
     webSearchMaxKeyword: sanitizeInteger(
       source.webSearchMaxKeyword,
-      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxKeyword,
+      defaults.webSearchMaxKeyword,
       1,
       50,
     ),
     webSearchResultLimit: sanitizeInteger(
       source.webSearchResultLimit,
-      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchResultLimit,
+      defaults.webSearchResultLimit,
       1,
       50,
     ),
     webSearchMaxToolCalls: sanitizeInteger(
       source.webSearchMaxToolCalls,
-      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxToolCalls,
+      defaults.webSearchMaxToolCalls,
       1,
       10,
     ),
     webSearchSourceDouyin: sanitizeBoolean(
       source.webSearchSourceDouyin,
-      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceDouyin,
+      defaults.webSearchSourceDouyin,
     ),
     webSearchSourceMoji: sanitizeBoolean(
       source.webSearchSourceMoji,
-      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceMoji,
+      defaults.webSearchSourceMoji,
     ),
     webSearchSourceToutiao: sanitizeBoolean(
       source.webSearchSourceToutiao,
-      DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceToutiao,
+      defaults.webSearchSourceToutiao,
     ),
   };
 }
@@ -136,7 +198,7 @@ export function sanitizeRuntimeConfigMap(raw) {
   const source = raw && typeof raw === "object" ? raw : {};
   const next = createDefaultAgentRuntimeConfigMap();
   AGENT_IDS.forEach((agentId) => {
-    next[agentId] = sanitizeSingleRuntimeConfig(source[agentId]);
+    next[agentId] = sanitizeSingleRuntimeConfig(source[agentId], agentId);
   });
   return next;
 }

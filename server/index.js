@@ -39,7 +39,10 @@ const DEFAULT_VOLCENGINE_IMAGE_GENERATION_ENDPOINT =
 const SYSTEM_PROMPT_MAX_LENGTH = 24000;
 const DEFAULT_SYSTEM_PROMPT_FALLBACK = "你是用户的助手";
 const RUNTIME_CONTEXT_ROUNDS_MAX = 20;
-const RUNTIME_MAX_OUTPUT_TOKENS = 8192;
+const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
+const RUNTIME_MAX_INPUT_TOKENS = 512000;
+const RUNTIME_MAX_OUTPUT_TOKENS = 128000;
+const RUNTIME_MAX_REASONING_TOKENS = 128000;
 const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   provider: "inherit",
   model: "",
@@ -50,6 +53,8 @@ const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   frequencyPenalty: 0,
   presencePenalty: 0,
   contextRounds: 10,
+  contextWindowTokens: 128000,
+  maxInputTokens: 96000,
   maxOutputTokens: 4096,
   maxReasoningTokens: 0,
   enableThinking: true,
@@ -65,6 +70,45 @@ const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   webSearchSourceMoji: true,
   webSearchSourceToutiao: true,
 });
+const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
+  A: Object.freeze({
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 64000,
+    maxReasoningTokens: 32000,
+  }),
+  B: Object.freeze({
+    contextWindowTokens: 200000,
+    maxInputTokens: 200000,
+    maxOutputTokens: 128000,
+    maxReasoningTokens: 128000,
+  }),
+  C: Object.freeze({
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  }),
+  D: Object.freeze({}),
+});
+const AGENT_RUNTIME_DEFAULTS = Object.freeze({
+  A: Object.freeze({
+    ...DEFAULT_AGENT_RUNTIME_CONFIG,
+    ...AGENT_RUNTIME_DEFAULT_OVERRIDES.A,
+  }),
+  B: Object.freeze({
+    ...DEFAULT_AGENT_RUNTIME_CONFIG,
+    ...AGENT_RUNTIME_DEFAULT_OVERRIDES.B,
+  }),
+  C: Object.freeze({
+    ...DEFAULT_AGENT_RUNTIME_CONFIG,
+    ...AGENT_RUNTIME_DEFAULT_OVERRIDES.C,
+  }),
+  D: Object.freeze({
+    ...DEFAULT_AGENT_RUNTIME_CONFIG,
+    ...AGENT_RUNTIME_DEFAULT_OVERRIDES.D,
+  }),
+});
 const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = Object.freeze([
   {
     id: "doubao-seed-1-8-251228",
@@ -77,8 +121,8 @@ const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = Object.freeze([
     supportsThinking: true,
   },
   {
-    id: "doubao-seed-1-6-250615",
-    aliases: ["doubao-seed-1-6-250615", "doubao-seed-1-6"],
+    id: "doubao-seed-1-6-251015",
+    aliases: ["doubao-seed-1-6-251015", "doubao-seed-1-6-250615", "doubao-seed-1-6"],
     supportsThinking: true,
   },
   {
@@ -107,6 +151,20 @@ const VOLCENGINE_WEB_SEARCH_THINKING_PROMPT = [
   "在思考中明确说明：是否需要搜索、为什么搜索、计划使用的关键词。",
   "回答应优先依据搜索结果，并在正文中标注可追溯来源。",
 ].join("\n");
+
+function getDefaultRuntimeConfigByAgent(agentId = "A") {
+  const key = AGENT_IDS.includes(agentId) ? agentId : "A";
+  return AGENT_RUNTIME_DEFAULTS[key] || AGENT_RUNTIME_DEFAULTS.A;
+}
+
+function createDefaultAgentRuntimeConfigMap() {
+  const next = {};
+  AGENT_IDS.forEach((agentId) => {
+    next[agentId] = { ...getDefaultRuntimeConfigByAgent(agentId) };
+  });
+  return next;
+}
+
 const scryptAsync = promisify(crypto.scrypt);
 const CRC32_TABLE = createCrc32Table();
 
@@ -299,6 +357,14 @@ const runtimeConfigSchema = new mongoose.Schema(
       type: Number,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.contextRounds,
     },
+    contextWindowTokens: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.contextWindowTokens,
+    },
+    maxInputTokens: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.maxInputTokens,
+    },
     maxOutputTokens: {
       type: Number,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.maxOutputTokens,
@@ -395,12 +461,7 @@ const adminConfigSchema = new mongoose.Schema(
         },
         { _id: false },
       ),
-      default: () => ({
-        A: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
-        B: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
-        C: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
-        D: { ...DEFAULT_AGENT_RUNTIME_CONFIG },
-      }),
+      default: () => createDefaultAgentRuntimeConfigMap(),
     },
   },
   {
@@ -917,6 +978,7 @@ app.post(
     const messages = readRequestMessages(req.body?.messages);
     const runtimeConfig = sanitizeSingleAgentRuntimeConfig(
       readJsonLikeField(req.body?.runtimeConfig, {}),
+      agentId,
     );
     const files = Array.isArray(req.files) ? req.files : [];
 
@@ -1905,7 +1967,16 @@ function buildChatRequestPayload({ model, messages, systemPrompt, config, reason
     ),
   };
   if (reasoning.enabled) {
-    payload.reasoning = { effort: reasoning.effort };
+    const safeMaxReasoningTokens = sanitizeRuntimeInteger(
+      config.maxReasoningTokens,
+      DEFAULT_AGENT_RUNTIME_CONFIG.maxReasoningTokens,
+      0,
+      RUNTIME_MAX_REASONING_TOKENS,
+    );
+    payload.reasoning = {
+      effort: reasoning.effort,
+      ...(safeMaxReasoningTokens > 0 ? { max_tokens: safeMaxReasoningTokens } : {}),
+    };
   }
   return payload;
 }
@@ -1945,10 +2016,17 @@ function buildResponsesRequestPayload({
   }
 
   if (supportsReasoningEffort) {
+    const safeMaxReasoningTokens = sanitizeRuntimeInteger(
+      config.maxReasoningTokens,
+      DEFAULT_AGENT_RUNTIME_CONFIG.maxReasoningTokens,
+      0,
+      RUNTIME_MAX_REASONING_TOKENS,
+    );
     payload.reasoning = {
       effort: thinkingEnabled
         ? mapReasoningEffortToResponses(reasoning.effort)
         : "minimal",
+      ...(safeMaxReasoningTokens > 0 ? { max_tokens: safeMaxReasoningTokens } : {}),
     };
   }
 
@@ -3147,9 +3225,9 @@ function getModelByAgent(agentId, runtimeConfig = null) {
   if (runtimeModel) return runtimeModel;
 
   const defaults = {
-    A: "z-ai/glm-4.7",
-    B: "google/gemini-3-flash-preview",
-    C: "deepseek/deepseek-v3.2",
+    A: "doubao-seed-1-6-251015",
+    B: "glm-4-7-251222",
+    C: "deepseek-v3-2-251201",
     D: "z-ai/glm-4.7-flash",
   };
 
@@ -3182,10 +3260,10 @@ async function getResolvedAgentRuntimeConfig(agentId) {
   try {
     const config = await readAdminAgentConfig();
     const resolved = resolveAgentRuntimeConfigs(config.runtimeConfigs);
-    return resolved[targetAgent] || normalizeRuntimeConfigFromPreset({});
+    return resolved[targetAgent] || normalizeRuntimeConfigFromPreset({}, targetAgent);
   } catch (error) {
     console.error("Failed to load admin runtime configs:", error);
-    return normalizeRuntimeConfigFromPreset({});
+    return normalizeRuntimeConfigFromPreset({}, targetAgent);
   }
 }
 
@@ -3233,106 +3311,122 @@ function sanitizeAgentRuntimeConfigsPayload(input) {
   const source = input && typeof input === "object" ? input : {};
   const next = {};
   AGENT_IDS.forEach((agentId) => {
-    next[agentId] = sanitizeSingleAgentRuntimeConfig(source[agentId]);
+    next[agentId] = sanitizeSingleAgentRuntimeConfig(source[agentId], agentId);
   });
   return next;
 }
 
-function sanitizeSingleAgentRuntimeConfig(raw) {
+function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
   const source = raw && typeof raw === "object" ? raw : {};
+  const defaults = getDefaultRuntimeConfigByAgent(sanitizeAgent(agentId));
   const provider = sanitizeRuntimeProvider(source.provider);
   const model = sanitizeRuntimeModel(source.model);
   const protocol = sanitizeRuntimeProtocol(source.protocol);
   const creativityMode = sanitizeCreativityMode(source.creativityMode);
   const temperature = sanitizeRuntimeNumber(
     source.temperature,
-    DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
+    defaults.temperature,
     0,
     2,
   );
   const topP = sanitizeRuntimeNumber(
     source.topP,
-    DEFAULT_AGENT_RUNTIME_CONFIG.topP,
+    defaults.topP,
     0,
     1,
   );
   const frequencyPenalty = sanitizeRuntimeNumber(
     source.frequencyPenalty,
-    DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty,
+    defaults.frequencyPenalty,
     -2,
     2,
   );
   const presencePenalty = sanitizeRuntimeNumber(
     source.presencePenalty,
-    DEFAULT_AGENT_RUNTIME_CONFIG.presencePenalty,
+    defaults.presencePenalty,
     -2,
     2,
   );
   const contextRounds = sanitizeRuntimeInteger(
     source.contextRounds,
-    DEFAULT_AGENT_RUNTIME_CONFIG.contextRounds,
+    defaults.contextRounds,
     1,
     RUNTIME_CONTEXT_ROUNDS_MAX,
   );
+  const contextWindowTokens = sanitizeRuntimeInteger(
+    source.contextWindowTokens,
+    defaults.contextWindowTokens,
+    1024,
+    RUNTIME_MAX_CONTEXT_WINDOW_TOKENS,
+  );
+  const maxInputTokens = sanitizeRuntimeInteger(
+    source.maxInputTokens,
+    defaults.maxInputTokens,
+    1024,
+    RUNTIME_MAX_INPUT_TOKENS,
+  );
   const maxOutputTokens = sanitizeRuntimeInteger(
     source.maxOutputTokens,
-    DEFAULT_AGENT_RUNTIME_CONFIG.maxOutputTokens,
+    defaults.maxOutputTokens,
     64,
     RUNTIME_MAX_OUTPUT_TOKENS,
   );
   const maxReasoningTokens = sanitizeRuntimeInteger(
     source.maxReasoningTokens,
-    DEFAULT_AGENT_RUNTIME_CONFIG.maxReasoningTokens,
+    defaults.maxReasoningTokens,
     0,
-    RUNTIME_MAX_OUTPUT_TOKENS,
+    RUNTIME_MAX_REASONING_TOKENS,
   );
-  const enableThinking = sanitizeEnableThinking(source.enableThinking);
+  const enableThinking = sanitizeRuntimeBoolean(
+    source.enableThinking,
+    defaults.enableThinking,
+  );
   const reasoningEffort = normalizeReasoningEffort(source.reasoningEffort);
   const includeCurrentTime = sanitizeRuntimeBoolean(
     source.includeCurrentTime,
-    DEFAULT_AGENT_RUNTIME_CONFIG.includeCurrentTime,
+    defaults.includeCurrentTime,
   );
   const preventPromptLeak = sanitizeRuntimeBoolean(
     source.preventPromptLeak,
-    DEFAULT_AGENT_RUNTIME_CONFIG.preventPromptLeak,
+    defaults.preventPromptLeak,
   );
   const injectSafetyPrompt = sanitizeRuntimeBoolean(
     source.injectSafetyPrompt,
-    DEFAULT_AGENT_RUNTIME_CONFIG.injectSafetyPrompt,
+    defaults.injectSafetyPrompt,
   );
   const enableWebSearch = sanitizeRuntimeBoolean(
     source.enableWebSearch,
-    DEFAULT_AGENT_RUNTIME_CONFIG.enableWebSearch,
+    defaults.enableWebSearch,
   );
   const webSearchMaxKeyword = sanitizeRuntimeInteger(
     source.webSearchMaxKeyword,
-    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxKeyword,
+    defaults.webSearchMaxKeyword,
     1,
     50,
   );
   const webSearchResultLimit = sanitizeRuntimeInteger(
     source.webSearchResultLimit,
-    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchResultLimit,
+    defaults.webSearchResultLimit,
     1,
     50,
   );
   const webSearchMaxToolCalls = sanitizeRuntimeInteger(
     source.webSearchMaxToolCalls,
-    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchMaxToolCalls,
+    defaults.webSearchMaxToolCalls,
     1,
     10,
   );
   const webSearchSourceDouyin = sanitizeRuntimeBoolean(
     source.webSearchSourceDouyin,
-    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceDouyin,
+    defaults.webSearchSourceDouyin,
   );
   const webSearchSourceMoji = sanitizeRuntimeBoolean(
     source.webSearchSourceMoji,
-    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceMoji,
+    defaults.webSearchSourceMoji,
   );
   const webSearchSourceToutiao = sanitizeRuntimeBoolean(
     source.webSearchSourceToutiao,
-    DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceToutiao,
+    defaults.webSearchSourceToutiao,
   );
 
   return {
@@ -3345,6 +3439,8 @@ function sanitizeSingleAgentRuntimeConfig(raw) {
     frequencyPenalty,
     presencePenalty,
     contextRounds,
+    contextWindowTokens,
+    maxInputTokens,
     maxOutputTokens,
     maxReasoningTokens,
     enableThinking,
@@ -3366,13 +3462,13 @@ function resolveAgentRuntimeConfigs(runtimeConfigs) {
   const normalized = sanitizeAgentRuntimeConfigsPayload(runtimeConfigs);
   const resolved = {};
   AGENT_IDS.forEach((agentId) => {
-    resolved[agentId] = normalizeRuntimeConfigFromPreset(normalized[agentId]);
+    resolved[agentId] = normalizeRuntimeConfigFromPreset(normalized[agentId], agentId);
   });
   return resolved;
 }
 
-function normalizeRuntimeConfigFromPreset(runtimeConfig) {
-  const config = sanitizeSingleAgentRuntimeConfig(runtimeConfig);
+function normalizeRuntimeConfigFromPreset(runtimeConfig, agentId = "A") {
+  const config = sanitizeSingleAgentRuntimeConfig(runtimeConfig, agentId);
   const base = getRuntimePresetDefaults(config.creativityMode);
   return {
     ...config,
@@ -3530,9 +3626,9 @@ function getProviderByAgent(agentId, runtimeConfig = null) {
   }
 
   const defaults = {
-    A: "openrouter",
-    B: "openrouter",
-    C: "openrouter",
+    A: "volcengine",
+    B: "volcengine",
+    C: "volcengine",
     D: "openrouter",
   };
   const targetAgent = sanitizeAgent(agentId);
