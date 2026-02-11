@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LogOut, Settings } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { Info, LogOut, Settings } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
 import Sidebar from "../components/Sidebar.jsx";
 import AgentSelect from "../components/AgentSelect.jsx";
 import MessageList from "../components/MessageList.jsx";
@@ -55,8 +55,12 @@ import {
 import {
   createNewSessionRecord,
   createWelcomeMessage,
-  hasUserTurn,
 } from "./chat/sessionFactory.js";
+import {
+  loadImageReturnContext,
+  normalizeImageReturnContext,
+  saveImageReturnContext,
+} from "./image/returnContext.js";
 import "../styles/chat.css";
 
 const DEFAULT_GROUPS = [{ id: "g1", name: "新组", description: "" }];
@@ -67,10 +71,10 @@ const DEFAULT_SESSION_MESSAGES = {
   ],
 };
 const CONTEXT_USER_ROUNDS = 10;
-const LOGIN_BOOTSTRAP_FLAG = "educhat_just_logged_in";
 
 export default function ChatPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [groups, setGroups] = useState(DEFAULT_GROUPS);
   const [sessions, setSessions] = useState(DEFAULT_SESSIONS);
   const [sessionMessages, setSessionMessages] = useState(DEFAULT_SESSION_MESSAGES);
@@ -88,6 +92,7 @@ export default function ChatPage() {
   const [streamError, setStreamError] = useState("");
   const [stateSaveError, setStateSaveError] = useState("");
   const [lastAppliedReasoning, setLastAppliedReasoning] = useState("low");
+  const [smartContextEnabled, setSmartContextEnabled] = useState(false);
   const [selectedAskText, setSelectedAskText] = useState("");
   const [focusUserMessageId, setFocusUserMessageId] = useState("");
   const [isAtLatest, setIsAtLatest] = useState(true);
@@ -146,6 +151,7 @@ export default function ChatPage() {
     () => agentRuntimeConfigs[agent] || DEFAULT_AGENT_RUNTIME_CONFIG,
     [agentRuntimeConfigs, agent],
   );
+  const agentSwitchLocked = smartContextEnabled;
   const makeRuntimeSnapshot = (agentId = agent) =>
     createRuntimeSnapshot({
       agentId,
@@ -232,6 +238,22 @@ export default function ChatPage() {
     setFocusUserMessageId("");
   }
 
+  function onOpenImageGeneration() {
+    const context = normalizeImageReturnContext({
+      sessionId: activeId,
+      agentId: agent,
+      timestamp: Date.now(),
+    });
+    if (context) {
+      saveImageReturnContext(context);
+    }
+    navigate("/image-generation", {
+      state: {
+        returnContext: context,
+      },
+    });
+  }
+
   function onDeleteSession(sessionId) {
     setSessions((prev) => {
       const next = prev.filter((s) => s.id !== sessionId);
@@ -258,6 +280,11 @@ export default function ChatPage() {
     if (sessionId === activeId) {
       setSelectedAskText("");
     }
+  }
+
+  function onAgentChange(nextAgent) {
+    if (agentSwitchLocked) return;
+    setAgent(nextAgent);
   }
 
   function onBatchDeleteSessions(sessionIds) {
@@ -456,6 +483,9 @@ export default function ChatPage() {
     );
     formData.append("topP", String(normalizeTopP(runtimeConfig.topP)));
     formData.append("reasoningEffort", runtimeConfig.reasoningEffort);
+    formData.append("sessionId", currentSessionId);
+    formData.append("smartContextEnabled", String(smartContextEnabled));
+    formData.append("contextMode", "append");
     formData.append("messages", JSON.stringify(historyForApi));
 
     (files || []).forEach((f) => formData.append("files", f));
@@ -613,6 +643,9 @@ export default function ChatPage() {
     );
     formData.append("topP", String(normalizeTopP(runtimeConfig.topP)));
     formData.append("reasoningEffort", runtimeConfig.reasoningEffort);
+    formData.append("sessionId", currentSessionId);
+    formData.append("smartContextEnabled", String(smartContextEnabled));
+    formData.append("contextMode", "regenerate");
     formData.append("messages", JSON.stringify(historyForApi));
 
     setFocusUserMessageId(promptMessageId);
@@ -762,7 +795,6 @@ export default function ChatPage() {
   function onLogout() {
     localStorage.removeItem("token");
     localStorage.removeItem("auth_user");
-    sessionStorage.removeItem(LOGIN_BOOTSTRAP_FLAG);
     navigate("/login", { replace: true });
   }
 
@@ -867,7 +899,16 @@ export default function ChatPage() {
         const stateSettings =
           state.settings && typeof state.settings === "object" ? state.settings : {};
         const nextRuntimeConfigs = sanitizeRuntimeConfigMap(data?.agentRuntimeConfigs);
-        const nextAgent = AGENT_META[stateSettings.agent] ? stateSettings.agent : "A";
+        const restoreContext = location.state?.fromImageGeneration
+          ? normalizeImageReturnContext(
+              location.state?.restoreContext || loadImageReturnContext(),
+            )
+          : null;
+
+        let nextAgent = AGENT_META[stateSettings.agent] ? stateSettings.agent : "A";
+        if (restoreContext?.agentId && AGENT_META[restoreContext.agentId]) {
+          nextAgent = restoreContext.agentId;
+        }
         const nextRuntime = nextRuntimeConfigs[nextAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
         const nextApiTemperature = String(normalizeTemperature(nextRuntime.temperature));
         const nextApiTopP = String(normalizeTopP(nextRuntime.topP));
@@ -875,30 +916,20 @@ export default function ChatPage() {
         const nextAppliedReasoning = normalizeReasoningEffort(
           stateSettings.lastAppliedReasoning ?? "low",
         );
+        const nextSmartContextEnabled = !!stateSettings.smartContextEnabled;
 
         let resolvedSessions = nextSessions;
         let resolvedMessages = nextSessionMessages;
         let resolvedActiveId = rawActiveId;
-        let freshSessionId = "";
-
-        const justLoggedIn = sessionStorage.getItem(LOGIN_BOOTSTRAP_FLAG) === "1";
-        if (justLoggedIn) {
-          sessionStorage.removeItem(LOGIN_BOOTSTRAP_FLAG);
-          const activeMessages = resolvedMessages[resolvedActiveId] || [];
-          if (hasUserTurn(activeMessages)) {
-            const fresh = createNewSessionRecord();
-            resolvedSessions = [fresh.session, ...resolvedSessions];
-            resolvedMessages = {
-              ...resolvedMessages,
-              [fresh.session.id]: fresh.messages,
-            };
-            resolvedActiveId = fresh.session.id;
-            freshSessionId = fresh.session.id;
-          }
-        }
 
         if (!resolvedSessions.some((s) => s.id === resolvedActiveId)) {
           resolvedActiveId = resolvedSessions[0]?.id || "s1";
+        }
+        if (
+          restoreContext?.sessionId &&
+          resolvedSessions.some((s) => s.id === restoreContext.sessionId)
+        ) {
+          resolvedActiveId = restoreContext.sessionId;
         }
 
         setGroups(nextGroups);
@@ -911,10 +942,7 @@ export default function ChatPage() {
         setApiTopP(nextApiTopP);
         setApiReasoningEffort(nextApiReasoning);
         setLastAppliedReasoning(nextAppliedReasoning);
-        if (freshSessionId) {
-          const welcome = resolvedMessages[freshSessionId]?.[0];
-          if (welcome) queueMessageUpsert(freshSessionId, welcome);
-        }
+        setSmartContextEnabled(nextSmartContextEnabled);
 
         const profile = sanitizeUserInfo(data?.profile);
         const role = String(data?.user?.role || "").toLowerCase();
@@ -955,7 +983,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true;
     };
-  }, [navigate]);
+  }, [navigate, location.state]);
 
   useEffect(() => {
     setApiTemperature(String(normalizeTemperature(activeRuntimeConfig.temperature)));
@@ -996,6 +1024,7 @@ export default function ChatPage() {
             apiTopP: normalizeTopP(apiTopP),
             apiReasoningEffort: normalizeReasoningEffort(apiReasoningEffort),
             lastAppliedReasoning: normalizeReasoningEffort(lastAppliedReasoning),
+            smartContextEnabled,
           },
         });
         setStateSaveError("");
@@ -1014,6 +1043,7 @@ export default function ChatPage() {
     apiTopP,
     apiReasoningEffort,
     lastAppliedReasoning,
+    smartContextEnabled,
     bootstrapLoading,
     isStreaming,
   ]);
@@ -1091,6 +1121,7 @@ export default function ChatPage() {
         activeId={activeId}
         onSelect={setActiveId}
         onNewChat={onNewChat}
+        onOpenImageGeneration={onOpenImageGeneration}
         onDeleteSession={onDeleteSession}
         onBatchDeleteSessions={onBatchDeleteSessions}
         onMoveSessionToGroup={onMoveSessionToGroup}
@@ -1105,7 +1136,35 @@ export default function ChatPage() {
 
       <div className="chat-main">
         <div className="chat-topbar">
-          <AgentSelect value={agent} onChange={setAgent} />
+          <div className="chat-topbar-left">
+            <AgentSelect
+              key={agentSwitchLocked ? "agent-locked" : "agent-unlocked"}
+              value={agent}
+              onChange={onAgentChange}
+              disabled={agentSwitchLocked}
+              disabledTitle="开启智能上下文管理后，需先关闭开关才能切换智能体。"
+            />
+            <div className="smart-context-control">
+              <label className="smart-context-switch" htmlFor="smart-context-toggle">
+                <input
+                  id="smart-context-toggle"
+                  type="checkbox"
+                  checked={smartContextEnabled}
+                  onChange={(e) => setSmartContextEnabled(e.target.checked)}
+                  disabled={isStreaming || interactionLocked}
+                />
+                <span className="smart-context-slider" aria-hidden="true" />
+                <span className="smart-context-label">智能上下文管理</span>
+              </label>
+              <span
+                className="smart-context-info"
+                title="开启后将锁定当前智能体进行对话，不得切换智能体"
+                aria-label="开启后将锁定当前智能体进行对话，不得切换智能体"
+              >
+                <Info size={14} />
+              </span>
+            </div>
+          </div>
           <div className="chat-topbar-right">
             <div className="export-wrap" ref={exportWrapRef}>
               <button
@@ -1144,11 +1203,6 @@ export default function ChatPage() {
               <span className="chat-logout-tip">退出登录</span>
               <LogOut size={16} aria-hidden="true" />
             </button>
-            <span className="chat-status">
-              {isStreaming
-                ? `流式生成中 · ${activeAgent.name}`
-                : `${activeAgent.name} · 模型温度 : ${normalizeTemperature(apiTemperature)} · 推理 : ${apiReasoningEffort}`}
-            </span>
           </div>
         </div>
 

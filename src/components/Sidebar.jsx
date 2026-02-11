@@ -8,6 +8,7 @@ export default function Sidebar({
   activeId,
   onSelect,
   onNewChat,
+  onOpenImageGeneration,
   onDeleteSession,
   onBatchDeleteSessions,
   onMoveSessionToGroup,
@@ -390,6 +391,12 @@ export default function Sidebar({
         <div className="sidebar-actions">
           <button className="sidebar-new" onClick={() => onNewChat()}>
             + 新聊天
+          </button>
+          <button
+            className="sidebar-image-beta"
+            onClick={() => onOpenImageGeneration?.()}
+          >
+            图片生成（BETA）
           </button>
           <button className="sidebar-create-group" onClick={openCreateGroup}>
             + 新建分组

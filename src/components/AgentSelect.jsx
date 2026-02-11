@@ -13,6 +13,8 @@ export default function AgentSelect({
   value = "A",
   onChange,
   onOpenApiSettings,
+  disabled = false,
+  disabledTitle = "",
 }) {
   const selectedIndex = useMemo(
     () =>
@@ -37,7 +39,7 @@ export default function AgentSelect({
   // 点击外部关闭
   useEffect(() => {
     function onDocMouseDown(e) {
-      if (!open) return;
+      if (!open || disabled) return;
       const t = e.target;
       if (btnRef.current && btnRef.current.contains(t)) return;
       if (popRef.current && popRef.current.contains(t)) return;
@@ -45,9 +47,10 @@ export default function AgentSelect({
     }
     document.addEventListener("mousedown", onDocMouseDown);
     return () => document.removeEventListener("mousedown", onDocMouseDown);
-  }, [open]);
+  }, [open, disabled]);
 
   function commitSelect(idx) {
+    if (disabled) return;
     const a = AGENTS[idx];
     if (!a) return;
     onChange?.(a.id);
@@ -56,6 +59,7 @@ export default function AgentSelect({
   }
 
   function onButtonKeyDown(e) {
+    if (disabled) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       setOpen((v) => {
@@ -121,13 +125,17 @@ export default function AgentSelect({
         className="agent-trigger"
         type="button"
         aria-haspopup="menu"
-        aria-expanded={open}
+        aria-expanded={open && !disabled}
+        disabled={disabled}
+        title={disabled ? disabledTitle : "切换智能体"}
         onClick={() =>
-          setOpen((v) => {
-            const next = !v;
-            if (next) setActiveIndex(selectedIndex);
-            return next;
-          })
+          disabled
+            ? null
+            : setOpen((v) => {
+                const next = !v;
+                if (next) setActiveIndex(selectedIndex);
+                return next;
+              })
         }
         onKeyDown={onButtonKeyDown}
       >
@@ -135,7 +143,7 @@ export default function AgentSelect({
         <ChevronDown className="agent-caret" size={18} strokeWidth={2.4} aria-hidden="true" />
       </button>
 
-      {open && (
+      {open && !disabled && (
         <div
           ref={popRef}
           className="agent-popover"

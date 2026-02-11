@@ -102,7 +102,6 @@ export default function LoginPage() {
       });
       localStorage.setItem("token", data.token);
       localStorage.setItem("auth_user", JSON.stringify(data.user || {}));
-      sessionStorage.setItem("educhat_just_logged_in", "1");
       navigate("/chat");
     } catch (error) {
       setErr(readErrorMessage(error));

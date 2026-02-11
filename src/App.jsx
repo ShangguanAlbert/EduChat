@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage.jsx";
 import ChatPage from "./pages/ChatPage.jsx";
 import AdminSettingsPage from "./pages/AdminSettingsPage.jsx";
+import ImageGenerationPage from "./pages/ImageGenerationPage.jsx";
 import RequireAuth from "./app/RequireAuth.jsx";
 import RequireAdminAuth from "./app/RequireAdminAuth.jsx";
 
@@ -15,6 +16,15 @@ export default function App() {
         element={
           <RequireAuth>
             <ChatPage />
+          </RequireAuth>
+        }
+      />
+
+      <Route
+        path="/image-generation"
+        element={
+          <RequireAuth>
+            <ImageGenerationPage />
           </RequireAuth>
         }
       />

@@ -21,6 +21,13 @@ import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { useSessionStreamDraft } from "../pages/chat/streamDraftStore.js";
 
+const MARKDOWN_COMPONENTS = {
+  a: ({ node, ...props }) => {
+    void node;
+    return <a {...props} target="_blank" rel="noopener noreferrer" />;
+  },
+};
+
 const MessageList = forwardRef(function MessageList({
   activeSessionId = "",
   messages,
@@ -370,7 +377,11 @@ const MessageItem = memo(function MessageItem({
               </span>
             </summary>
             <div className="reasoning-content">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                rehypePlugins={[rehypeRaw]}
+                components={MARKDOWN_COMPONENTS}
+              >
                 {m.reasoning}
               </ReactMarkdown>
             </div>
@@ -398,7 +409,11 @@ const MessageItem = memo(function MessageItem({
 
         {m.content?.trim() ? (
           <div className="msg-text md-body">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              rehypePlugins={[rehypeRaw]}
+              components={MARKDOWN_COMPONENTS}
+            >
               {m.content}
             </ReactMarkdown>
           </div>

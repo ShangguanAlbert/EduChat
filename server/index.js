@@ -21,6 +21,7 @@ const authSecret = String(
 ).trim();
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 - 1; // strictly < 10MB
 const MAX_FILES = 8;
+const MAX_IMAGE_GENERATION_INPUT_FILES = 14;
 const MAX_PARSED_CHARS_PER_FILE = 12000;
 const EXCEL_PREVIEW_MAX_ROWS = 120;
 const EXCEL_PREVIEW_MAX_COLS = 30;
@@ -30,6 +31,9 @@ const AUTH_TOKEN_TTL_SECONDS = 12 * 60 * 60;
 const ADMIN_TOKEN_TTL_SECONDS = 2 * 60 * 60;
 const AGENT_IDS = ["A", "B", "C", "D"];
 const ADMIN_CONFIG_KEY = "global";
+const DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL = "doubao-seedream-4-5-251128";
+const DEFAULT_VOLCENGINE_IMAGE_GENERATION_ENDPOINT =
+  "https://ark.cn-beijing.volces.com/api/v3/images/generations";
 const SYSTEM_PROMPT_MAX_LENGTH = 24000;
 const DEFAULT_SYSTEM_PROMPT_FALLBACK = "你是用户的助手";
 const RUNTIME_CONTEXT_ROUNDS_MAX = 20;
@@ -160,6 +164,13 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { files: MAX_FILES, fileSize: MAX_FILE_SIZE_BYTES },
 });
+const imageGenerationUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: MAX_IMAGE_GENERATION_INPUT_FILES,
+    fileSize: MAX_FILE_SIZE_BYTES,
+  },
+});
 
 const authUserSchema = new mongoose.Schema(
   {
@@ -227,6 +238,10 @@ const chatStateSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
     },
+    sessionContextRefs: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
+    },
     settings: {
       type: new mongoose.Schema(
         {
@@ -235,6 +250,7 @@ const chatStateSchema = new mongoose.Schema(
           apiTopP: { type: Number, default: 1 },
           apiReasoningEffort: { type: String, default: "low" },
           lastAppliedReasoning: { type: String, default: "low" },
+          smartContextEnabled: { type: Boolean, default: false },
         },
         { _id: false },
       ),
@@ -244,6 +260,7 @@ const chatStateSchema = new mongoose.Schema(
         apiTopP: 1,
         apiReasoningEffort: "low",
         lastAppliedReasoning: "low",
+        smartContextEnabled: false,
       }),
     },
   },
@@ -913,6 +930,9 @@ app.post(
   upload.array("files", MAX_FILES),
   async (req, res) => {
     const agentId = sanitizeAgent(req.body?.agentId || "A");
+    const sessionId = sanitizeId(req.body?.sessionId, "");
+    const smartContextEnabled = sanitizeRuntimeBoolean(req.body?.smartContextEnabled, false);
+    const contextMode = sanitizeSmartContextMode(req.body?.contextMode);
     let messages = [];
     try {
       messages = JSON.parse(req.body.messages || "[]");
@@ -926,7 +946,24 @@ app.post(
       agentId,
       messages,
       files: req.files || [],
+      chatUserId: String(req.authUser?._id || ""),
+      sessionId,
+      smartContextEnabled,
+      contextMode,
       attachUploadedFiles: true,
+    });
+  },
+);
+
+app.post(
+  "/api/images/seedream/stream",
+  requireChatAuth,
+  imageGenerationUpload.array("images", MAX_IMAGE_GENERATION_INPUT_FILES),
+  async (req, res) => {
+    await streamSeedreamImageGeneration({
+      res,
+      body: req.body || {},
+      files: req.files || [],
     });
   },
 );
@@ -947,9 +984,7 @@ app.use((error, _req, res, _next) => {
       return;
     }
     if (error.code === "LIMIT_FILE_COUNT") {
-      res
-        .status(413)
-        .json({ error: `文件数量超过限制（最多 ${MAX_FILES} 个）。` });
+      res.status(413).json({ error: "文件数量超过限制，请减少上传数量后重试。" });
       return;
     }
     res.status(400).json({ error: `上传失败: ${error.code}` });
@@ -1047,6 +1082,10 @@ async function streamAgentResponse({
   messages,
   files = [],
   runtimeConfig = null,
+  chatUserId = "",
+  sessionId = "",
+  smartContextEnabled = false,
+  contextMode = "append",
   attachUploadedFiles = true,
 }) {
   const systemPrompt = await getSystemPromptByAgent(agentId);
@@ -1094,6 +1133,16 @@ async function streamAgentResponse({
     model,
     config,
     thinkingEnabled,
+  });
+  const smartContextRuntime = await resolveSmartContextRuntime({
+    requested: smartContextEnabled,
+    provider,
+    protocol,
+    model,
+    agentId,
+    userId: chatUserId,
+    sessionId,
+    contextMode,
   });
 
   let safeMessages = normalizeMessages(messages);
@@ -1145,10 +1194,13 @@ async function streamAgentResponse({
       .join("\n\n");
   }
 
-  const requestMessages = [...narrowedMessages];
+  let requestMessages = [...narrowedMessages];
 
   if (attachUploadedFiles && files.length > 0) {
     await attachFilesToLatestUserMessage(requestMessages, files);
+  }
+  if (smartContextRuntime.usePreviousResponseId) {
+    requestMessages = extractSmartContextIncrementalMessages(requestMessages);
   }
 
   const payload =
@@ -1161,6 +1213,8 @@ async function streamAgentResponse({
           thinkingEnabled,
           reasoning,
           webSearchRuntime,
+          previousResponseId: smartContextRuntime.previousResponseId,
+          forceStore: smartContextRuntime.enabled,
         })
       : buildChatRequestPayload({
           model,
@@ -1188,6 +1242,10 @@ async function streamAgentResponse({
     webSearchMatchedModelId: webSearchRuntime.matchedModelId,
     webSearchEnabled: webSearchRuntime.enabled,
     webSearchThinkingPromptInjected: webSearchRuntime.injectThinkingPrompt,
+    smartContextRequested: smartContextRuntime.requested,
+    smartContextEnabled: smartContextRuntime.enabled,
+    smartContextUsePreviousResponseId: smartContextRuntime.usePreviousResponseId,
+    smartContextSessionId: smartContextRuntime.sessionId,
     runtimeConfig: config,
   });
 
@@ -1210,6 +1268,15 @@ async function streamAgentResponse({
   if (!upstream.ok || !upstream.body) {
     const detail = await safeReadText(upstream);
     console.error(`[${provider}/${protocol}] upstream error:`, upstream.status, detail);
+    if (
+      smartContextRuntime.usePreviousResponseId &&
+      shouldResetSmartContextReference(upstream.status, detail)
+    ) {
+      await clearSessionContextRef({
+        userId: smartContextRuntime.userId,
+        sessionId: smartContextRuntime.sessionId,
+      });
+    }
     const message = formatProviderUpstreamError(
       provider,
       protocol,
@@ -1224,12 +1291,27 @@ async function streamAgentResponse({
   }
 
   try {
+    let responsesResult = null;
     if (protocol === "responses") {
-      await pipeResponsesSse(upstream, res, reasoning.enabled, {
+      responsesResult = await pipeResponsesSse(upstream, res, reasoning.enabled, {
         emitSearchUsage: webSearchRuntime.enabled,
       });
     } else {
       await pipeOpenRouterSse(upstream, res, reasoning.enabled);
+    }
+    if (smartContextRuntime.enabled && protocol === "responses") {
+      const nextResponseId = sanitizeText(responsesResult?.responseId, "", 160);
+      if (nextResponseId) {
+        await saveSessionContextRef({
+          userId: smartContextRuntime.userId,
+          sessionId: smartContextRuntime.sessionId,
+          previousResponseId: nextResponseId,
+          provider,
+          protocol,
+          model,
+          agentId,
+        });
+      }
     }
     writeEvent(res, "done", { ok: true });
   } catch (error) {
@@ -1238,6 +1320,502 @@ async function streamAgentResponse({
   } finally {
     res.end();
   }
+}
+
+async function streamSeedreamImageGeneration({ res, body, files = [] }) {
+  const imageConfig = getVolcengineImageGenerationConfig();
+  if (!imageConfig.apiKey) {
+    res.status(500).json({ error: imageConfig.missingKeyMessage });
+    return;
+  }
+
+  let request = null;
+  try {
+    request = await buildSeedreamImageGenerationRequest({
+      body,
+      files,
+      model: imageConfig.model,
+    });
+  } catch (error) {
+    res.status(400).json({ error: error?.message || "图片输入参数不合法。" });
+    return;
+  }
+
+  if (!request.prompt) {
+    res.status(400).json({ error: "请输入图片生成提示词。" });
+    return;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  writeEvent(res, "meta", {
+    model: request.payload.model,
+    stream: request.payload.stream,
+    responseFormat: request.payload.response_format,
+    sequentialImageGeneration: request.payload.sequential_image_generation,
+    maxImages: request.maxImages,
+    inputImageCount: request.inputImageCount,
+    size: request.payload.size || "default",
+  });
+
+  let upstream;
+  try {
+    upstream = await fetch(imageConfig.endpoint, {
+      method: "POST",
+      headers: buildImageGenerationHeaders(
+        imageConfig.apiKey,
+        request.payload.stream,
+      ),
+      body: JSON.stringify(request.payload),
+    });
+  } catch (error) {
+    writeEvent(res, "error", {
+      message: `volcengine/images request failed: ${error.message}`,
+    });
+    res.end();
+    return;
+  }
+
+  if (!upstream.ok) {
+    const detail = await safeReadText(upstream);
+    console.error("[volcengine/images] upstream error:", upstream.status, detail);
+    writeEvent(res, "error", {
+      message: formatProviderUpstreamError(
+        "volcengine",
+        "images",
+        upstream.status,
+        detail,
+      ),
+    });
+    res.end();
+    return;
+  }
+
+  try {
+    if (request.payload.stream) {
+      if (!upstream.body) {
+        throw new Error("图片生成上游未返回有效流式内容。");
+      }
+      await pipeVolcengineImageGenerationSse(upstream, res);
+    } else {
+      const result = await safeReadJson(upstream);
+      emitSeedreamImageGenerationNonStreamEvents(result, res);
+    }
+    writeEvent(res, "done", { ok: true });
+  } catch (error) {
+    writeEvent(res, "error", {
+      message: error?.message || "图片生成失败，请稍后重试。",
+    });
+  } finally {
+    res.end();
+  }
+}
+
+async function buildSeedreamImageGenerationRequest({ body, files, model }) {
+  const prompt = sanitizeText(body?.prompt, "", 2000);
+  const size = normalizeSeedreamSize(body?.size);
+  const sequentialImageGeneration = normalizeSeedreamSequentialMode(
+    body?.sequentialImageGeneration ?? body?.mode,
+  );
+  const stream = sanitizeRuntimeBoolean(body?.stream, true);
+  const watermark = sanitizeRuntimeBoolean(body?.watermark, false);
+  const responseFormat = normalizeSeedreamResponseFormat(body?.responseFormat);
+  const imageUrls = parseSeedreamImageInputs(body?.imageUrls);
+  const fileInputs = buildSeedreamFileImageInputs(files);
+  const inputImages = [...imageUrls, ...fileInputs];
+  if (inputImages.length > MAX_IMAGE_GENERATION_INPUT_FILES) {
+    throw new Error(
+      `输入图片数量超限，最多支持 ${MAX_IMAGE_GENERATION_INPUT_FILES} 张参考图。`,
+    );
+  }
+
+  let maxImages = sanitizeRuntimeInteger(body?.maxImages, 15, 1, 15);
+  if (sequentialImageGeneration === "auto") {
+    const remaining = 15 - inputImages.length;
+    if (remaining <= 0) {
+      throw new Error(
+        "组图模式下，输入参考图数量与输出图数量总和不能超过 15 张。",
+      );
+    }
+    maxImages = Math.min(maxImages, remaining);
+  }
+
+  const payload = {
+    model: String(model || DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL),
+    prompt,
+    stream,
+    response_format: responseFormat,
+    watermark,
+    sequential_image_generation: sequentialImageGeneration,
+    optimize_prompt_options: { mode: "standard" },
+  };
+
+  if (size) {
+    payload.size = size;
+  }
+  if (sequentialImageGeneration === "auto") {
+    payload.sequential_image_generation_options = { max_images: maxImages };
+  }
+  if (inputImages.length === 1) {
+    payload.image = inputImages[0];
+  } else if (inputImages.length > 1) {
+    payload.image = inputImages;
+  }
+
+  return {
+    prompt,
+    payload,
+    inputImageCount: inputImages.length,
+    maxImages,
+  };
+}
+
+function normalizeSeedreamSize(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!raw) return "";
+  if (raw === "2k") return "2K";
+  if (raw === "4k") return "4K";
+  const normalized = raw.replace(/[×]/g, "x");
+  if (!/^\d{3,5}x\d{3,5}$/.test(normalized)) return "";
+  return normalized;
+}
+
+function normalizeSeedreamSequentialMode(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "auto") return "auto";
+  return "disabled";
+}
+
+function normalizeSeedreamResponseFormat(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "b64_json") return "b64_json";
+  return "url";
+}
+
+function parseSeedreamImageInputs(raw) {
+  const parsed = readJsonLikeField(raw, raw);
+  let values = [];
+
+  if (Array.isArray(parsed)) {
+    values = parsed;
+  } else if (typeof parsed === "string") {
+    const text = parsed.trim();
+    if (text) {
+      values = text.includes("\n")
+        ? text.split("\n")
+        : text.includes(",")
+          ? text.split(",")
+          : [text];
+    }
+  }
+
+  const deduped = new Set();
+  const list = [];
+  values.forEach((item) => {
+    const url = String(item || "").trim();
+    if (!url) return;
+    if (!isSeedreamImageInputUrl(url)) return;
+    if (deduped.has(url)) return;
+    deduped.add(url);
+    list.push(url);
+  });
+  return list;
+}
+
+function isSeedreamImageInputUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return false;
+  return /^https?:\/\//i.test(text) || /^data:image\//i.test(text);
+}
+
+function buildSeedreamFileImageInputs(files) {
+  const safeFiles = Array.isArray(files) ? files : [];
+  const list = [];
+  safeFiles.forEach((file) => {
+    if (!file?.buffer) return;
+    const mime = normalizeSeedreamImageMimeType(file.mimetype);
+    if (!mime) {
+      throw new Error(
+        `不支持的图片格式：${file.originalname || "未命名文件"}。仅支持 jpeg、png、webp、bmp、tiff、gif。`,
+      );
+    }
+    list.push(`data:${mime};base64,${file.buffer.toString("base64")}`);
+  });
+  return list;
+}
+
+function normalizeSeedreamImageMimeType(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!key) return "";
+  if (key === "image/jpg") return "image/jpeg";
+  if (
+    key === "image/jpeg" ||
+    key === "image/png" ||
+    key === "image/webp" ||
+    key === "image/bmp" ||
+    key === "image/tiff" ||
+    key === "image/gif"
+  ) {
+    return key;
+  }
+  return "";
+}
+
+async function pipeVolcengineImageGenerationSse(upstream, res) {
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let sawCompleted = false;
+  let sawAnyImageEvent = false;
+
+  const processSseBlock = (block) => {
+    const payload = extractSseDataPayload(block);
+    if (!payload || payload === "[DONE]") return false;
+
+    let json;
+    try {
+      json = JSON.parse(payload);
+    } catch {
+      return false;
+    }
+
+    const type = String(json?.type || "")
+      .trim()
+      .toLowerCase();
+    const model = sanitizeText(json?.model, "", 160);
+    const created = Number.isFinite(Number(json?.created))
+      ? Number(json.created)
+      : null;
+    const imageIndex = sanitizeRuntimeInteger(json?.image_index, 0, 0, 999);
+
+    if (type === "image_generation.partial_succeeded") {
+      sawAnyImageEvent = true;
+      writeEvent(res, "image_partial", {
+        model,
+        created,
+        imageIndex,
+        url: String(json?.url || ""),
+        b64Json: String(json?.b64_json || ""),
+        size: sanitizeText(json?.size, "", 80),
+      });
+      return false;
+    }
+
+    if (type === "image_generation.partial_failed") {
+      sawAnyImageEvent = true;
+      const errorObj =
+        json?.error && typeof json.error === "object" ? json.error : {};
+      const code = sanitizeText(errorObj.code, "", 120);
+      const message = mapVolcengineImageGenerationEventError({
+        code,
+        message: errorObj.message,
+      });
+      writeEvent(res, "image_failed", {
+        model,
+        created,
+        imageIndex,
+        errorCode: code,
+        errorMessage: message,
+      });
+      return false;
+    }
+
+    if (type === "image_generation.completed") {
+      sawCompleted = true;
+      writeEvent(res, "usage", {
+        model,
+        created,
+        usage: sanitizeImageGenerationUsage(json?.usage),
+      });
+      return true;
+    }
+
+    if (json?.error && typeof json.error === "object") {
+      const code = sanitizeText(json.error.code, "", 120);
+      const message = mapVolcengineUpstreamError({
+        status: 400,
+        code,
+        message: json.error.message,
+        param: "",
+      });
+      throw new Error(
+        message ||
+          mapVolcengineImageGenerationEventError({
+            code,
+            message: json.error.message,
+          }),
+      );
+    }
+
+    return false;
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const completed = processSseBlock(block);
+      if (completed) return;
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+
+  const tail = buffer.trim();
+  if (tail) {
+    processSseBlock(tail);
+  }
+
+  if (!sawCompleted && !sawAnyImageEvent) {
+    throw new Error("上游未返回有效图片生成结果。");
+  }
+}
+
+function emitSeedreamImageGenerationNonStreamEvents(result, res) {
+  const payload = result && typeof result === "object" ? result : {};
+  const model = sanitizeText(payload?.model, "", 160);
+  const created = Number.isFinite(Number(payload?.created))
+    ? Number(payload.created)
+    : null;
+  const data = Array.isArray(payload?.data) ? payload.data : [];
+
+  data.forEach((item, idx) => {
+    if (item && typeof item === "object" && item.error) {
+      const errorObj =
+        item.error && typeof item.error === "object" ? item.error : {};
+      const code = sanitizeText(errorObj.code, "", 120);
+      writeEvent(res, "image_failed", {
+        model,
+        created,
+        imageIndex: idx,
+        errorCode: code,
+        errorMessage: mapVolcengineImageGenerationEventError({
+          code,
+          message: errorObj.message,
+        }),
+      });
+      return;
+    }
+
+    const imageObj = item && typeof item === "object" ? item : {};
+    writeEvent(res, "image_partial", {
+      model,
+      created,
+      imageIndex: idx,
+      url: String(imageObj.url || ""),
+      b64Json: String(imageObj.b64_json || ""),
+      size: sanitizeText(imageObj.size, "", 80),
+    });
+  });
+
+  if (payload?.error && typeof payload.error === "object") {
+    const code = sanitizeText(payload.error.code, "", 120);
+    const mapped = mapVolcengineUpstreamError({
+      status: 400,
+      code,
+      message: payload.error.message,
+      param: "",
+    });
+    throw new Error(
+      mapped ||
+        mapVolcengineImageGenerationEventError({
+          code,
+          message: payload.error.message,
+        }),
+    );
+  }
+
+  writeEvent(res, "usage", {
+    model,
+    created,
+    usage: sanitizeImageGenerationUsage(payload?.usage),
+  });
+}
+
+function sanitizeImageGenerationUsage(raw) {
+  const usage = raw && typeof raw === "object" ? raw : {};
+  return {
+    generatedImages: sanitizeRuntimeInteger(usage.generated_images, 0, 0, 9999),
+    outputTokens: sanitizeRuntimeInteger(usage.output_tokens, 0, 0, 10_000_000),
+    totalTokens: sanitizeRuntimeInteger(usage.total_tokens, 0, 0, 10_000_000),
+  };
+}
+
+function mapVolcengineImageGenerationEventError({ code, message }) {
+  const codeKey = String(code || "")
+    .trim()
+    .toLowerCase();
+  const explicit = String(message || "").trim();
+
+  if (
+    codeKey.includes("outputimagesensitivecontentdetected") ||
+    codeKey.includes("outputimageriskdetection")
+  ) {
+    return "生成的图像可能包含敏感信息，请调整提示词后重试。";
+  }
+
+  if (
+    codeKey.includes("inputimagesensitivecontentdetected") ||
+    codeKey.includes("inputimageriskdetection")
+  ) {
+    return "输入图片可能包含敏感信息，请更换后重试。";
+  }
+
+  if (codeKey.includes("invalidimageurl")) {
+    return "输入图片无效，请检查图片链接或格式后重试。";
+  }
+
+  if (codeKey.includes("serveroverloaded")) {
+    return "当前服务繁忙，请稍后重试。";
+  }
+
+  if (codeKey.includes("internalserviceerror")) {
+    return "服务内部异常，请稍后重试。";
+  }
+
+  if (explicit) return explicit;
+  return "图片生成失败，请稍后重试。";
+}
+
+function buildImageGenerationHeaders(apiKey, stream = true) {
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+    Accept: stream ? "text/event-stream, application/json" : "application/json",
+  };
+}
+
+function getVolcengineImageGenerationConfig() {
+  return {
+    endpoint:
+      process.env.VOLCENGINE_IMAGE_GENERATION_ENDPOINT ||
+      DEFAULT_VOLCENGINE_IMAGE_GENERATION_ENDPOINT,
+    model:
+      process.env.VOLCENGINE_IMAGE_GENERATION_MODEL ||
+      DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL,
+    apiKey: readEnvApiKey(
+      "VOLCENGINE_IMAGE_API_KEY",
+      "VOLCENGINE_SEEDREAM_API_KEY",
+      "ARK_IMAGE_API_KEY",
+    ),
+    missingKeyMessage:
+      "未检测到图片生成 API Key。请在 .env 中配置 VOLCENGINE_IMAGE_API_KEY（或 VOLCENGINE_SEEDREAM_API_KEY / ARK_IMAGE_API_KEY）。",
+  };
 }
 
 function buildChatRequestPayload({ model, messages, systemPrompt, config, reasoning }) {
@@ -1296,6 +1874,8 @@ function buildResponsesRequestPayload({
   thinkingEnabled,
   reasoning,
   webSearchRuntime,
+  previousResponseId = "",
+  forceStore = false,
 }) {
   const input = buildResponsesInputItems(messages);
   const supportsReasoningEffort = supportsVolcengineResponsesReasoningEffort(model);
@@ -1311,6 +1891,14 @@ function buildResponsesRequestPayload({
     ),
     thinking: { type: thinkingEnabled ? "enabled" : "disabled" },
   };
+
+  if (forceStore) {
+    payload.store = true;
+  }
+  const safePreviousResponseId = sanitizeText(previousResponseId, "", 160);
+  if (safePreviousResponseId) {
+    payload.previous_response_id = safePreviousResponseId;
+  }
 
   if (supportsReasoningEffort) {
     payload.reasoning = {
@@ -1638,6 +2226,187 @@ function resolveRequestProtocol(requestedProtocol, provider) {
   return { supported: true, value: protocol, forced: false };
 }
 
+function extractSmartContextIncrementalMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") return [messages[i]];
+  }
+  return [messages[messages.length - 1]];
+}
+
+async function resolveSmartContextRuntime({
+  requested,
+  provider,
+  protocol,
+  model,
+  agentId,
+  userId,
+  sessionId,
+  contextMode,
+}) {
+  const requestedEnabled = sanitizeRuntimeBoolean(requested, false);
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  const safeContextMode = sanitizeSmartContextMode(contextMode);
+  const normalizedModel = String(sanitizeRuntimeModel(model) || "")
+    .trim()
+    .toLowerCase();
+
+  const enabled =
+    requestedEnabled &&
+    provider === "volcengine" &&
+    protocol === "responses" &&
+    !!safeUserId &&
+    !!safeSessionId;
+
+  const runtime = {
+    requested: requestedEnabled,
+    enabled,
+    userId: safeUserId,
+    sessionId: safeSessionId,
+    contextMode: safeContextMode,
+    usePreviousResponseId: false,
+    previousResponseId: "",
+    previousModel: "",
+    modelChanged: false,
+  };
+
+  if (!enabled) return runtime;
+
+  const ref = await readSessionContextRef({ userId: safeUserId, sessionId: safeSessionId });
+  if (!ref) return runtime;
+
+  const sameProvider = ref.provider === provider;
+  const sameProtocol = ref.protocol === protocol;
+  const sameAgent = !ref.agentId || ref.agentId === sanitizeAgent(agentId);
+  const canContinue = safeContextMode === "append" && sameProvider && sameProtocol && sameAgent;
+  if (!canContinue) return runtime;
+
+  runtime.usePreviousResponseId = true;
+  runtime.previousResponseId = ref.previousResponseId;
+  runtime.previousModel = ref.model;
+  runtime.modelChanged =
+    !!ref.model && !!normalizedModel && ref.model !== normalizedModel;
+  return runtime;
+}
+
+async function readSessionContextRef({ userId, sessionId }) {
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  if (!safeUserId || !safeSessionId) return null;
+
+  const stateDoc = await ChatState.findOne(
+    { userId: safeUserId },
+    { sessionContextRefs: 1 },
+  ).lean();
+  const refs =
+    stateDoc?.sessionContextRefs && typeof stateDoc.sessionContextRefs === "object"
+      ? stateDoc.sessionContextRefs
+      : {};
+  const raw = refs[safeSessionId];
+  if (!raw || typeof raw !== "object") return null;
+
+  const previousResponseId = sanitizeText(raw.previousResponseId, "", 160);
+  if (!previousResponseId) return null;
+
+  const provider = String(raw.provider || "")
+    .trim()
+    .toLowerCase();
+  const protocol = String(raw.protocol || "")
+    .trim()
+    .toLowerCase();
+  const model = String(raw.model || "")
+    .trim()
+    .toLowerCase();
+  const agentId = String(raw.agentId || "")
+    .trim()
+    .toUpperCase();
+
+  return {
+    previousResponseId,
+    provider,
+    protocol,
+    model,
+    agentId: ["A", "B", "C", "D"].includes(agentId) ? agentId : "",
+    updatedAt: sanitizeIsoDate(raw.updatedAt),
+  };
+}
+
+async function saveSessionContextRef({
+  userId,
+  sessionId,
+  previousResponseId,
+  provider,
+  protocol,
+  model,
+  agentId,
+}) {
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  const safeResponseId = sanitizeText(previousResponseId, "", 160);
+  if (!safeUserId || !safeSessionId || !safeResponseId) return;
+
+  const safeProvider = String(provider || "")
+    .trim()
+    .toLowerCase()
+    .slice(0, 32);
+  const safeProtocol = String(protocol || "")
+    .trim()
+    .toLowerCase()
+    .slice(0, 32);
+  const safeModel = String(sanitizeRuntimeModel(model) || "")
+    .trim()
+    .toLowerCase()
+    .slice(0, 160);
+  const safeAgentId = sanitizeAgent(agentId);
+
+  await ChatState.findOneAndUpdate(
+    { userId: safeUserId },
+    {
+      $set: {
+        userId: safeUserId,
+        [`sessionContextRefs.${safeSessionId}`]: {
+          previousResponseId: safeResponseId,
+          provider: safeProvider,
+          protocol: safeProtocol,
+          model: safeModel,
+          agentId: safeAgentId,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
+
+async function clearSessionContextRef({ userId, sessionId }) {
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  if (!safeUserId || !safeSessionId) return;
+
+  await ChatState.findOneAndUpdate(
+    { userId: safeUserId },
+    {
+      $set: { userId: safeUserId },
+      $unset: { [`sessionContextRefs.${safeSessionId}`]: "" },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
+
+function shouldResetSmartContextReference(status, detail) {
+  if (![400, 404, 410, 422].includes(Number(status))) return false;
+  const message = String(detail || "")
+    .trim()
+    .toLowerCase();
+  if (!message) return false;
+  return (
+    message.includes("previous_response_id") ||
+    message.includes("previous response") ||
+    message.includes("response id")
+  );
+}
+
 function pickRecentUserRounds(messages, maxRounds = 10) {
   if (!Array.isArray(messages) || messages.length === 0) return [];
   const safeRounds = sanitizeRuntimeInteger(maxRounds, 10, 1, RUNTIME_CONTEXT_ROUNDS_MAX);
@@ -1920,6 +2689,7 @@ async function pipeResponsesSse(
   let buffer = "";
   let sawContent = false;
   let sawReasoning = false;
+  let responseId = "";
 
   const processSseBlock = (block) => {
     const data = extractSseDataPayload(block);
@@ -1936,6 +2706,9 @@ async function pipeResponsesSse(
     const type = String(json?.type || "")
       .trim()
       .toLowerCase();
+    if (!responseId) {
+      responseId = sanitizeText(json?.response?.id || json?.response_id, "", 160);
+    }
     const deltaText = extractDeltaText(json?.delta);
     const doneText = extractDeltaText(json?.text);
 
@@ -1989,7 +2762,12 @@ async function pipeResponsesSse(
       return false;
     }
 
+    if (type === "response.created" || type === "response.in_progress") {
+      return false;
+    }
+
     if (type === "response.completed") {
+      responseId = sanitizeText(json?.response?.id || responseId, responseId, 160);
       if (!sawContent) {
         const completedText = extractResponsesOutputTextFromCompleted(json?.response);
         if (completedText) {
@@ -2025,7 +2803,7 @@ async function pipeResponsesSse(
       const block = buffer.slice(0, boundary);
       buffer = buffer.slice(boundary + 2);
       const gotDone = processSseBlock(block);
-      if (gotDone) return;
+      if (gotDone) return { responseId };
       boundary = buffer.indexOf("\n\n");
     }
   }
@@ -2041,6 +2819,7 @@ async function pipeResponsesSse(
   if (!sawContent) {
     throw new Error("上游未返回有效回答内容。");
   }
+  return { responseId };
 }
 
 function extractResponsesOutputTextFromCompleted(responseObj) {
@@ -2263,6 +3042,16 @@ async function safeReadText(response) {
     return await response.text();
   } catch {
     return "";
+  }
+}
+
+async function safeReadJson(response) {
+  const text = await safeReadText(response);
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
   }
 }
 
@@ -2585,6 +3374,14 @@ function sanitizeRuntimeBoolean(value, fallback = false) {
   return fallback;
 }
 
+function sanitizeSmartContextMode(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "regenerate" || key === "regen") return "regenerate";
+  return "append";
+}
+
 function buildAdminAgentSettingsResponse(config) {
   const resolvedPrompts = resolveAgentSystemPrompts(config.prompts);
   const resolvedRuntimeConfigs = resolveAgentRuntimeConfigs(config.runtimeConfigs);
@@ -2880,7 +3677,9 @@ function mapVolcengineUpstreamError({ status, code, message, param }) {
 
   if (
     status === 400 &&
-    (paramKey === "image_url" || msg.includes("do not support image input"))
+    (paramKey === "image_url" ||
+      paramKey === "image" ||
+      msg.includes("do not support image input"))
   ) {
     return "该模型不支持图片解析。（Error Code: 400）";
   }
@@ -3021,6 +3820,7 @@ function defaultChatState() {
       apiTopP: 1,
       apiReasoningEffort: "low",
       lastAppliedReasoning: "low",
+      smartContextEnabled: false,
     },
   };
 }
@@ -3085,6 +3885,7 @@ function sanitizeStateSettings(raw) {
   const apiTopP = sanitizeNumber(source.apiTopP, 1, 0, 1);
   const apiReasoningEffort = sanitizeReasoning(source.apiReasoningEffort, "low");
   const lastAppliedReasoning = sanitizeReasoning(source.lastAppliedReasoning, "low");
+  const smartContextEnabled = sanitizeRuntimeBoolean(source.smartContextEnabled, false);
 
   return {
     agent,
@@ -3092,6 +3893,7 @@ function sanitizeStateSettings(raw) {
     apiTopP,
     apiReasoningEffort,
     lastAppliedReasoning,
+    smartContextEnabled,
   };
 }
 
