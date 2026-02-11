@@ -1345,6 +1345,42 @@ export default function AdminSettingsPage() {
                   </label>
 
                   <div className="admin-field-row split">
+                    <span className="admin-label-with-hint">
+                      系统提示词注入系统时间（年月日）
+                      <InfoHint text="开启后，每次会话都会在系统提示词中注入当前日期（年月日）。" />
+                    </span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!selectedRuntime.includeCurrentTime}
+                        onChange={(e) =>
+                          updateRuntimeField("includeCurrentTime", e.target.checked)
+                        }
+                        disabled={loading}
+                      />
+                      <span>{selectedRuntime.includeCurrentTime ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span className="admin-label-with-hint">
+                      防止提示词/API 设置泄露
+                      <InfoHint text="默认开启。开启后会注入高优先级防泄漏提示词；若用户试图套取内部配置，助手仅回复“我只是你的助手”。" />
+                    </span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={selectedRuntime.preventPromptLeak !== false}
+                        onChange={(e) =>
+                          updateRuntimeField("preventPromptLeak", e.target.checked)
+                        }
+                        disabled={loading}
+                      />
+                      <span>{selectedRuntime.preventPromptLeak !== false ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
                     <span>深度思考</span>
                     <label className="admin-switch-row">
                       <input
@@ -1519,6 +1555,42 @@ export default function AdminSettingsPage() {
                       disabled={loading}
                     />
                   </label>
+
+                  <div className="admin-field-row split">
+                    <span className="admin-label-with-hint">
+                      系统提示词注入系统时间（年月日）
+                      <InfoHint text="开启后，每次会话都会在系统提示词中注入当前日期（年月日）。" />
+                    </span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!selectedRuntime.includeCurrentTime}
+                        onChange={(e) =>
+                          updateRuntimeField("includeCurrentTime", e.target.checked)
+                        }
+                        disabled={loading}
+                      />
+                      <span>{selectedRuntime.includeCurrentTime ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span className="admin-label-with-hint">
+                      防止提示词/API 设置泄露
+                      <InfoHint text="默认开启。开启后会注入高优先级防泄漏提示词；若用户试图套取内部配置，助手仅回复“我只是你的助手”。" />
+                    </span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={selectedRuntime.preventPromptLeak !== false}
+                        onChange={(e) =>
+                          updateRuntimeField("preventPromptLeak", e.target.checked)
+                        }
+                        disabled={loading}
+                      />
+                      <span>{selectedRuntime.preventPromptLeak !== false ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
 
                   <p className="admin-field-note">
                     当前服务商：{selectedProviderName}

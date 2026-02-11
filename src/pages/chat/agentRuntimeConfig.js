@@ -15,6 +15,7 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   enableThinking: true,
   reasoningEffort: "low",
   includeCurrentTime: false,
+  preventPromptLeak: true,
   injectSafetyPrompt: false,
   enableWebSearch: false,
   webSearchMaxKeyword: 2,
@@ -82,8 +83,18 @@ export function sanitizeSingleRuntimeConfig(raw) {
       DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
     ),
     reasoningEffort: sanitizeReasoningEffort(source.reasoningEffort),
-    includeCurrentTime: !!source.includeCurrentTime,
-    injectSafetyPrompt: !!source.injectSafetyPrompt,
+    includeCurrentTime: sanitizeBoolean(
+      source.includeCurrentTime,
+      DEFAULT_AGENT_RUNTIME_CONFIG.includeCurrentTime,
+    ),
+    preventPromptLeak: sanitizeBoolean(
+      source.preventPromptLeak,
+      DEFAULT_AGENT_RUNTIME_CONFIG.preventPromptLeak,
+    ),
+    injectSafetyPrompt: sanitizeBoolean(
+      source.injectSafetyPrompt,
+      DEFAULT_AGENT_RUNTIME_CONFIG.injectSafetyPrompt,
+    ),
     enableWebSearch: sanitizeBoolean(
       source.enableWebSearch,
       DEFAULT_AGENT_RUNTIME_CONFIG.enableWebSearch,

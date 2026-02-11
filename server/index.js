@@ -10,6 +10,8 @@ import mammoth from "mammoth";
 import XLSX from "xlsx";
 import { PDFParse } from "pdf-parse";
 import mongoose from "mongoose";
+import { SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT } from "./prompts/leakProtectionPrompt.js";
+import { PROMPT_LEAK_PROBE_KEYWORDS } from "./prompts/leakProtectionKeywords.js";
 
 dotenv.config();
 
@@ -53,6 +55,7 @@ const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   enableThinking: true,
   reasoningEffort: "low",
   includeCurrentTime: false,
+  preventPromptLeak: true,
   injectSafetyPrompt: false,
   enableWebSearch: false,
   webSearchMaxKeyword: 2,
@@ -315,6 +318,10 @@ const runtimeConfigSchema = new mongoose.Schema(
     includeCurrentTime: {
       type: Boolean,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.includeCurrentTime,
+    },
+    preventPromptLeak: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.preventPromptLeak,
     },
     injectSafetyPrompt: {
       type: Boolean,
@@ -1171,9 +1178,30 @@ async function streamAgentResponse({
   );
 
   let composedSystemPrompt = systemPrompt || "";
-  if (config.includeCurrentTime) {
-    const nowText = formatDisplayTime(new Date());
-    composedSystemPrompt = [composedSystemPrompt, `当前时间: ${nowText}`]
+  if (
+    sanitizeRuntimeBoolean(
+      config.preventPromptLeak,
+      DEFAULT_AGENT_RUNTIME_CONFIG.preventPromptLeak,
+    )
+  ) {
+    composedSystemPrompt = [
+      SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT,
+      composedSystemPrompt,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  if (
+    sanitizeRuntimeBoolean(
+      config.includeCurrentTime,
+      DEFAULT_AGENT_RUNTIME_CONFIG.includeCurrentTime,
+    )
+  ) {
+    const nowDateText = formatSystemDateYmd(new Date());
+    composedSystemPrompt = [
+      composedSystemPrompt,
+      `系统日期（年月日）: ${nowDateText}`,
+    ]
       .filter(Boolean)
       .join("\n\n");
   }
@@ -1202,6 +1230,13 @@ async function streamAgentResponse({
   if (smartContextRuntime.usePreviousResponseId) {
     requestMessages = extractSmartContextIncrementalMessages(requestMessages);
   }
+
+  const promptLeakGuardEnabled = sanitizeRuntimeBoolean(
+    config.preventPromptLeak,
+    DEFAULT_AGENT_RUNTIME_CONFIG.preventPromptLeak,
+  );
+  const promptLeakDetected =
+    promptLeakGuardEnabled && isPromptLeakProbeRequest(requestMessages);
 
   const payload =
     protocol === "responses"
@@ -1246,8 +1281,17 @@ async function streamAgentResponse({
     smartContextEnabled: smartContextRuntime.enabled,
     smartContextUsePreviousResponseId: smartContextRuntime.usePreviousResponseId,
     smartContextSessionId: smartContextRuntime.sessionId,
+    promptLeakGuardEnabled,
+    promptLeakDetected,
     runtimeConfig: config,
   });
+
+  if (promptLeakDetected) {
+    writeEvent(res, "token", { text: "我只是你的助手" });
+    writeEvent(res, "done", { ok: true });
+    res.end();
+    return;
+  }
 
   let upstream;
   try {
@@ -2234,6 +2278,49 @@ function extractSmartContextIncrementalMessages(messages) {
   return [messages[messages.length - 1]];
 }
 
+function isPromptLeakProbeRequest(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return false;
+
+  let lastUserMessage = null;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") {
+      lastUserMessage = messages[i];
+      break;
+    }
+  }
+  if (!lastUserMessage) return false;
+
+  const text = extractMessagePlainText(lastUserMessage.content)
+    .trim()
+    .toLowerCase();
+  if (!text) return false;
+  const markers = Array.isArray(PROMPT_LEAK_PROBE_KEYWORDS)
+    ? PROMPT_LEAK_PROBE_KEYWORDS
+    : [];
+  return markers.some((marker) =>
+    text.includes(
+      String(marker || "")
+        .trim()
+        .toLowerCase(),
+    ),
+  );
+}
+
+function extractMessagePlainText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .map((part) => {
+      if (!part || typeof part !== "object") return "";
+      if (typeof part.text === "string") return part.text;
+      if (typeof part.content === "string") return part.content;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 async function resolveSmartContextRuntime({
   requested,
   provider,
@@ -3201,6 +3288,18 @@ function sanitizeSingleAgentRuntimeConfig(raw) {
   );
   const enableThinking = sanitizeEnableThinking(source.enableThinking);
   const reasoningEffort = normalizeReasoningEffort(source.reasoningEffort);
+  const includeCurrentTime = sanitizeRuntimeBoolean(
+    source.includeCurrentTime,
+    DEFAULT_AGENT_RUNTIME_CONFIG.includeCurrentTime,
+  );
+  const preventPromptLeak = sanitizeRuntimeBoolean(
+    source.preventPromptLeak,
+    DEFAULT_AGENT_RUNTIME_CONFIG.preventPromptLeak,
+  );
+  const injectSafetyPrompt = sanitizeRuntimeBoolean(
+    source.injectSafetyPrompt,
+    DEFAULT_AGENT_RUNTIME_CONFIG.injectSafetyPrompt,
+  );
   const enableWebSearch = sanitizeRuntimeBoolean(
     source.enableWebSearch,
     DEFAULT_AGENT_RUNTIME_CONFIG.enableWebSearch,
@@ -3250,8 +3349,9 @@ function sanitizeSingleAgentRuntimeConfig(raw) {
     maxReasoningTokens,
     enableThinking,
     reasoningEffort,
-    includeCurrentTime: !!source.includeCurrentTime,
-    injectSafetyPrompt: !!source.injectSafetyPrompt,
+    includeCurrentTime,
+    preventPromptLeak,
+    injectSafetyPrompt,
     enableWebSearch,
     webSearchMaxKeyword,
     webSearchResultLimit,
@@ -4430,6 +4530,15 @@ function formatDisplayTime(value) {
   const dt = new Date(value);
   if (Number.isNaN(dt.getTime())) return String(value);
   return dt.toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatSystemDateYmd(value) {
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "未知日期";
+  const y = dt.getFullYear();
+  const m = dt.getMonth() + 1;
+  const d = dt.getDate();
+  return `${y}年${m}月${d}日`;
 }
 
 function formatFileStamp(value) {
