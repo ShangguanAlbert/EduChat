@@ -1300,16 +1300,22 @@ app.post(
       const model = getModelByAgent(agentId, runtimeConfig);
       const uploaded = [];
       for (const file of files) {
-        const inputType = classifyVolcengineFileInputType(file);
+        const normalizedOriginalName = normalizeMultipartFileName(file.originalname);
+        const normalizedFile =
+          normalizedOriginalName && normalizedOriginalName !== file.originalname
+            ? { ...file, originalname: normalizedOriginalName }
+            : file;
+
+        const inputType = classifyVolcengineFileInputType(normalizedFile);
         if (!inputType) {
           res.status(400).json({
-            error: `文件类型不支持 Files API 上传：${file.originalname || "未命名文件"}`,
+            error: `文件类型不支持 Files API 上传：${normalizedFile.originalname || "未命名文件"}`,
           });
           return;
         }
 
         const result = await uploadVolcengineFileAndWaitActive({
-          file,
+          file: normalizedFile,
           inputType,
           model,
           filesEndpoint: providerConfig.filesEndpoint,
@@ -1319,9 +1325,9 @@ app.post(
         uploaded.push({
           fileId: result.fileId,
           inputType,
-          name: String(file.originalname || ""),
-          mimeType: String(file.mimetype || ""),
-          size: Number(file.size || 0),
+          name: String(normalizedFile.originalname || ""),
+          mimeType: String(normalizedFile.mimetype || ""),
+          size: Number(normalizedFile.size || 0),
         });
       }
 
@@ -3470,6 +3476,24 @@ async function sleepMs(ms) {
 function getFileExtension(filename) {
   const raw = path.extname(String(filename || "")).toLowerCase();
   return raw.startsWith(".") ? raw.slice(1) : raw;
+}
+
+function normalizeMultipartFileName(filename) {
+  const raw = String(filename || "").trim();
+  if (!raw) return "";
+
+  try {
+    const repaired = Buffer.from(raw, "latin1").toString("utf8");
+    if (!repaired || repaired.includes("\u0000")) return raw;
+    const roundtrip = Buffer.from(repaired, "utf8").toString("latin1");
+    if (roundtrip === raw) {
+      return repaired;
+    }
+  } catch {
+    return raw;
+  }
+
+  return raw;
 }
 
 function isWordFile(ext, mime) {

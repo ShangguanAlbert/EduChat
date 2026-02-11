@@ -540,7 +540,7 @@ export default function ChatPage() {
     const remoteItems = remoteRefs.map((ref, idx) => ({
       index: remoteCandidates[idx].index,
       kind: "volc_ref",
-      name: String(ref?.name || remoteCandidates[idx].file?.name || ""),
+      name: String(remoteCandidates[idx].file?.name || ref?.name || ""),
       size: Number(ref?.size || remoteCandidates[idx].file?.size || 0),
       type: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
       mimeType: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
