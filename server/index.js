@@ -5204,7 +5204,7 @@ async function startServer() {
 
 async function ensureUploadedFileContextIndexes() {
   const collection = UploadedFileContext.collection;
-  let existingIndexes = await collection.indexes();
+  let existingIndexes = await readCollectionIndexesSafe(collection);
 
   const needUniqueIndex = !hasEquivalentMongoIndex(existingIndexes, {
     key: { userId: 1, sessionId: 1, messageId: 1 },
@@ -5218,7 +5218,7 @@ async function ensureUploadedFileContextIndexes() {
         name: "ux_uploaded_file_context_user_session_message",
       },
     );
-    existingIndexes = await collection.indexes();
+    existingIndexes = await readCollectionIndexesSafe(collection);
   }
 
   await ensureUploadedFileContextTtlIndex(collection, existingIndexes);
@@ -5254,6 +5254,26 @@ function hasSameMongoIndexKey(a, b) {
     if (Number(aValue) !== Number(bValue)) return false;
   }
   return true;
+}
+
+async function readCollectionIndexesSafe(collection) {
+  try {
+    return await collection.indexes();
+  } catch (error) {
+    if (isMongoNamespaceMissingError(error)) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+function isMongoNamespaceMissingError(error) {
+  if (Number(error?.code) === 26) return true;
+  const message = String(error?.message || "")
+    .trim()
+    .toLowerCase();
+  if (!message) return false;
+  return message.includes("ns does not exist") || message.includes("namespace not found");
 }
 
 async function ensureUploadedFileContextTtlIndex(collection, existingIndexes) {
