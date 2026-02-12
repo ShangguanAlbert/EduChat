@@ -2883,13 +2883,13 @@ async function pipeVolcengineImageGenerationSse(upstream, res, handlers = {}) {
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      const block = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
+    let boundary = findSseEventBoundary(buffer);
+    while (boundary.index !== -1) {
+      const block = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary.separatorLength);
       const completed = processSseBlock(block);
       if (completed) return;
-      boundary = buffer.indexOf("\n\n");
+      boundary = findSseEventBoundary(buffer);
     }
   }
 
@@ -4260,6 +4260,11 @@ async function pipeOpenRouterSse(upstream, res, reasoningEnabled) {
       return false;
     }
 
+    const streamError = extractOpenRouterStreamErrorMessage(json);
+    if (streamError) {
+      throw new Error(streamError);
+    }
+
     const choice = json?.choices?.[0] || {};
     const delta = choice?.delta && typeof choice.delta === "object" ? choice.delta : {};
 
@@ -4301,13 +4306,13 @@ async function pipeOpenRouterSse(upstream, res, reasoningEnabled) {
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      const block = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
+    let boundary = findSseEventBoundary(buffer);
+    while (boundary.index !== -1) {
+      const block = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary.separatorLength);
       const gotDone = processSseBlock(block);
       if (gotDone) return;
-      boundary = buffer.indexOf("\n\n");
+      boundary = findSseEventBoundary(buffer);
     }
   }
 
@@ -4444,13 +4449,13 @@ async function pipeResponsesSse(
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      const block = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
+    let boundary = findSseEventBoundary(buffer);
+    while (boundary.index !== -1) {
+      const block = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary.separatorLength);
       const gotDone = processSseBlock(block);
       if (gotDone) return { responseId };
-      boundary = buffer.indexOf("\n\n");
+      boundary = findSseEventBoundary(buffer);
     }
   }
 
@@ -4642,6 +4647,31 @@ function extractResponsesErrorMessage(event) {
   return "Responses API 调用失败";
 }
 
+function extractOpenRouterStreamErrorMessage(payload) {
+  if (!payload || typeof payload !== "object") return "";
+
+  const type = String(payload?.type || "")
+    .trim()
+    .toLowerCase();
+  const errorValue = payload?.error;
+  const hasErrorField =
+    typeof errorValue === "string" || (errorValue && typeof errorValue === "object");
+  const typeLooksError = type === "error" || type === "response.failed";
+  if (!hasErrorField && !typeLooksError) return "";
+
+  const nestedMessage =
+    typeof errorValue === "string" ? errorValue : sanitizeText(errorValue?.message, "", 800);
+  const topMessage = sanitizeText(payload?.message, "", 800);
+  const message = nestedMessage || topMessage || "OpenRouter 流式调用失败";
+  const code = sanitizeText(
+    (typeof errorValue === "object" ? errorValue?.code : "") || payload?.code,
+    "",
+    120,
+  );
+  if (!code) return message;
+  return `${message} (${code})`;
+}
+
 function extractDeltaText(part) {
   if (!part) return "";
   if (typeof part === "string") return part;
@@ -4676,6 +4706,27 @@ function extractSseDataPayload(block) {
 
   if (dataLines.length === 0) return "";
   return dataLines.join("\n").trim();
+}
+
+function findSseEventBoundary(buffer) {
+  if (!buffer) return { index: -1, separatorLength: 0 };
+
+  const lfBoundary = buffer.indexOf("\n\n");
+  const crlfBoundary = buffer.indexOf("\r\n\r\n");
+
+  if (lfBoundary === -1 && crlfBoundary === -1) {
+    return { index: -1, separatorLength: 0 };
+  }
+  if (lfBoundary === -1) {
+    return { index: crlfBoundary, separatorLength: 4 };
+  }
+  if (crlfBoundary === -1) {
+    return { index: lfBoundary, separatorLength: 2 };
+  }
+  if (crlfBoundary < lfBoundary) {
+    return { index: crlfBoundary, separatorLength: 4 };
+  }
+  return { index: lfBoundary, separatorLength: 2 };
 }
 
 function writeEvent(res, event, payload) {
@@ -5333,6 +5384,14 @@ function formatProviderUpstreamError(provider, protocol, status, detail) {
 
   if (provider === "openrouter" && status === 401) {
     return "OpenRouter 认证失败：请检查 OPENROUTER_API_KEY 是否正确且仍有效。";
+  }
+
+  if (
+    provider === "openrouter" &&
+    status === 403 &&
+    /not available in your region/i.test(`${errorMessage} ${raw}`)
+  ) {
+    return "OpenRouter 拒绝了当前模型：该模型在你所在地区不可用，请更换模型后重试。";
   }
 
   if (provider === "volcengine") {
