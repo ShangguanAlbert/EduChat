@@ -346,6 +346,12 @@
   min-height: 240px;
 }
 
+.admin-runtime-textarea {
+  min-height: 96px;
+  max-height: 240px;
+  line-height: 1.46;
+}
+
 .admin-textarea::placeholder,
 .admin-preview-input::placeholder {
   color: #94a3b8;
@@ -737,6 +743,39 @@
   margin: 0;
   color: #9f1239;
   font-size: 12px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-preview-error-close {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #9f1239;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 0;
+}
+
+.admin-preview-error-close:hover {
+  background: rgba(190, 24, 93, 0.12);
+}
+
+.admin-preview-error-close:focus-visible {
+  outline: 2px solid rgba(190, 24, 93, 0.45);
+  outline-offset: 1px;
+}
+
+.admin-close-x-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
 }
 
 .admin-info-hint {

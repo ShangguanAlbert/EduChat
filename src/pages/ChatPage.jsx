@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Info, LogOut } from "lucide-react";
+import { Info, LogOut, X } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import Sidebar from "../components/Sidebar.jsx";
 import AgentSelect from "../components/AgentSelect.jsx";
@@ -73,6 +73,43 @@ const DEFAULT_SESSION_MESSAGES = {
 };
 const CONTEXT_USER_ROUNDS = 10;
 const VIDEO_EXTENSIONS = new Set(["mp4", "avi", "mov"]);
+const DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
+  A: "volcengine",
+  B: "volcengine",
+  C: "volcengine",
+  D: "openrouter",
+});
+
+function sanitizeProvider(value, fallback = "openrouter") {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "openrouter" || key === "volcengine" || key === "aliyun") {
+    return key;
+  }
+  return fallback;
+}
+
+function sanitizeAgentProviderDefaults(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  return {
+    A: sanitizeProvider(source.A, DEFAULT_AGENT_PROVIDER_MAP.A),
+    B: sanitizeProvider(source.B, DEFAULT_AGENT_PROVIDER_MAP.B),
+    C: sanitizeProvider(source.C, DEFAULT_AGENT_PROVIDER_MAP.C),
+    D: sanitizeProvider(source.D, DEFAULT_AGENT_PROVIDER_MAP.D),
+  };
+}
+
+function resolveAgentProvider(agentId, runtimeConfig, providerDefaults) {
+  const runtimeProvider = String(runtimeConfig?.provider || "")
+    .trim()
+    .toLowerCase();
+  if (runtimeProvider && runtimeProvider !== "inherit") {
+    return sanitizeProvider(runtimeProvider, "openrouter");
+  }
+  const safeAgentId = AGENT_META[agentId] ? agentId : "A";
+  return sanitizeProvider(providerDefaults?.[safeAgentId], DEFAULT_AGENT_PROVIDER_MAP[safeAgentId]);
+}
 
 export default function ChatPage() {
   const navigate = useNavigate();
@@ -85,6 +122,9 @@ export default function ChatPage() {
   const [agent, setAgent] = useState("A");
   const [agentRuntimeConfigs, setAgentRuntimeConfigs] = useState(
     createDefaultAgentRuntimeConfigMap(),
+  );
+  const [agentProviderDefaults, setAgentProviderDefaults] = useState(
+    sanitizeAgentProviderDefaults(DEFAULT_AGENT_PROVIDER_MAP),
   );
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [apiTemperature, setApiTemperature] = useState("0.6");
@@ -106,10 +146,11 @@ export default function ChatPage() {
   const [userInfoSaving, setUserInfoSaving] = useState(false);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [bootstrapError, setBootstrapError] = useState("");
+  const [dismissedRoundWarningBySession, setDismissedRoundWarningBySession] = useState({});
 
   const messageListRef = useRef(null);
   const exportWrapRef = useRef(null);
-  const streamTargetRef = useRef({ sessionId: "", assistantId: "" });
+  const streamTargetRef = useRef({ sessionId: "", assistantId: "", mode: "draft" });
   const streamBufferRef = useRef({
     content: "",
     reasoning: "",
@@ -136,6 +177,7 @@ export default function ChatPage() {
     () => messages.filter((m) => m.role === "user").length,
     [messages],
   );
+  const roundWarningDismissed = !!dismissedRoundWarningBySession[activeId];
   const userInfoComplete = useMemo(() => isUserInfoComplete(userInfo), [userInfo]);
   const interactionLocked = bootstrapLoading || forceUserInfoModal || userInfoSaving;
   const activeAgent = useMemo(() => AGENT_META[agent] || AGENT_META.A, [agent]);
@@ -143,7 +185,18 @@ export default function ChatPage() {
     () => agentRuntimeConfigs[agent] || DEFAULT_AGENT_RUNTIME_CONFIG,
     [agentRuntimeConfigs, agent],
   );
-  const agentSwitchLocked = smartContextEnabled;
+  const activeProvider = useMemo(
+    () => resolveAgentProvider(agent, activeRuntimeConfig, agentProviderDefaults),
+    [agent, activeRuntimeConfig, agentProviderDefaults],
+  );
+  const smartContextSupported = activeProvider === "volcengine";
+  const effectiveSmartContextEnabled = smartContextSupported && smartContextEnabled;
+  const smartContextToggleDisabled =
+    isStreaming || interactionLocked || !smartContextSupported;
+  const smartContextInfoTitle = smartContextSupported
+    ? "开启后将锁定当前智能体进行对话，不得切换智能体"
+    : "仅火山引擎智能体支持智能上下文管理，当前智能体已默认关闭";
+  const agentSwitchLocked = effectiveSmartContextEnabled;
   const makeRuntimeSnapshot = (agentId = agent) =>
     createRuntimeSnapshot({
       agentId,
@@ -157,7 +210,38 @@ export default function ChatPage() {
         DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
     });
 
+  function patchAssistantMessage(sessionId, assistantId, updater) {
+    setSessionMessages((prev) => {
+      const list = prev[sessionId] || [];
+      let touched = false;
+      const nextList = list.map((item) => {
+        if (item?.id !== assistantId || item?.role !== "assistant") return item;
+        touched = true;
+        return updater(item);
+      });
+      if (!touched) return prev;
+      return {
+        ...prev,
+        [sessionId]: nextList,
+      };
+    });
+  }
+
   function updateAssistantRuntimeFromMeta(sessionId, assistantId, meta) {
+    const target = streamTargetRef.current;
+    const shouldPatchMessage =
+      target?.mode === "message" &&
+      target?.sessionId === sessionId &&
+      target?.assistantId === assistantId;
+
+    if (shouldPatchMessage) {
+      patchAssistantMessage(sessionId, assistantId, (message) => ({
+        ...message,
+        runtime: mergeRuntimeWithMeta(message.runtime, meta),
+      }));
+      return;
+    }
+
     updateStreamDraft(sessionId, (draft) => {
       if (!draft || draft.id !== assistantId) return draft;
       return {
@@ -266,6 +350,12 @@ export default function ChatPage() {
       delete next[sessionId];
       return next;
     });
+    setDismissedRoundWarningBySession((prev) => {
+      if (!prev[sessionId]) return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
     clearStreamDraft(sessionId);
     clearSessionMessageQueue(sessionId);
 
@@ -300,6 +390,17 @@ export default function ChatPage() {
       const next = { ...prev };
       sessionIds.forEach((id) => delete next[id]);
       return next;
+    });
+    setDismissedRoundWarningBySession((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      sessionIds.forEach((id) => {
+        if (next[id]) {
+          delete next[id];
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
     });
     clearManyStreamDrafts(sessionIds);
     sessionIds.forEach((id) => clearSessionMessageQueue(id));
@@ -371,15 +472,24 @@ export default function ChatPage() {
     const { content, reasoning, firstTextAt } = streamBufferRef.current;
     if (!content && !reasoning && !firstTextAt) return;
 
-    updateStreamDraft(target.sessionId, (draft) => {
-      if (!draft || draft.id !== target.assistantId) return draft;
-      return {
-        ...draft,
-        content: (draft.content || "") + content,
-        reasoning: (draft.reasoning || "") + reasoning,
-        firstTextAt: draft.firstTextAt || firstTextAt || null,
-      };
-    });
+    if (target.mode === "message") {
+      patchAssistantMessage(target.sessionId, target.assistantId, (message) => ({
+        ...message,
+        content: (message.content || "") + content,
+        reasoning: (message.reasoning || "") + reasoning,
+        firstTextAt: message.firstTextAt || firstTextAt || null,
+      }));
+    } else {
+      updateStreamDraft(target.sessionId, (draft) => {
+        if (!draft || draft.id !== target.assistantId) return draft;
+        return {
+          ...draft,
+          content: (draft.content || "") + content,
+          reasoning: (draft.reasoning || "") + reasoning,
+          firstTextAt: draft.firstTextAt || firstTextAt || null,
+        };
+      });
+    }
 
     streamBufferRef.current = { content: "", reasoning: "", firstTextAt: "" };
   }
@@ -660,7 +770,7 @@ export default function ChatPage() {
     );
     formData.append("topP", String(normalizeTopP(runtimeConfig.topP)));
     formData.append("sessionId", currentSessionId);
-    formData.append("smartContextEnabled", String(smartContextEnabled));
+    formData.append("smartContextEnabled", String(effectiveSmartContextEnabled));
     formData.append("contextMode", "append");
     formData.append("messages", JSON.stringify(historyForApi));
 
@@ -672,7 +782,7 @@ export default function ChatPage() {
     setFocusUserMessageId(userMsg.id);
     setIsStreaming(true);
     streamReasoningEnabledRef.current = !!runtimeConfig.enableThinking;
-    streamTargetRef.current = { sessionId: currentSessionId, assistantId };
+    streamTargetRef.current = { sessionId: currentSessionId, assistantId, mode: "draft" };
     streamBufferRef.current = { content: "", reasoning: "", firstTextAt: "" };
 
     try {
@@ -745,7 +855,7 @@ export default function ChatPage() {
         });
         queueMessageUpsert(currentSessionId, completedMsg);
       }
-      streamTargetRef.current = { sessionId: "", assistantId: "" };
+      streamTargetRef.current = { sessionId: "", assistantId: "", mode: "draft" };
       setIsStreaming(false);
     }
   }
@@ -784,12 +894,17 @@ export default function ChatPage() {
 
     const currentSessionId = activeId;
     const list = sessionMessages[currentSessionId] || [];
+    const assistantIndex = list.findIndex(
+      (m) => m.id === assistantIdToRegenerate && m.role === "assistant",
+    );
+    if (assistantIndex === -1) return;
     const promptIndex = list.findIndex(
       (m) => m.id === promptMessageId && m.role === "user",
     );
     if (promptIndex === -1) return;
 
     const promptMsg = list[promptIndex];
+    const previousAssistant = list[assistantIndex];
     const historyForApi = toApiMessages(
       pickRecentRounds(
         list.slice(0, promptIndex + 1),
@@ -800,10 +915,8 @@ export default function ChatPage() {
       },
     );
 
-    const newAssistantId = `a${Date.now()}-regen`;
-    const assistantMsg = {
-      id: newAssistantId,
-      role: "assistant",
+    const regeneratingAssistant = {
+      ...previousAssistant,
       content: "",
       reasoning: "",
       feedback: null,
@@ -815,7 +928,12 @@ export default function ChatPage() {
       runtime: makeRuntimeSnapshot(agent),
     };
 
-    startStreamDraft(currentSessionId, assistantMsg);
+    patchAssistantMessage(
+      currentSessionId,
+      assistantIdToRegenerate,
+      () => regeneratingAssistant,
+    );
+    queueMessageUpsert(currentSessionId, regeneratingAssistant);
 
     const formData = new FormData();
     formData.append("agentId", agent);
@@ -825,7 +943,7 @@ export default function ChatPage() {
     );
     formData.append("topP", String(normalizeTopP(runtimeConfig.topP)));
     formData.append("sessionId", currentSessionId);
-    formData.append("smartContextEnabled", String(smartContextEnabled));
+    formData.append("smartContextEnabled", String(effectiveSmartContextEnabled));
     formData.append("contextMode", "regenerate");
     formData.append("messages", JSON.stringify(historyForApi));
 
@@ -834,7 +952,8 @@ export default function ChatPage() {
     streamReasoningEnabledRef.current = !!runtimeConfig.enableThinking;
     streamTargetRef.current = {
       sessionId: currentSessionId,
-      assistantId: newAssistantId,
+      assistantId: assistantIdToRegenerate,
+      mode: "message",
     };
     streamBufferRef.current = { content: "", reasoning: "", firstTextAt: "" };
 
@@ -860,7 +979,7 @@ export default function ChatPage() {
           setLastAppliedReasoning(applied);
           updateAssistantRuntimeFromMeta(
             currentSessionId,
-            newAssistantId,
+            assistantIdToRegenerate,
             meta,
           );
         },
@@ -886,33 +1005,29 @@ export default function ChatPage() {
       const msg = error?.message || "请求失败";
       setStreamError(msg);
       flushStreamBuffer();
-      updateStreamDraft(currentSessionId, (draft) => {
-        if (!draft || draft.id !== newAssistantId) return draft;
-        return {
-          ...draft,
-          content: (draft.content || "") + `\n\n> 请求失败：${msg}`,
-        };
-      });
+      patchAssistantMessage(currentSessionId, assistantIdToRegenerate, (message) => ({
+        ...message,
+        content: `${message.content || ""}\n\n> 请求失败：${msg}`,
+      }));
     } finally {
       if (streamFlushTimerRef.current) {
         clearTimeout(streamFlushTimerRef.current);
         streamFlushTimerRef.current = null;
       }
       flushStreamBuffer();
-      const completed = getStreamDraft(currentSessionId);
-      clearStreamDraft(currentSessionId);
-      if (completed && completed.id === newAssistantId) {
-        const completedMsg = { ...completed, streaming: false };
-        setSessionMessages((prev) => {
-          const list = prev[currentSessionId] || [];
-          return {
-            ...prev,
-            [currentSessionId]: [...list, completedMsg],
-          };
-        });
-        queueMessageUpsert(currentSessionId, completedMsg);
+      let completedMessageForSave = null;
+      patchAssistantMessage(currentSessionId, assistantIdToRegenerate, (message) => {
+        const completedMessage = {
+          ...message,
+          streaming: false,
+        };
+        completedMessageForSave = completedMessage;
+        return completedMessage;
+      });
+      if (completedMessageForSave) {
+        queueMessageUpsert(currentSessionId, completedMessageForSave);
       }
-      streamTargetRef.current = { sessionId: "", assistantId: "" };
+      streamTargetRef.current = { sessionId: "", assistantId: "", mode: "draft" };
       setIsStreaming(false);
     }
   }
@@ -925,6 +1040,20 @@ export default function ChatPage() {
 
   function scrollToLatestRound() {
     messageListRef.current?.scrollToLatest?.();
+  }
+
+  function closeStreamErrorBanner() {
+    setStreamError("");
+    setStateSaveError("");
+    setBootstrapError("");
+  }
+
+  function closeRoundWarning() {
+    if (!activeId) return;
+    setDismissedRoundWarningBySession((prev) => ({
+      ...prev,
+      [activeId]: true,
+    }));
   }
 
   function runExport(kind, userInfo) {
@@ -1080,6 +1209,7 @@ export default function ChatPage() {
         const stateSettings =
           state.settings && typeof state.settings === "object" ? state.settings : {};
         const nextRuntimeConfigs = sanitizeRuntimeConfigMap(data?.agentRuntimeConfigs);
+        const nextProviderDefaults = sanitizeAgentProviderDefaults(data?.agentProviderDefaults);
         const restoreContext = location.state?.fromImageGeneration
           ? normalizeImageReturnContext(
               location.state?.restoreContext || loadImageReturnContext(),
@@ -1097,7 +1227,13 @@ export default function ChatPage() {
         const nextAppliedReasoning = normalizeReasoningEffort(
           stateSettings.lastAppliedReasoning ?? "high",
         );
-        const nextSmartContextEnabled = !!stateSettings.smartContextEnabled;
+        const nextProvider = resolveAgentProvider(
+          nextAgent,
+          nextRuntime,
+          nextProviderDefaults,
+        );
+        const nextSmartContextEnabled =
+          nextProvider === "volcengine" ? !!stateSettings.smartContextEnabled : false;
 
         let resolvedSessions = nextSessions;
         let resolvedMessages = nextSessionMessages;
@@ -1119,6 +1255,7 @@ export default function ChatPage() {
         setActiveId(resolvedActiveId);
         setAgent(nextAgent);
         setAgentRuntimeConfigs(nextRuntimeConfigs);
+        setAgentProviderDefaults(nextProviderDefaults);
         setApiTemperature(nextApiTemperature);
         setApiTopP(nextApiTopP);
         setApiReasoningEffort(nextApiReasoning);
@@ -1171,6 +1308,12 @@ export default function ChatPage() {
   }, [activeRuntimeConfig]);
 
   useEffect(() => {
+    if (smartContextSupported) return;
+    if (!smartContextEnabled) return;
+    setSmartContextEnabled(false);
+  }, [smartContextEnabled, smartContextSupported]);
+
+  useEffect(() => {
     if (!persistReadyRef.current || bootstrapLoading) return;
     pendingMetaSaveRef.current = true;
 
@@ -1201,7 +1344,7 @@ export default function ChatPage() {
             apiTopP: normalizeTopP(apiTopP),
             apiReasoningEffort: normalizeReasoningEffort(apiReasoningEffort),
             lastAppliedReasoning: normalizeReasoningEffort(lastAppliedReasoning),
-            smartContextEnabled,
+            smartContextEnabled: effectiveSmartContextEnabled,
           },
         });
         setStateSaveError("");
@@ -1220,7 +1363,7 @@ export default function ChatPage() {
     apiTopP,
     apiReasoningEffort,
     lastAppliedReasoning,
-    smartContextEnabled,
+    effectiveSmartContextEnabled,
     bootstrapLoading,
     isStreaming,
   ]);
@@ -1321,22 +1464,24 @@ export default function ChatPage() {
               disabled={agentSwitchLocked}
               disabledTitle="开启智能上下文管理后，需先关闭开关才能切换智能体。"
             />
-            <div className="smart-context-control">
+            <div
+              className={`smart-context-control${!smartContextSupported ? " is-disabled" : ""}`}
+            >
               <label className="smart-context-switch" htmlFor="smart-context-toggle">
                 <input
                   id="smart-context-toggle"
                   type="checkbox"
-                  checked={smartContextEnabled}
+                  checked={effectiveSmartContextEnabled}
                   onChange={(e) => setSmartContextEnabled(e.target.checked)}
-                  disabled={isStreaming || interactionLocked}
+                  disabled={smartContextToggleDisabled}
                 />
                 <span className="smart-context-slider" aria-hidden="true" />
                 <span className="smart-context-label">智能上下文管理</span>
               </label>
               <span
                 className="smart-context-info"
-                title="开启后将锁定当前智能体进行对话，不得切换智能体"
-                aria-label="开启后将锁定当前智能体进行对话，不得切换智能体"
+                title={smartContextInfoTitle}
+                aria-label={smartContextInfoTitle}
               >
                 <Info size={14} />
               </span>
@@ -1385,7 +1530,16 @@ export default function ChatPage() {
 
         {(streamError || stateSaveError || bootstrapError) && (
           <div className="stream-error">
-            {[streamError, stateSaveError, bootstrapError].filter(Boolean).join(" | ")}
+            <span>{[streamError, stateSaveError, bootstrapError].filter(Boolean).join(" | ")}</span>
+            <button
+              type="button"
+              className="stream-error-close"
+              onClick={closeStreamErrorBanner}
+              aria-label="关闭错误提示"
+              title="关闭错误提示"
+            >
+              <X size={14} />
+            </button>
           </div>
         )}
 
@@ -1402,9 +1556,18 @@ export default function ChatPage() {
         />
 
         <div className="chat-input-wrap">
-          {roundCount >= CHAT_ROUND_WARNING_THRESHOLD && (
+          {roundCount >= CHAT_ROUND_WARNING_THRESHOLD && !roundWarningDismissed && (
             <div className="chat-round-warning" role="status">
-              继续当前对话可能导致页面卡顿，请新建一个对话。
+              <span>继续当前对话可能导致页面卡顿，请新建一个对话。</span>
+              <button
+                type="button"
+                className="chat-round-warning-close"
+                onClick={closeRoundWarning}
+                aria-label="关闭提示"
+                title="关闭提示"
+              >
+                <X size={14} />
+              </button>
             </div>
           )}
 

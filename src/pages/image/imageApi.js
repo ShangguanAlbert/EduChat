@@ -1,6 +1,14 @@
 import { readErrorMessage } from "../chat/chatHelpers.js";
 import { getAuthTokenHeader } from "../chat/stateApi.js";
 
+async function readJsonSafe(resp) {
+  try {
+    return await resp.json();
+  } catch {
+    return {};
+  }
+}
+
 export async function streamSeedreamGeneration({
   prompt,
   size,
@@ -40,6 +48,69 @@ export async function streamSeedreamGeneration({
   }
 
   await readImageSseStream(resp, handlers);
+}
+
+export async function fetchImageGenerationHistory({ limit = 80 } = {}) {
+  const safeLimit = Math.max(1, Math.min(200, Number(limit) || 80));
+  const resp = await fetch(`/api/images/history?limit=${safeLimit}`, {
+    method: "GET",
+    headers: {
+      ...getAuthTokenHeader(),
+    },
+  });
+  const data = await readJsonSafe(resp);
+  if (!resp.ok) {
+    const message =
+      String(data?.error || data?.message || "").trim() || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+  const items = Array.isArray(data?.items) ? data.items : [];
+  return {
+    ok: !!data?.ok,
+    items,
+  };
+}
+
+export async function deleteImageGenerationHistoryItem(imageId) {
+  const safeId = String(imageId || "").trim();
+  if (!safeId) {
+    throw new Error("无效图片 ID。");
+  }
+  const resp = await fetch(`/api/images/history/${encodeURIComponent(safeId)}`, {
+    method: "DELETE",
+    headers: {
+      ...getAuthTokenHeader(),
+    },
+  });
+  const data = await readJsonSafe(resp);
+  if (!resp.ok) {
+    const message =
+      String(data?.error || data?.message || "").trim() || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+  return {
+    ok: !!data?.ok,
+    deleted: !!data?.deleted,
+  };
+}
+
+export async function clearImageGenerationHistory() {
+  const resp = await fetch("/api/images/history", {
+    method: "DELETE",
+    headers: {
+      ...getAuthTokenHeader(),
+    },
+  });
+  const data = await readJsonSafe(resp);
+  if (!resp.ok) {
+    const message =
+      String(data?.error || data?.message || "").trim() || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+  return {
+    ok: !!data?.ok,
+    deletedCount: Number(data?.deletedCount || 0),
+  };
 }
 
 async function readImageSseStream(response, handlers) {

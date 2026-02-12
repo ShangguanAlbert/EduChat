@@ -1,7 +1,7 @@
 export const AGENT_IDS = ["A", "B", "C", "D"];
 const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
 const RUNTIME_MAX_INPUT_TOKENS = 512000;
-const RUNTIME_MAX_OUTPUT_TOKENS = 128000;
+const RUNTIME_MAX_OUTPUT_TOKENS = 1048576;
 const RUNTIME_MAX_REASONING_TOKENS = 128000;
 const DEFAULT_AGENT_MODEL_BY_AGENT = Object.freeze({
   A: "doubao-seed-1-6-251015",
@@ -277,6 +277,13 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   webSearchSourceDouyin: true,
   webSearchSourceMoji: true,
   webSearchSourceToutiao: true,
+  openrouterPreset: "",
+  openrouterIncludeReasoning: false,
+  openrouterUseWebPlugin: false,
+  openrouterWebPluginEngine: "auto",
+  openrouterWebPluginMaxResults: 5,
+  openrouterUseResponseHealing: false,
+  openrouterPdfEngine: "auto",
 });
 const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
   A: Object.freeze({
@@ -501,6 +508,29 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
       source.webSearchSourceToutiao,
       defaults.webSearchSourceToutiao,
     ),
+    openrouterPreset: sanitizeOpenRouterPreset(source.openrouterPreset),
+    openrouterIncludeReasoning: sanitizeBoolean(
+      source.openrouterIncludeReasoning,
+      defaults.openrouterIncludeReasoning,
+    ),
+    openrouterUseWebPlugin: sanitizeBoolean(
+      source.openrouterUseWebPlugin,
+      defaults.openrouterUseWebPlugin,
+    ),
+    openrouterWebPluginEngine: sanitizeOpenRouterWebPluginEngine(
+      source.openrouterWebPluginEngine,
+    ),
+    openrouterWebPluginMaxResults: sanitizeInteger(
+      source.openrouterWebPluginMaxResults,
+      defaults.openrouterWebPluginMaxResults,
+      1,
+      10,
+    ),
+    openrouterUseResponseHealing: sanitizeBoolean(
+      source.openrouterUseResponseHealing,
+      defaults.openrouterUseResponseHealing,
+    ),
+    openrouterPdfEngine: sanitizeOpenRouterPdfEngine(source.openrouterPdfEngine),
   };
 }
 
@@ -564,6 +594,29 @@ function sanitizeModel(value) {
   return String(value || "")
     .trim()
     .slice(0, 180);
+}
+
+function sanitizeOpenRouterPreset(value) {
+  return String(value || "")
+    .trim()
+    .slice(0, 120);
+}
+
+function sanitizeOpenRouterWebPluginEngine(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "native") return "native";
+  if (key === "exa") return "exa";
+  return "auto";
+}
+
+function sanitizeOpenRouterPdfEngine(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "pdf-text" || key === "mistral-ocr" || key === "native") return key;
+  return "auto";
 }
 
 function sanitizeCreativityMode(value) {

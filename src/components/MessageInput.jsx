@@ -55,9 +55,21 @@ const ACCEPT_UPLOAD_TYPES = [
   ".vue",
   ".svelte",
   "image/*",
+  ".mp3",
+  ".wav",
+  ".aac",
+  ".ogg",
+  ".flac",
+  ".m4a",
+  ".aiff",
+  ".pcm16",
+  ".pcm24",
+  "audio/*",
   ".mp4",
   ".avi",
+  ".mpeg",
   ".mov",
+  ".webm",
   "video/*",
 ].join(",");
 
@@ -150,7 +162,6 @@ export default function MessageInput({
             onClick={() => onClearQuote?.()}
             aria-label="移除引用"
             title="移除引用"
-            disabled={disabled}
           >
             <X size={14} />
           </button>

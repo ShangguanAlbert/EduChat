@@ -44,6 +44,12 @@ const PROVIDER_OPTIONS = [
   { value: "aliyun", label: "阿里云 DashScope" },
 ];
 const KNOWN_PROVIDERS = new Set(["openrouter", "volcengine", "aliyun"]);
+const OPENROUTER_PDF_ENGINE_OPTIONS = [
+  { value: "auto", label: "自动（默认）" },
+  { value: "pdf-text", label: "pdf-text（免费）" },
+  { value: "mistral-ocr", label: "mistral-ocr（OCR）" },
+  { value: "native", label: "native（模型原生）" },
+];
 const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = [
   {
     id: "doubao-seed-1-8-251228",
@@ -173,6 +179,21 @@ function StepIcon({ type }) {
       {isPlus ? (
         <path d="M8 3.2V12.8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
       ) : null}
+    </svg>
+  );
+}
+
+function CloseXIcon() {
+  return (
+    <svg
+      className="admin-close-x-icon"
+      viewBox="0 0 16 16"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <path d="M4 4L12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M12 4L4 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
@@ -615,6 +636,7 @@ export default function AdminSettingsPage() {
         ? "阿里云 DashScope"
         : "OpenRouter";
   const showVolcenginePanel = selectedProvider === "volcengine";
+  const showOpenRouterPanel = selectedProvider === "openrouter";
   const providerSupportsReasoning = selectedProvider !== "aliyun";
   const providerReasoningHint = providerSupportsReasoning
     ? "当前服务商支持深度思考开关：关闭=none，开启=high。"
@@ -1023,6 +1045,7 @@ export default function AdminSettingsPage() {
       id: `u-${Date.now()}`,
       role: "user",
       content: userContent,
+      sourceFiles: safeFiles,
       attachments: safeFiles.map((file) => ({
         name: String(file?.name || ""),
         size: Number(file?.size || 0),
@@ -1132,6 +1155,142 @@ export default function AdminSettingsPage() {
       [selectedAgent]: [],
     }));
     setDebugError("");
+  }
+
+  function onDebugAssistantFeedback(messageId, feedback) {
+    const agentId = selectedAgent;
+    setDebugByAgent((prev) => {
+      const list = prev[agentId] || [];
+      const current = list.find((item) => item.id === messageId && item.role === "assistant");
+      if (!current) return prev;
+      const nextFeedback = current.feedback === feedback ? null : feedback;
+      return {
+        ...prev,
+        [agentId]: list.map((item) =>
+          item.id === messageId && item.role === "assistant"
+            ? { ...item, feedback: nextFeedback }
+            : item,
+        ),
+      };
+    });
+  }
+
+  async function onDebugAssistantRegenerate(assistantMessageId, promptMessageId) {
+    if (!adminToken || debugLoading || !assistantMessageId || !promptMessageId) return;
+
+    const agentId = selectedAgent;
+    const runtimeConfig = runtimeConfigs[agentId] || DEFAULT_AGENT_RUNTIME_CONFIG;
+    const list = debugByAgent[agentId] || [];
+    const promptIndex = list.findIndex(
+      (item) => item.id === promptMessageId && item.role === "user",
+    );
+    const assistantIndex = list.findIndex(
+      (item) => item.id === assistantMessageId && item.role === "assistant",
+    );
+    if (promptIndex === -1 || assistantIndex === -1) return;
+
+    const promptMsg = list[promptIndex];
+    const sourceFiles = Array.isArray(promptMsg.sourceFiles) ? promptMsg.sourceFiles : [];
+    const historyForApi = toPreviewMessages(list.slice(0, promptIndex + 1));
+    if (historyForApi.length === 0 && sourceFiles.length === 0) return;
+
+    setDebugError("");
+    setDebugByAgent((prev) => {
+      const nextList = (prev[agentId] || []).map((item) => {
+        if (item.id !== assistantMessageId || item.role !== "assistant") return item;
+        return {
+          ...item,
+          content: "",
+          reasoning: "",
+          feedback: null,
+          streaming: true,
+        };
+      });
+      return {
+        ...prev,
+        [agentId]: nextList,
+      };
+    });
+    setDebugLoading(true);
+
+    try {
+      await streamAdminAgentDebug(
+        adminToken,
+        {
+          agentId,
+          messages: historyForApi,
+          runtimeConfig,
+          files: sourceFiles,
+        },
+        {
+          onToken: (chunk) => {
+            if (!chunk) return;
+            setDebugByAgent((prev) => {
+              const nextList = (prev[agentId] || []).map((item) =>
+                item.id === assistantMessageId
+                  ? { ...item, content: `${item.content || ""}${chunk}` }
+                  : item,
+              );
+              return {
+                ...prev,
+                [agentId]: nextList,
+              };
+            });
+          },
+          onReasoningToken: (chunk) => {
+            if (!chunk) return;
+            setDebugByAgent((prev) => {
+              const nextList = (prev[agentId] || []).map((item) =>
+                item.id === assistantMessageId
+                  ? { ...item, reasoning: `${item.reasoning || ""}${chunk}` }
+                  : item,
+              );
+              return {
+                ...prev,
+                [agentId]: nextList,
+              };
+            });
+          },
+          onError: (message) => {
+            throw new Error(message || "调试失败");
+          },
+        },
+      );
+    } catch (error) {
+      if (handleAuthError(error)) return;
+      const msg = readErrorMessage(error);
+      setDebugError(msg);
+      setDebugByAgent((prev) => {
+        const nextList = (prev[agentId] || []).map((item) =>
+          item.id === assistantMessageId
+            ? {
+                ...item,
+                content: `${item.content || ""}\n\n> 调试失败：${msg}`,
+              }
+            : item,
+        );
+        return {
+          ...prev,
+          [agentId]: nextList,
+        };
+      });
+    } finally {
+      setDebugLoading(false);
+      setDebugByAgent((prev) => {
+        const nextList = (prev[agentId] || []).map((item) =>
+          item.id === assistantMessageId
+            ? {
+                ...item,
+                streaming: false,
+              }
+            : item,
+        );
+        return {
+          ...prev,
+          [agentId]: nextList,
+        };
+      });
+    }
   }
 
   return (
@@ -1317,9 +1476,9 @@ export default function AdminSettingsPage() {
               </label>
               {matchedTokenProfile ? (
                 <p className="admin-field-note">
-                  已自动匹配长度限制：上下文 {matchedTokenProfile.contextWindowTokens}，最大输入{" "}
-                  {matchedTokenProfile.maxInputTokens}，最大输出{" "}
-                  {matchedTokenProfile.maxOutputTokens}。
+                  {showOpenRouterPanel
+                    ? `已自动匹配模型规格：上下文 ${matchedTokenProfile.contextWindowTokens}，最大输入 ${matchedTokenProfile.maxInputTokens}，最大输出 ${matchedTokenProfile.maxOutputTokens}。OpenRouter 实际下发仅 max_tokens（最大输出）。`
+                    : `已自动匹配长度限制：上下文 ${matchedTokenProfile.contextWindowTokens}，最大输入 ${matchedTokenProfile.maxInputTokens}，最大输出 ${matchedTokenProfile.maxOutputTokens}。`}
                 </p>
               ) : (
                 <p className="admin-field-note">
@@ -1329,6 +1488,10 @@ export default function AdminSettingsPage() {
               {showVolcenginePanel ? (
                 <p className="admin-field-note">
                   说明：Responses 协议下，上下文窗口与最大输入为自动匹配只读项；最大输出会映射到上游接口参数。
+                </p>
+              ) : showOpenRouterPanel ? (
+                <p className="admin-field-note">
+                  说明：OpenRouter Chat 场景只下发最大输出（max_tokens）；上下文窗口与最大输入长度不单独配置。
                 </p>
               ) : (
                 <p className="admin-field-note">
@@ -1418,7 +1581,7 @@ export default function AdminSettingsPage() {
                       id="admin-runtime-max-output-tokens"
                       value={selectedRuntime.maxOutputTokens}
                       min={64}
-                      max={128000}
+                      max={1048576}
                       step={64}
                       onChange={(next) => updateRuntimeField("maxOutputTokens", next)}
                       disabled={loading}
@@ -1678,58 +1841,101 @@ export default function AdminSettingsPage() {
                     </label>
                   </div>
 
-                  <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens-chat">
-                    <span className="admin-label-with-hint">
-                      上下文窗口
-                      <InfoHint text="Chat 协议配置项，可手动编辑。" />
-                    </span>
-                    <NumberRuntimeInput
-                      id="admin-runtime-context-window-tokens-chat"
-                      value={selectedRuntime.contextWindowTokens}
-                      min={1024}
-                      max={512000}
-                      step={1024}
-                      onChange={(next) => updateRuntimeField("contextWindowTokens", next)}
-                      disabled={loading}
-                    />
-                  </label>
+                  {!showOpenRouterPanel ? (
+                    <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens-chat">
+                      <span className="admin-label-with-hint">
+                        上下文窗口
+                        <InfoHint text="Chat 协议配置项，可手动编辑。" />
+                      </span>
+                      <NumberRuntimeInput
+                        id="admin-runtime-context-window-tokens-chat"
+                        value={selectedRuntime.contextWindowTokens}
+                        min={1024}
+                        max={512000}
+                        step={1024}
+                        onChange={(next) => updateRuntimeField("contextWindowTokens", next)}
+                        disabled={loading}
+                      />
+                    </label>
+                  ) : null}
 
-                  <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens-chat">
-                    <span className="admin-label-with-hint">
-                      最大输入长度
-                      <InfoHint text="Chat 协议配置项，可手动编辑。" />
-                    </span>
-                    <NumberRuntimeInput
-                      id="admin-runtime-max-input-tokens-chat"
-                      value={selectedRuntime.maxInputTokens}
-                      min={1024}
-                      max={512000}
-                      step={1024}
-                      onChange={(next) => updateRuntimeField("maxInputTokens", next)}
-                      disabled={loading}
-                    />
-                  </label>
+                  {!showOpenRouterPanel ? (
+                    <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens-chat">
+                      <span className="admin-label-with-hint">
+                        最大输入长度
+                        <InfoHint text="Chat 协议配置项，可手动编辑。" />
+                      </span>
+                      <NumberRuntimeInput
+                        id="admin-runtime-max-input-tokens-chat"
+                        value={selectedRuntime.maxInputTokens}
+                        min={1024}
+                        max={512000}
+                        step={1024}
+                        onChange={(next) => updateRuntimeField("maxInputTokens", next)}
+                        disabled={loading}
+                      />
+                    </label>
+                  ) : null}
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-max-output-tokens-chat">
                     <span className="admin-label-with-hint">
-                      最大输出长度
-                      <InfoHint text="会映射到 Chat 的最大输出参数。" />
+                      {showOpenRouterPanel ? "最大输出长度（Max Tokens）" : "最大输出长度"}
+                      <InfoHint
+                        text={
+                          showOpenRouterPanel
+                            ? "会映射到 OpenRouter Chat 的 max_tokens 参数。"
+                            : "会映射到 Chat 的最大输出参数。"
+                        }
+                      />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-max-output-tokens-chat"
                       value={selectedRuntime.maxOutputTokens}
                       min={64}
-                      max={128000}
+                      max={1048576}
                       step={64}
                       onChange={(next) => updateRuntimeField("maxOutputTokens", next)}
                       disabled={loading}
                     />
                   </label>
 
+                  {showOpenRouterPanel ? (
+                    <>
+                      <div className="admin-field-row split">
+                        <span className="admin-label-with-hint">
+                          PDF 引擎
+                          <InfoHint text="对应 file-parser 插件的 pdf.engine。auto 为不显式下发，交由 OpenRouter 自动选择。" />
+                        </span>
+                        <AdminPortalSelect
+                          value={selectedRuntime.openrouterPdfEngine}
+                          options={OPENROUTER_PDF_ENGINE_OPTIONS}
+                          onChange={(next) => updateRuntimeField("openrouterPdfEngine", next)}
+                          disabled={loading}
+                          compact
+                        />
+                      </div>
+
+                      <p className="admin-field-note">
+                        推理内容返回策略已固定：开启深度思考时自动返回推理内容，关闭深度思考时不返回。
+                      </p>
+                      <p className="admin-field-note">
+                        Preset 已固定为默认（留空），不在此界面单独配置。
+                      </p>
+                      <p className="admin-field-note">
+                        Web 插件与 Response Healing 已固定关闭，不在此界面配置。
+                      </p>
+                      <p className="admin-field-note">
+                        Auto Router（智能路由）已固定关闭，不在此界面配置。
+                      </p>
+                    </>
+                  ) : null}
+
                   <p className="admin-field-note">
                     当前服务商：{selectedProviderName}
                     {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
-                    该服务商当前仅使用 Chat 协议，Responses 参数已自动隐藏。
+                    {showOpenRouterPanel
+                      ? "OpenRouter 使用 Chat Completions；下方 OpenRouter 专属参数仅在该服务商下生效。"
+                      : "该服务商当前仅使用 Chat 协议，Responses 参数已自动隐藏。"}
                   </p>
                   <p
                     className={`admin-field-note ${providerSupportsReasoning ? "" : "warning"}`}
@@ -1762,14 +1968,28 @@ export default function AdminSettingsPage() {
                 activeSessionId={`admin-debug-${selectedAgent}`}
                 messages={previewMessages}
                 isStreaming={debugLoading}
-                showAssistantActions={false}
+                onAssistantFeedback={onDebugAssistantFeedback}
+                onAssistantRegenerate={onDebugAssistantRegenerate}
               />
               <MessageInput
                 onSend={onDebugSend}
                 disabled={debugLoading || loading}
               />
             </div>
-            {debugError ? <p className="admin-preview-error">{debugError}</p> : null}
+            {debugError ? (
+              <div className="admin-preview-error" role="alert">
+                <span>{debugError}</span>
+                <button
+                  type="button"
+                  className="admin-preview-error-close"
+                  onClick={() => setDebugError("")}
+                  aria-label="关闭错误提示"
+                  title="关闭错误提示"
+                >
+                  <CloseXIcon />
+                </button>
+              </div>
+            ) : null}
           </section>
         </div>
       </div>

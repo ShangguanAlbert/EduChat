@@ -41,9 +41,10 @@ const DEFAULT_SYSTEM_PROMPT_FALLBACK = "你是用户的助手";
 const RUNTIME_CONTEXT_ROUNDS_MAX = 20;
 const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
 const RUNTIME_MAX_INPUT_TOKENS = 512000;
-const RUNTIME_MAX_OUTPUT_TOKENS = 128000;
+const RUNTIME_MAX_OUTPUT_TOKENS = 1048576;
 const RUNTIME_MAX_REASONING_TOKENS = 128000;
 const UPLOADED_FILE_CONTEXT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const GENERATED_IMAGE_HISTORY_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   provider: "inherit",
   model: "",
@@ -69,6 +70,13 @@ const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   webSearchSourceDouyin: true,
   webSearchSourceMoji: true,
   webSearchSourceToutiao: true,
+  openrouterPreset: "",
+  openrouterIncludeReasoning: false,
+  openrouterUseWebPlugin: false,
+  openrouterWebPluginEngine: "auto",
+  openrouterWebPluginMaxResults: 5,
+  openrouterUseResponseHealing: false,
+  openrouterPdfEngine: "auto",
 });
 const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
   A: Object.freeze({
@@ -464,6 +472,44 @@ const WORD_EXTENSIONS = new Set(["docx", "doc"]);
 const EXCEL_EXTENSIONS = new Set(["xlsx", "xls"]);
 const PDF_EXTENSIONS = new Set(["pdf"]);
 const VIDEO_EXTENSIONS = new Set(["mp4", "avi", "mov"]);
+const OPENROUTER_VIDEO_EXTENSIONS = new Set(["mp4", "mpeg", "mov", "webm"]);
+const OPENROUTER_AUDIO_FORMATS = new Set([
+  "wav",
+  "mp3",
+  "aiff",
+  "aac",
+  "ogg",
+  "flac",
+  "m4a",
+  "pcm16",
+  "pcm24",
+]);
+const OPENROUTER_AUDIO_EXTENSIONS = new Set([
+  "wav",
+  "mp3",
+  "aiff",
+  "aac",
+  "ogg",
+  "flac",
+  "m4a",
+  "pcm16",
+  "pcm24",
+]);
+const OPENROUTER_AUDIO_MIME_TO_FORMAT = Object.freeze({
+  "audio/wav": "wav",
+  "audio/x-wav": "wav",
+  "audio/wave": "wav",
+  "audio/mp3": "mp3",
+  "audio/mpeg": "mp3",
+  "audio/aiff": "aiff",
+  "audio/x-aiff": "aiff",
+  "audio/aac": "aac",
+  "audio/ogg": "ogg",
+  "audio/flac": "flac",
+  "audio/x-flac": "flac",
+  "audio/mp4": "m4a",
+  "audio/x-m4a": "m4a",
+});
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { files: MAX_FILES, fileSize: MAX_FILE_SIZE_BYTES },
@@ -607,6 +653,35 @@ const UploadedFileContext =
   mongoose.models.UploadedFileContext ||
   mongoose.model("UploadedFileContext", uploadedFileContextSchema);
 
+const generatedImageHistorySchema = new mongoose.Schema(
+  {
+    userId: { type: String, required: true, index: true },
+    prompt: { type: String, default: "" },
+    imageUrl: { type: String, required: true },
+    responseFormat: { type: String, default: "url" },
+    size: { type: String, default: "" },
+    model: { type: String, default: "" },
+    expiresAt: { type: Date, required: true },
+  },
+  {
+    timestamps: true,
+    collection: "generated_image_histories",
+    autoIndex: false,
+  },
+);
+generatedImageHistorySchema.index(
+  { userId: 1, createdAt: -1 },
+  { name: "ix_generated_image_histories_user_created_at_desc" },
+);
+generatedImageHistorySchema.index(
+  { expiresAt: 1 },
+  { expireAfterSeconds: 0, name: "ttl_generated_image_histories_expires_at" },
+);
+
+const GeneratedImageHistory =
+  mongoose.models.GeneratedImageHistory ||
+  mongoose.model("GeneratedImageHistory", generatedImageHistorySchema);
+
 const runtimeConfigSchema = new mongoose.Schema(
   {
     provider: { type: String, default: DEFAULT_AGENT_RUNTIME_CONFIG.provider },
@@ -689,6 +764,34 @@ const runtimeConfigSchema = new mongoose.Schema(
     webSearchSourceToutiao: {
       type: Boolean,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceToutiao,
+    },
+    openrouterPreset: {
+      type: String,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterPreset,
+    },
+    openrouterIncludeReasoning: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterIncludeReasoning,
+    },
+    openrouterUseWebPlugin: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterUseWebPlugin,
+    },
+    openrouterWebPluginEngine: {
+      type: String,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterWebPluginEngine,
+    },
+    openrouterWebPluginMaxResults: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterWebPluginMaxResults,
+    },
+    openrouterUseResponseHealing: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterUseResponseHealing,
+    },
+    openrouterPdfEngine: {
+      type: String,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterPdfEngine,
     },
   },
   { _id: false },
@@ -781,6 +884,7 @@ app.get("/api/chat/bootstrap", requireChatAuth, async (req, res) => {
     profileComplete,
     state,
     agentRuntimeConfigs: resolveAgentRuntimeConfigs(adminConfig.runtimeConfigs),
+    agentProviderDefaults: buildAgentProviderDefaults(),
   });
 });
 
@@ -1231,14 +1335,16 @@ app.get("/api/auth/admin/export/chats-zip", async (req, res) => {
 app.delete("/api/auth/admin/chats", async (req, res) => {
   if (!(await authenticateAdminRequest(req, res))) return;
 
-  const [chatStateResult, uploadedContextResult] = await Promise.all([
+  const [chatStateResult, uploadedContextResult, imageHistoryResult] = await Promise.all([
     ChatState.deleteMany({}),
     UploadedFileContext.deleteMany({}),
+    GeneratedImageHistory.deleteMany({}),
   ]);
   res.json({
     ok: true,
     deletedCount: Number(chatStateResult?.deletedCount || 0),
     deletedUploadedFileContextCount: Number(uploadedContextResult?.deletedCount || 0),
+    deletedImageHistoryCount: Number(imageHistoryResult?.deletedCount || 0),
   });
 });
 
@@ -1387,9 +1493,98 @@ app.post(
       res,
       body: req.body || {},
       files: req.files || [],
+      chatUserId: String(req.authUser?._id || ""),
     });
   },
 );
+
+app.get("/api/images/history", requireChatAuth, async (req, res) => {
+  const userId = sanitizeId(req.authUser?._id, "");
+  if (!userId) {
+    res.status(400).json({ error: "无效用户身份。" });
+    return;
+  }
+
+  const limit = sanitizeRuntimeInteger(req.query?.limit, 80, 1, 200);
+  let docs = [];
+  try {
+    docs = await GeneratedImageHistory.find(
+      {
+        userId,
+        expiresAt: { $gt: new Date() },
+      },
+      {
+        prompt: 1,
+        imageUrl: 1,
+        responseFormat: 1,
+        size: 1,
+        model: 1,
+        createdAt: 1,
+      },
+    )
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+  } catch (error) {
+    res.status(500).json({
+      error: error?.message || "读取图片历史失败，请稍后重试。",
+    });
+    return;
+  }
+
+  res.json({
+    ok: true,
+    items: Array.isArray(docs) ? docs.map(toGeneratedImageHistoryItem) : [],
+  });
+});
+
+app.delete("/api/images/history", requireChatAuth, async (req, res) => {
+  const userId = sanitizeId(req.authUser?._id, "");
+  if (!userId) {
+    res.status(400).json({ error: "无效用户身份。" });
+    return;
+  }
+
+  try {
+    const result = await GeneratedImageHistory.deleteMany({ userId });
+    res.json({
+      ok: true,
+      deletedCount: Number(result?.deletedCount || 0),
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error?.message || "批量清空图片历史失败，请稍后重试。",
+    });
+  }
+});
+
+app.delete("/api/images/history/:imageId", requireChatAuth, async (req, res) => {
+  const userId = sanitizeId(req.authUser?._id, "");
+  const imageId = sanitizeId(req.params?.imageId, "");
+  if (!userId || !imageId) {
+    res.status(400).json({ error: "无效参数。" });
+    return;
+  }
+
+  try {
+    const deleted = await GeneratedImageHistory.findOneAndDelete({
+      _id: imageId,
+      userId,
+    });
+    res.json({
+      ok: true,
+      deleted: !!deleted,
+    });
+  } catch (error) {
+    if (String(error?.name || "") === "CastError") {
+      res.status(400).json({ error: "无效图片 ID。" });
+      return;
+    }
+    res.status(500).json({
+      error: error?.message || "删除图片历史失败，请稍后重试。",
+    });
+  }
+});
 
 const distDir = path.resolve(process.cwd(), "dist");
 const distIndexHtml = path.join(distDir, "index.html");
@@ -1476,6 +1671,30 @@ function normalizeMessageContent(content) {
       const fileId = String(part.file_id || part.fileId || "").trim();
       if (!fileId) return;
       parts.push({ type, file_id: fileId });
+      return;
+    }
+
+    if (type === "file") {
+      const filePayload = normalizeOpenRouterFilePart(part);
+      if (filePayload) {
+        parts.push({ type: "file", file: filePayload });
+      }
+      return;
+    }
+
+    if (type === "input_audio") {
+      const audioPayload = normalizeOpenRouterAudioPart(part);
+      if (audioPayload) {
+        parts.push({ type: "input_audio", input_audio: audioPayload });
+      }
+      return;
+    }
+
+    if (type === "video_url") {
+      const videoUrl = extractInputVideoUrl(part);
+      if (videoUrl) {
+        parts.push({ type: "video_url", video_url: { url: videoUrl } });
+      }
     }
   });
 
@@ -1509,6 +1728,28 @@ function cloneNormalizedMessageContent(content) {
     if (imageUrl) {
       return { type: "image_url", image_url: { url: imageUrl } };
     }
+
+    if (type === "file") {
+      const filePayload = normalizeOpenRouterFilePart(part);
+      if (filePayload) {
+        return { type: "file", file: filePayload };
+      }
+    }
+
+    if (type === "input_audio") {
+      const audioPayload = normalizeOpenRouterAudioPart(part);
+      if (audioPayload) {
+        return { type: "input_audio", input_audio: audioPayload };
+      }
+    }
+
+    if (type === "video_url") {
+      const videoUrl = extractInputVideoUrl(part);
+      if (videoUrl) {
+        return { type: "video_url", video_url: { url: videoUrl } };
+      }
+    }
+
     return null;
   }).filter(Boolean);
 }
@@ -1701,60 +1942,215 @@ function attachVolcengineFileRefsToLatestUserMessage(messages, fileRefs) {
   };
 }
 
-async function attachFilesToLatestUserMessage(messages, files) {
-  if (!files || files.length === 0) return;
+async function attachFilesToLatestUserMessage(
+  messages,
+  files,
+  { provider = "openrouter", protocol = "chat" } = {},
+) {
+  if (!files || files.length === 0) return null;
 
-  let idx = -1;
+  if (provider === "openrouter" && protocol === "chat") {
+    return attachFilesToLatestUserMessageForOpenRouter(messages, files);
+  }
+  return attachFilesToLatestUserMessageByLocalParsing(messages, files);
+}
+
+function resolveLatestUserMessage(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return null;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].role === "user") {
-      idx = i;
-      break;
+    if (messages[i]?.role === "user") {
+      return messages[i];
     }
   }
-  if (idx === -1) return;
+  return null;
+}
 
-  const msg = messages[idx];
-  const parts = [];
+function buildInitialAttachmentParts(content) {
+  if (typeof content !== "string") return [];
+  const text = content.trim();
+  if (!text) return [];
+  return [{ type: "text", text: content }];
+}
 
-  if (typeof msg.content === "string" && msg.content.trim()) {
-    parts.push({ type: "text", text: msg.content });
+function buildDataUrlForBuffer(buffer, mime) {
+  if (!Buffer.isBuffer(buffer)) return "";
+  const safeMime = String(mime || "application/octet-stream")
+    .trim()
+    .toLowerCase();
+  return `data:${safeMime};base64,${buffer.toString("base64")}`;
+}
+
+function resolveOpenRouterAudioFormat({ mime, ext }) {
+  const normalizedExt = String(ext || "")
+    .trim()
+    .toLowerCase();
+  if (OPENROUTER_AUDIO_EXTENSIONS.has(normalizedExt)) {
+    return normalizedExt;
   }
 
-  for (const file of files) {
-    const mime = file.mimetype || "application/octet-stream";
+  const normalizedMime = String(mime || "")
+    .trim()
+    .toLowerCase();
+  if (!normalizedMime) return "";
+  const mapped = OPENROUTER_AUDIO_MIME_TO_FORMAT[normalizedMime];
+  if (mapped) return mapped;
+  if (!normalizedMime.startsWith("audio/")) return "";
 
-    if (mime.startsWith("image/")) {
-      const base64 = file.buffer.toString("base64");
-      const url = `data:${mime};base64,${base64}`;
-      parts.push({ type: "image_url", image_url: { url } });
+  const subtype = normalizedMime.split("/")[1]?.split(";")[0] || "";
+  if (!subtype) return "";
+  if (OPENROUTER_AUDIO_FORMATS.has(subtype)) return subtype;
+  if (subtype === "x-wav") return "wav";
+  if (subtype === "mp4") return "m4a";
+  return "";
+}
+
+function resolveOpenRouterVideoMime({ mime, ext }) {
+  const normalizedMime = String(mime || "")
+    .trim()
+    .toLowerCase();
+  if (normalizedMime.startsWith("video/")) {
+    if (normalizedMime.includes("mp4")) return "video/mp4";
+    if (normalizedMime.includes("mpeg")) return "video/mpeg";
+    if (normalizedMime.includes("quicktime") || normalizedMime.includes("mov")) {
+      return "video/mov";
+    }
+    if (normalizedMime.includes("webm")) return "video/webm";
+  }
+
+  const normalizedExt = String(ext || "")
+    .trim()
+    .toLowerCase();
+  if (normalizedExt === "mp4") return "video/mp4";
+  if (normalizedExt === "mpeg" || normalizedExt === "mpg") return "video/mpeg";
+  if (normalizedExt === "mov") return "video/mov";
+  if (normalizedExt === "webm") return "video/webm";
+  return "";
+}
+
+function buildOpenRouterFileInputPart(file) {
+  const safeBuffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from([]);
+  if (safeBuffer.length === 0) return null;
+
+  const mime = String(file?.mimetype || "")
+    .trim()
+    .toLowerCase();
+  const ext = getFileExtension(file?.originalname);
+  const safeName = sanitizeText(file?.originalname, "upload.bin", 180);
+
+  if (mime.startsWith("image/")) {
+    const imageUrl = buildDataUrlForBuffer(safeBuffer, mime || "image/jpeg");
+    if (!imageUrl) return null;
+    return { type: "image_url", image_url: { url: imageUrl } };
+  }
+
+  if (isPdfFile(ext, mime)) {
+    const fileData = buildDataUrlForBuffer(safeBuffer, "application/pdf");
+    if (!fileData) return null;
+    return {
+      type: "file",
+      file: {
+        filename: safeName || "document.pdf",
+        file_data: fileData,
+      },
+    };
+  }
+
+  const audioFormat = resolveOpenRouterAudioFormat({ mime, ext });
+  if (audioFormat) {
+    return {
+      type: "input_audio",
+      input_audio: {
+        data: safeBuffer.toString("base64"),
+        format: audioFormat,
+      },
+    };
+  }
+
+  const videoMime = resolveOpenRouterVideoMime({ mime, ext });
+  if (videoMime && OPENROUTER_VIDEO_EXTENSIONS.has(videoMime.replace("video/", ""))) {
+    const videoUrl = buildDataUrlForBuffer(safeBuffer, videoMime);
+    if (!videoUrl) return null;
+    return { type: "video_url", video_url: { url: videoUrl } };
+  }
+
+  return null;
+}
+
+async function buildParsedFilePreviewTextPart(file) {
+  const mime = file?.mimetype || "application/octet-stream";
+  let textContent = "";
+  let formatHint = "";
+
+  try {
+    const parsed = await parseFileContent(file);
+    textContent = parsed.text;
+    formatHint = parsed.hint;
+  } catch (error) {
+    textContent = "";
+    formatHint = `解析失败: ${error?.message || "unknown error"}`;
+  }
+
+  const normalized = clipText(textContent);
+  const fallbackPreview = `${String(
+    Buffer.isBuffer(file?.buffer) ? file.buffer.toString("base64") : "",
+  ).slice(0, 1600)}...`;
+  const preview = normalized || fallbackPreview;
+  const note =
+    formatHint ||
+    (normalized
+      ? "已解析文本内容。"
+      : "暂未支持该二进制格式，以下为 base64 预览。");
+
+  return {
+    type: "text",
+    text: `\n[附件: ${file?.originalname || "未命名文件"}]\nMIME: ${mime}\n说明: ${note}\n内容预览:\n${preview}`,
+  };
+}
+
+async function attachFilesToLatestUserMessageForOpenRouter(messages, files) {
+  const msg = resolveLatestUserMessage(messages);
+  if (!msg) return null;
+
+  const parts = buildInitialAttachmentParts(msg.content);
+  for (const file of files) {
+    const openRouterPart = buildOpenRouterFileInputPart(file);
+    if (openRouterPart) {
+      parts.push(openRouterPart);
       continue;
     }
 
-    let textContent = "";
-    let formatHint = "";
+    const fallback = await buildParsedFilePreviewTextPart(file);
+    if (fallback) parts.push(fallback);
+  }
 
-    try {
-      const parsed = await parseFileContent(file);
-      textContent = parsed.text;
-      formatHint = parsed.hint;
-    } catch (error) {
-      textContent = "";
-      formatHint = `解析失败: ${error?.message || "unknown error"}`;
+  if (parts.length === 0) return null;
+  msg.content = parts;
+  return {
+    messageId: sanitizeId(msg.id, ""),
+    content: parts,
+  };
+}
+
+async function attachFilesToLatestUserMessageByLocalParsing(messages, files) {
+  const msg = resolveLatestUserMessage(messages);
+  if (!msg) return null;
+
+  const parts = buildInitialAttachmentParts(msg.content);
+  for (const file of files) {
+    const mime = String(file?.mimetype || "application/octet-stream")
+      .trim()
+      .toLowerCase();
+
+    if (mime.startsWith("image/")) {
+      const imageUrl = buildDataUrlForBuffer(file?.buffer, mime);
+      if (imageUrl) {
+        parts.push({ type: "image_url", image_url: { url: imageUrl } });
+      }
+      continue;
     }
 
-    const normalized = clipText(textContent);
-    const fallbackPreview = `${file.buffer.toString("base64").slice(0, 1600)}...`;
-    const preview = normalized || fallbackPreview;
-    const note =
-      formatHint ||
-      (normalized
-        ? "已解析文本内容。"
-        : "暂未支持该二进制格式，以下为 base64 预览。");
-
-    parts.push({
-      type: "text",
-      text: `\n[附件: ${file.originalname}]\nMIME: ${mime}\n说明: ${note}\n内容预览:\n${preview}`,
-    });
+    const fallback = await buildParsedFilePreviewTextPart(file);
+    if (fallback) parts.push(fallback);
   }
 
   if (parts.length > 0) {
@@ -1792,7 +2188,8 @@ async function streamAgentResponse({
   }
   const protocol = protocolInfo.value;
   const shouldUsePersistentFileContext =
-    provider === "volcengine" && protocol === "responses";
+    (provider === "volcengine" && protocol === "responses") ||
+    (provider === "openrouter" && protocol === "chat");
   const providerConfig = getProviderConfig(provider);
   if (!providerConfig.apiKey) {
     res.status(500).json({
@@ -1941,6 +2338,7 @@ async function streamAgentResponse({
     uploadedFileContextRecord = await attachFilesToLatestUserMessage(
       requestMessages,
       files,
+      { provider, protocol },
     );
     if (shouldUsePersistentFileContext && uploadedFileContextRecord?.messageId) {
       await saveUploadedFileContext({
@@ -1995,6 +2393,7 @@ async function streamAgentResponse({
           model,
           messages: providerMessages,
           systemPrompt: composedSystemPrompt,
+          provider,
           config,
           reasoning,
         });
@@ -2106,7 +2505,7 @@ async function streamAgentResponse({
   }
 }
 
-async function streamSeedreamImageGeneration({ res, body, files = [] }) {
+async function streamSeedreamImageGeneration({ res, body, files = [], chatUserId = "" }) {
   const imageConfig = getVolcengineImageGenerationConfig();
   if (!imageConfig.apiKey) {
     res.status(500).json({ error: imageConfig.missingKeyMessage });
@@ -2144,6 +2543,24 @@ async function streamSeedreamImageGeneration({ res, body, files = [] }) {
     inputImageCount: request.inputImageCount,
     size: request.payload.size || "default",
   });
+
+  const generatedImageByIndex = new Map();
+  const collectGeneratedImage = (payload) => {
+    const imageIndex = sanitizeRuntimeInteger(payload?.imageIndex, 0, 0, 9999);
+    const size = sanitizeText(payload?.size, "", 80);
+    const model = sanitizeText(payload?.model, "", 160);
+    const imageUrl = resolveGeneratedImageOutputUrl({
+      url: payload?.url,
+      b64Json: payload?.b64Json,
+    });
+    if (!imageUrl) return;
+    generatedImageByIndex.set(String(imageIndex), {
+      imageIndex,
+      imageUrl,
+      size,
+      model,
+    });
+  };
 
   let upstream;
   try {
@@ -2183,10 +2600,24 @@ async function streamSeedreamImageGeneration({ res, body, files = [] }) {
       if (!upstream.body) {
         throw new Error("图片生成上游未返回有效流式内容。");
       }
-      await pipeVolcengineImageGenerationSse(upstream, res);
+      await pipeVolcengineImageGenerationSse(upstream, res, {
+        onImagePartial: collectGeneratedImage,
+      });
     } else {
       const result = await safeReadJson(upstream);
-      emitSeedreamImageGenerationNonStreamEvents(result, res);
+      emitSeedreamImageGenerationNonStreamEvents(result, res, {
+        onImagePartial: collectGeneratedImage,
+      });
+    }
+
+    if (generatedImageByIndex.size > 0) {
+      await saveGeneratedImageHistory({
+        userId: chatUserId,
+        prompt: request.prompt,
+        responseFormat: request.payload.response_format,
+        model: request.payload.model,
+        images: Array.from(generatedImageByIndex.values()),
+      });
     }
     writeEvent(res, "done", { ok: true });
   } catch (error) {
@@ -2356,7 +2787,7 @@ function normalizeSeedreamImageMimeType(value) {
   return "";
 }
 
-async function pipeVolcengineImageGenerationSse(upstream, res) {
+async function pipeVolcengineImageGenerationSse(upstream, res, handlers = {}) {
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
@@ -2385,14 +2816,16 @@ async function pipeVolcengineImageGenerationSse(upstream, res) {
 
     if (type === "image_generation.partial_succeeded") {
       sawAnyImageEvent = true;
-      writeEvent(res, "image_partial", {
+      const partialPayload = {
         model,
         created,
         imageIndex,
         url: String(json?.url || ""),
         b64Json: String(json?.b64_json || ""),
         size: sanitizeText(json?.size, "", 80),
-      });
+      };
+      writeEvent(res, "image_partial", partialPayload);
+      handlers.onImagePartial?.(partialPayload);
       return false;
     }
 
@@ -2470,7 +2903,7 @@ async function pipeVolcengineImageGenerationSse(upstream, res) {
   }
 }
 
-function emitSeedreamImageGenerationNonStreamEvents(result, res) {
+function emitSeedreamImageGenerationNonStreamEvents(result, res, handlers = {}) {
   const payload = result && typeof result === "object" ? result : {};
   const model = sanitizeText(payload?.model, "", 160);
   const created = Number.isFinite(Number(payload?.created))
@@ -2497,14 +2930,16 @@ function emitSeedreamImageGenerationNonStreamEvents(result, res) {
     }
 
     const imageObj = item && typeof item === "object" ? item : {};
-    writeEvent(res, "image_partial", {
+    const partialPayload = {
       model,
       created,
       imageIndex: idx,
       url: String(imageObj.url || ""),
       b64Json: String(imageObj.b64_json || ""),
       size: sanitizeText(imageObj.size, "", 80),
-    });
+    };
+    writeEvent(res, "image_partial", partialPayload);
+    handlers.onImagePartial?.(partialPayload);
   });
 
   if (payload?.error && typeof payload.error === "object") {
@@ -2529,6 +2964,100 @@ function emitSeedreamImageGenerationNonStreamEvents(result, res) {
     created,
     usage: sanitizeImageGenerationUsage(payload?.usage),
   });
+}
+
+function buildGeneratedImageHistoryExpireAt() {
+  return new Date(Date.now() + GENERATED_IMAGE_HISTORY_TTL_MS);
+}
+
+function normalizeGeneratedImageHistoryResponseFormat(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "b64_json") return "b64_json";
+  return "url";
+}
+
+function normalizeGeneratedImageStoreUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (/^https?:\/\//i.test(text)) {
+    return text.slice(0, 4000);
+  }
+  if (/^data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+$/i.test(text)) {
+    if (text.length > 12 * 1024 * 1024) return "";
+    return text;
+  }
+  return "";
+}
+
+function resolveGeneratedImageOutputUrl({ url, b64Json }) {
+  const direct = normalizeGeneratedImageStoreUrl(url);
+  if (direct) return direct;
+
+  const b64 = String(b64Json || "")
+    .trim()
+    .replace(/\s+/g, "");
+  if (!b64) return "";
+  return normalizeGeneratedImageStoreUrl(`data:image/png;base64,${b64}`);
+}
+
+async function saveGeneratedImageHistory({
+  userId,
+  prompt,
+  responseFormat,
+  model,
+  images,
+}) {
+  const safeUserId = sanitizeId(userId, "");
+  if (!safeUserId) return;
+
+  const safePrompt = sanitizeText(prompt, "", 2000);
+  const safeResponseFormat = normalizeGeneratedImageHistoryResponseFormat(responseFormat);
+  const safeModel = sanitizeText(model, "", 160);
+  const sourceImages = Array.isArray(images) ? images : [];
+  if (sourceImages.length === 0) return;
+
+  const docs = sourceImages
+    .slice(0, 20)
+    .map((item) => {
+      const imageUrl = normalizeGeneratedImageStoreUrl(
+        item?.imageUrl || item?.url || "",
+      );
+      if (!imageUrl) return null;
+      return {
+        userId: safeUserId,
+        prompt: safePrompt,
+        imageUrl,
+        responseFormat: safeResponseFormat,
+        size: sanitizeText(item?.size, "", 80),
+        model: sanitizeText(item?.model, safeModel, 160),
+        expiresAt: buildGeneratedImageHistoryExpireAt(),
+      };
+    })
+    .filter(Boolean);
+  if (docs.length === 0) return;
+
+  try {
+    await GeneratedImageHistory.insertMany(docs, { ordered: false });
+  } catch (error) {
+    console.warn(
+      `Failed to persist generated image history (${safeUserId}):`,
+      error?.message || error,
+    );
+  }
+}
+
+function toGeneratedImageHistoryItem(doc) {
+  return {
+    id: sanitizeId(doc?._id, ""),
+    prompt: sanitizeText(doc?.prompt, "", 2000),
+    url: normalizeGeneratedImageStoreUrl(doc?.imageUrl || ""),
+    responseFormat: normalizeGeneratedImageHistoryResponseFormat(doc?.responseFormat),
+    size: sanitizeText(doc?.size, "", 80),
+    model: sanitizeText(doc?.model, "", 160),
+    createdAt: sanitizeIsoDate(doc?.createdAt) || new Date().toISOString(),
+  };
 }
 
 function sanitizeImageGenerationUsage(raw) {
@@ -2602,7 +3131,14 @@ function getVolcengineImageGenerationConfig() {
   };
 }
 
-function buildChatRequestPayload({ model, messages, systemPrompt, config, reasoning }) {
+function buildChatRequestPayload({
+  model,
+  messages,
+  systemPrompt,
+  provider,
+  config,
+  reasoning,
+}) {
   const finalMessages = [];
   if (systemPrompt) {
     finalMessages.push({ role: "system", content: systemPrompt });
@@ -2647,7 +3183,31 @@ function buildChatRequestPayload({ model, messages, systemPrompt, config, reason
   if (reasoning.enabled) {
     payload.reasoning = { effort: reasoning.effort };
   }
+
+  if (provider === "openrouter") {
+    payload.include_reasoning = !!reasoning.enabled;
+
+    const plugins = buildOpenRouterPlugins({ config });
+    if (plugins.length > 0) {
+      payload.plugins = plugins;
+    }
+  }
+
   return payload;
+}
+
+function buildOpenRouterPlugins({ config }) {
+  const plugins = [];
+
+  const pdfEngine = sanitizeOpenRouterPdfEngine(config?.openrouterPdfEngine);
+  if (pdfEngine !== "auto") {
+    plugins.push({
+      id: "file-parser",
+      pdf: { engine: pdfEngine },
+    });
+  }
+
+  return plugins;
 }
 
 function buildResponsesRequestPayload({
@@ -3014,6 +3574,63 @@ function extractInputImageUrl(part) {
 
   const url = String(part.url || "").trim();
   return url || "";
+}
+
+function extractInputVideoUrl(part) {
+  if (typeof part.video_url === "string") {
+    const direct = part.video_url.trim();
+    return direct || "";
+  }
+
+  if (part.video_url && typeof part.video_url === "object") {
+    const nested = String(part.video_url.url || "").trim();
+    if (nested) return nested;
+  }
+
+  if (typeof part.videoUrl === "string") {
+    const camel = part.videoUrl.trim();
+    return camel || "";
+  }
+
+  if (part.videoUrl && typeof part.videoUrl === "object") {
+    const camelNested = String(part.videoUrl.url || "").trim();
+    if (camelNested) return camelNested;
+  }
+
+  const url = String(part.url || "").trim();
+  return url || "";
+}
+
+function normalizeOpenRouterFilePart(part) {
+  const file = part?.file && typeof part.file === "object" ? part.file : {};
+  const rawFileData =
+    file.file_data ?? file.fileData ?? file.url ?? part?.file_data ?? part?.fileData;
+  const fileData = String(rawFileData || "").trim();
+  if (!fileData) return null;
+
+  const filename = sanitizeText(file.filename || file.name || "", "", 180);
+  const payload = {
+    file_data: fileData,
+  };
+  if (filename) {
+    payload.filename = filename;
+  }
+  return payload;
+}
+
+function normalizeOpenRouterAudioPart(part) {
+  const audio =
+    part?.input_audio && typeof part.input_audio === "object"
+      ? part.input_audio
+      : part?.inputAudio && typeof part.inputAudio === "object"
+        ? part.inputAudio
+        : {};
+  const data = String(audio.data || "").trim();
+  const format = String(audio.format || "")
+    .trim()
+    .toLowerCase();
+  if (!data || !format) return null;
+  return { data, format };
 }
 
 function mapReasoningEffortToResponses(effort) {
@@ -4297,6 +4914,29 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     source.webSearchSourceToutiao,
     defaults.webSearchSourceToutiao,
   );
+  const openrouterPreset = sanitizeOpenRouterPreset(source.openrouterPreset);
+  const openrouterIncludeReasoning = sanitizeRuntimeBoolean(
+    source.openrouterIncludeReasoning,
+    defaults.openrouterIncludeReasoning,
+  );
+  const openrouterUseWebPlugin = sanitizeRuntimeBoolean(
+    source.openrouterUseWebPlugin,
+    defaults.openrouterUseWebPlugin,
+  );
+  const openrouterWebPluginEngine = sanitizeOpenRouterWebPluginEngine(
+    source.openrouterWebPluginEngine,
+  );
+  const openrouterWebPluginMaxResults = sanitizeRuntimeInteger(
+    source.openrouterWebPluginMaxResults,
+    defaults.openrouterWebPluginMaxResults,
+    1,
+    10,
+  );
+  const openrouterUseResponseHealing = sanitizeRuntimeBoolean(
+    source.openrouterUseResponseHealing,
+    defaults.openrouterUseResponseHealing,
+  );
+  const openrouterPdfEngine = sanitizeOpenRouterPdfEngine(source.openrouterPdfEngine);
 
   return {
     provider,
@@ -4323,6 +4963,13 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     webSearchSourceDouyin,
     webSearchSourceMoji,
     webSearchSourceToutiao,
+    openrouterPreset,
+    openrouterIncludeReasoning,
+    openrouterUseWebPlugin,
+    openrouterWebPluginEngine,
+    openrouterWebPluginMaxResults,
+    openrouterUseResponseHealing,
+    openrouterPdfEngine,
   };
 }
 
@@ -4394,6 +5041,29 @@ function sanitizeRuntimeModel(value) {
     .trim()
     .slice(0, 180);
   return model;
+}
+
+function sanitizeOpenRouterPreset(value) {
+  return String(value || "")
+    .trim()
+    .slice(0, 120);
+}
+
+function sanitizeOpenRouterWebPluginEngine(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "native") return "native";
+  if (key === "exa") return "exa";
+  return "auto";
+}
+
+function sanitizeOpenRouterPdfEngine(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "pdf-text" || key === "mistral-ocr" || key === "native") return key;
+  return "auto";
 }
 
 function sanitizeEnableThinking(value) {
@@ -5220,6 +5890,12 @@ async function startServer() {
       error?.message || error,
     );
   });
+  await ensureGeneratedImageHistoryIndexes().catch((error) => {
+    console.warn(
+      "Failed to ensure generated image history indexes:",
+      error?.message || error,
+    );
+  });
 
   app.listen(port, () => {
     console.log(`API server listening on http://localhost:${port}`);
@@ -5246,6 +5922,24 @@ async function ensureUploadedFileContextIndexes() {
   }
 
   await ensureUploadedFileContextTtlIndex(collection, existingIndexes);
+}
+
+async function ensureGeneratedImageHistoryIndexes() {
+  const collection = GeneratedImageHistory.collection;
+  let existingIndexes = await readCollectionIndexesSafe(collection);
+
+  const needUserCreatedAtIndex = !hasEquivalentMongoIndex(existingIndexes, {
+    key: { userId: 1, createdAt: -1 },
+  });
+  if (needUserCreatedAtIndex) {
+    await collection.createIndex(
+      { userId: 1, createdAt: -1 },
+      { name: "ix_generated_image_histories_user_created_at_desc" },
+    );
+    existingIndexes = await readCollectionIndexesSafe(collection);
+  }
+
+  await ensureGeneratedImageHistoryTtlIndex(collection, existingIndexes);
 }
 
 function hasEquivalentMongoIndex(existingIndexes, { key, unique, expireAfterSeconds }) {
@@ -5330,6 +6024,39 @@ async function ensureUploadedFileContextTtlIndex(collection, existingIndexes) {
     {
       expireAfterSeconds: 0,
       name: "ttl_uploaded_file_context_expires_at",
+    },
+  );
+}
+
+async function ensureGeneratedImageHistoryTtlIndex(collection, existingIndexes) {
+  const ttlSpec = { key: { expiresAt: 1 }, expireAfterSeconds: 0 };
+  if (hasEquivalentMongoIndex(existingIndexes, ttlSpec)) {
+    return;
+  }
+
+  const sameKeyIndex = findMongoIndexByKey(existingIndexes, ttlSpec.key);
+  if (sameKeyIndex?.name) {
+    try {
+      await collection.db.command({
+        collMod: collection.collectionName,
+        index: {
+          name: sameKeyIndex.name,
+          expireAfterSeconds: 0,
+        },
+      });
+      return;
+    } catch (error) {
+      if (String(sameKeyIndex.name) !== "_id_") {
+        await collection.dropIndex(sameKeyIndex.name);
+      }
+    }
+  }
+
+  await collection.createIndex(
+    { expiresAt: 1 },
+    {
+      expireAfterSeconds: 0,
+      name: "ttl_generated_image_histories_expires_at",
     },
   );
 }
