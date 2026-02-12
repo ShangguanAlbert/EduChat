@@ -210,16 +210,23 @@ export default function ChatPage() {
         DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
     });
 
-  function patchAssistantMessage(sessionId, assistantId, updater) {
+  function patchAssistantMessage(sessionId, assistantId, updater, onPatched) {
+    if (typeof updater !== "function") return;
     setSessionMessages((prev) => {
       const list = prev[sessionId] || [];
       let touched = false;
+      let patchedMessage = null;
       const nextList = list.map((item) => {
         if (item?.id !== assistantId || item?.role !== "assistant") return item;
         touched = true;
-        return updater(item);
+        const nextMessage = updater(item);
+        patchedMessage = nextMessage;
+        return nextMessage;
       });
       if (!touched) return prev;
+      if (typeof onPatched === "function" && patchedMessage) {
+        onPatched(patchedMessage);
+      }
       return {
         ...prev,
         [sessionId]: nextList,
@@ -933,7 +940,6 @@ export default function ChatPage() {
       assistantIdToRegenerate,
       () => regeneratingAssistant,
     );
-    queueMessageUpsert(currentSessionId, regeneratingAssistant);
 
     const formData = new FormData();
     formData.append("agentId", agent);
@@ -1015,18 +1021,17 @@ export default function ChatPage() {
         streamFlushTimerRef.current = null;
       }
       flushStreamBuffer();
-      let completedMessageForSave = null;
-      patchAssistantMessage(currentSessionId, assistantIdToRegenerate, (message) => {
-        const completedMessage = {
+      patchAssistantMessage(
+        currentSessionId,
+        assistantIdToRegenerate,
+        (message) => ({
           ...message,
           streaming: false,
-        };
-        completedMessageForSave = completedMessage;
-        return completedMessage;
-      });
-      if (completedMessageForSave) {
-        queueMessageUpsert(currentSessionId, completedMessageForSave);
-      }
+        }),
+        (completedMessage) => {
+          queueMessageUpsert(currentSessionId, completedMessage);
+        },
+      );
       streamTargetRef.current = { sessionId: "", assistantId: "", mode: "draft" };
       setIsStreaming(false);
     }
