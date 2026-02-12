@@ -213,8 +213,6 @@ export default function ImageGenerationPage() {
   const [inputFiles, setInputFiles] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorText, setErrorText] = useState("");
-  const [meta, setMeta] = useState(null);
-  const [usage, setUsage] = useState(null);
   const [items, setItems] = useState([]);
 
   const [historyItems, setHistoryItems] = useState([]);
@@ -259,22 +257,14 @@ export default function ImageGenerationPage() {
         imageIndex: Number(item.imageIndex),
         url: normalizePreviewUrl(item.url),
         size: String(item.size || ""),
-        model: String(item.model || meta?.model || ""),
+        model: String(item.model || ""),
         prompt: String(prompt || "").trim(),
         responseFormat: String(responseFormat || "url"),
         createdAt: item?.createdAt || new Date().toISOString(),
       }))
       .filter((item) => !!item.url)
       .sort((a, b) => a.imageIndex - b.imageIndex);
-  }, [items, meta, prompt, responseFormat]);
-
-  const failedItems = useMemo(
-    () =>
-      (Array.isArray(items) ? items : []).filter(
-        (item) => String(item?.status || "") === "failed",
-      ),
-    [items],
-  );
+  }, [items, prompt, responseFormat]);
 
   const historyPreviewItems = useMemo(() => {
     return (Array.isArray(historyItems) ? historyItems : [])
@@ -448,8 +438,6 @@ export default function ImageGenerationPage() {
 
     setIsGenerating(true);
     setErrorText("");
-    setMeta(null);
-    setUsage(null);
     setItems([]);
     setSelectedPreviewKey("");
 
@@ -468,9 +456,6 @@ export default function ImageGenerationPage() {
         imageUrls,
         files: inputFiles,
         handlers: {
-          onMeta: (payload) => {
-            setMeta(payload || null);
-          },
           onImagePartial: (payload) => {
             const imageIndex = Number(payload?.imageIndex);
             if (!Number.isFinite(imageIndex)) return;
@@ -506,9 +491,6 @@ export default function ImageGenerationPage() {
               size: "",
               url: "",
             });
-          },
-          onUsage: (payload) => {
-            setUsage(payload?.usage || null);
           },
           onError: (message) => {
             streamError = String(message || "图片生成失败。");
@@ -704,22 +686,6 @@ export default function ImageGenerationPage() {
               </div>
             )}
 
-            <div className="image-meta-row">
-              {meta ? (
-                <>
-                  <span>输入参考图：{meta.inputImageCount ?? 0} 张</span>
-                  <span>模式：{meta.sequentialImageGeneration || "disabled"}</span>
-                </>
-              ) : null}
-              {usage ? (
-                <>
-                  <span>成功图片：{usage.generatedImages ?? 0}</span>
-                  <span>输出 Token：{usage.outputTokens ?? 0}</span>
-                  <span>总 Token：{usage.totalTokens ?? 0}</span>
-                </>
-              ) : null}
-            </div>
-
             <div className="image-preview-canvas">
               {selectedPreview ? (
                 <>
@@ -729,17 +695,6 @@ export default function ImageGenerationPage() {
                     className="image-preview-main"
                     loading="lazy"
                   />
-
-                  <div className="image-preview-caption">
-                    <div className="image-preview-caption-main">
-                      {selectedPreview.prompt || "未提供提示词"}
-                    </div>
-                    <div className="image-preview-caption-sub">
-                      {selectedPreview.size ? <span>{selectedPreview.size}</span> : null}
-                      {selectedPreview.model ? <span>{selectedPreview.model}</span> : null}
-                      <span>{selectedPreview.responseFormat === "b64_json" ? "Base64" : "URL"}</span>
-                    </div>
-                  </div>
 
                   <div className="image-preview-actions">
                     <a
@@ -772,41 +727,9 @@ export default function ImageGenerationPage() {
               ) : (
                 <div className="image-empty">
                   {isGenerating ? <Loader2 size={20} className="spin" /> : <ImagePlus size={20} />}
-                  <p>{isGenerating ? "正在等待模型返回图片..." : "暂未生成图片"}</p>
                 </div>
               )}
             </div>
-
-            {generatedPreviewItems.length > 0 && (
-              <div className="image-generated-strip" role="list" aria-label="本轮生成结果">
-                {generatedPreviewItems.map((item) => {
-                  const active = selectedPreview?.key === item.key;
-                  return (
-                    <button
-                      type="button"
-                      key={item.key}
-                      className={`image-generated-thumb${active ? " is-active" : ""}`}
-                      onClick={() => setSelectedPreviewKey(item.key)}
-                      disabled={termsLocked}
-                    >
-                      <img src={item.url} alt={`生成结果 ${item.imageIndex + 1}`} loading="lazy" />
-                      <span>第 {item.imageIndex + 1} 张</span>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-
-            {failedItems.length > 0 && (
-              <div className="image-failed-list">
-                {failedItems.map((item) => (
-                  <div key={`failed-${item.imageIndex}`} className="image-failed-item">
-                    <span>第 {item.imageIndex + 1} 张失败</span>
-                    <span>{item.errorMessage || "图片生成失败"}</span>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
 
           <div className="image-capsule-wrap">
