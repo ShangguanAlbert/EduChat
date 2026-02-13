@@ -1,0 +1,146 @@
+:root {
+  --motion-spring-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-smooth-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-side-enter: cubic-bezier(0.12, 0.9, 0.24, 1);
+  --motion-side-exit: cubic-bezier(0.55, 0.02, 0.72, 0.2);
+  --motion-sidebar-sync: cubic-bezier(0.65, 0, 0.35, 1);
+  --motion-sidebar-duration: 360ms;
+}
+
+@media (min-width: 721px) {
+  .chat-layout .sidebar {
+    width: var(--layout-sidebar-width);
+    min-width: var(--layout-sidebar-width);
+    overflow: hidden;
+    transition:
+      width var(--motion-sidebar-duration) var(--motion-sidebar-sync),
+      border-color var(--motion-sidebar-duration) var(--motion-sidebar-sync),
+      box-shadow var(--motion-sidebar-duration) var(--motion-sidebar-sync);
+    will-change: width;
+  }
+
+  .chat-layout.sidebar-hidden .sidebar {
+    display: flex;
+    border-right-color: transparent;
+    box-shadow: none;
+    pointer-events: none;
+  }
+
+  .chat-layout .sidebar > * {
+    transition:
+      opacity var(--motion-sidebar-duration) var(--motion-sidebar-sync),
+      transform var(--motion-sidebar-duration) var(--motion-sidebar-sync);
+  }
+
+  .chat-layout.sidebar-hidden .sidebar > * {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+
+  .chat-input-wrap {
+    transition: left var(--motion-sidebar-duration) var(--motion-sidebar-sync);
+  }
+}
+
+@media (max-width: 720px) {
+  .chat-layout .sidebar {
+    transition:
+      transform var(--motion-sidebar-duration) var(--motion-sidebar-sync),
+      box-shadow var(--motion-sidebar-duration) var(--motion-sidebar-sync);
+    box-shadow: none;
+  }
+
+  .chat-layout.sidebar-mobile-open .sidebar {
+    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.22);
+  }
+
+  .chat-layout .sidebar-backdrop {
+    display: block;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--motion-sidebar-duration) var(--motion-sidebar-sync);
+  }
+
+  .chat-layout.sidebar-mobile-open .sidebar-backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.sidebar-chat-row {
+  transform-origin: left center;
+  will-change: transform, opacity, filter, max-height, margin;
+}
+
+.sidebar-chat-row.entering {
+  animation: sidebar-row-enter 560ms var(--motion-side-enter);
+}
+
+.sidebar-chat-row.exiting {
+  animation: sidebar-row-exit 420ms var(--motion-side-exit) forwards;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+@keyframes sidebar-row-enter {
+  from {
+    opacity: 0;
+    filter: blur(3px);
+    transform: translateY(-10px) scale(0.985);
+  }
+  68% {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(1px) scale(1.004);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes sidebar-row-exit {
+  from {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateX(0) scale(1);
+    max-height: 56px;
+    margin-top: 0;
+    margin-bottom: 0;
+  }
+  60% {
+    opacity: 0.2;
+    filter: blur(0.6px);
+    transform: translateX(-28px) scale(0.985);
+  }
+  to {
+    opacity: 0;
+    filter: blur(2px);
+    transform: translateX(-58px) scale(0.97);
+    max-height: 0;
+    margin-top: -3px;
+    margin-bottom: -3px;
+  }
+}
+
+.chat-logout-tip,
+.chat-scroll-latest-tip {
+  opacity: 0;
+  filter: blur(2px);
+  transform: translate(-50%, 6px) scale(0.92);
+  transform-origin: center top;
+  transition:
+    opacity 260ms var(--motion-smooth-out),
+    transform 380ms var(--motion-spring-out),
+    filter 300ms var(--motion-smooth-out);
+}
+
+.chat-logout-btn:hover .chat-logout-tip,
+.chat-logout-btn:focus-visible .chat-logout-tip,
+.chat-scroll-latest-btn:hover .chat-scroll-latest-tip,
+.chat-scroll-latest-btn:focus-visible .chat-scroll-latest-tip {
+  opacity: 1;
+  filter: blur(0);
+  transform: translate(-50%, 0) scale(1);
+}

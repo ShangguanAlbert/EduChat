@@ -56,6 +56,8 @@ const HISTORY_GROUP_LABELS = Object.freeze({
   earlier: "更早",
 });
 const IMAGE_TERMS_ACCEPTED_HASH_STORAGE_KEY = "educhat:image-generation:terms-hash";
+const IMAGE_TERMS_CONTENT = String(imageGenerationTermsMarkdown || "").trim();
+const IMAGE_TERMS_HASH = computeStringHash(IMAGE_TERMS_CONTENT);
 
 function computeStringHash(input) {
   const text = String(input || "");
@@ -65,6 +67,14 @@ function computeStringHash(input) {
     hash = Math.imul(hash, 16777619);
   }
   return String(hash >>> 0);
+}
+
+function readStoredTermsAcceptedHash() {
+  try {
+    return String(localStorage.getItem(IMAGE_TERMS_ACCEPTED_HASH_STORAGE_KEY) || "").trim();
+  } catch {
+    return "";
+  }
 }
 
 function formatHistoryTime(value) {
@@ -221,17 +231,16 @@ export default function ImageGenerationPage() {
   const [historyDeletingId, setHistoryDeletingId] = useState("");
   const [historyClearing, setHistoryClearing] = useState(false);
   const [selectedPreviewKey, setSelectedPreviewKey] = useState("");
-  const [termsAgreed, setTermsAgreed] = useState(false);
+  const [termsAgreed, setTermsAgreed] = useState(
+    () => readStoredTermsAcceptedHash() === IMAGE_TERMS_HASH,
+  );
   const [showTermsModal, setShowTermsModal] = useState(false);
 
   const returnContextFromState = normalizeImageReturnContext(
     location.state?.returnContext || location.state?.restoreContext,
   );
-  const termsContent = useMemo(
-    () => String(imageGenerationTermsMarkdown || "").trim(),
-    [],
-  );
-  const termsHash = useMemo(() => computeStringHash(termsContent), [termsContent]);
+  const termsContent = IMAGE_TERMS_CONTENT;
+  const termsHash = IMAGE_TERMS_HASH;
   const termsLocked = !termsAgreed;
 
   const imageUrls = useMemo(() => {
@@ -325,6 +334,7 @@ export default function ImageGenerationPage() {
     }
     return null;
   }, [generatedPreviewItems, historyPreviewItems, previewMap, selectedPreviewKey]);
+  const showGeneratingPlaceholder = isGenerating && generatedPreviewItems.length === 0;
 
   const loadHistory = useCallback(async ({ silent = false } = {}) => {
     if (termsLocked) return;
@@ -348,17 +358,6 @@ export default function ImageGenerationPage() {
     if (!returnContextFromState) return;
     saveImageReturnContext(returnContextFromState);
   }, [returnContextFromState]);
-
-  useEffect(() => {
-    try {
-      const storedHash = String(
-        localStorage.getItem(IMAGE_TERMS_ACCEPTED_HASH_STORAGE_KEY) || "",
-      ).trim();
-      setTermsAgreed(storedHash === termsHash);
-    } catch {
-      setTermsAgreed(false);
-    }
-  }, [termsHash]);
 
   useEffect(() => {
     if (termsLocked) {
@@ -589,11 +588,9 @@ export default function ImageGenerationPage() {
         </div>
       </header>
 
-      {termsLocked && (
-        <div className="image-terms-lock-tip">
-          请先在右上角勾选并同意《图片生成功能服务条款》，再使用图片生成能力。
-        </div>
-      )}
+      <div className={`image-terms-lock-tip${termsLocked ? "" : " is-hidden"}`} aria-hidden={!termsLocked}>
+        请先在右上角勾选并同意《图片生成功能服务条款》，再使用图片生成能力。
+      </div>
 
       <form className={`image-workspace${termsLocked ? " is-locked" : ""}`} onSubmit={handleGenerate}>
         <section className="image-stage-panel">
@@ -687,16 +684,28 @@ export default function ImageGenerationPage() {
             )}
 
             <div className="image-preview-canvas">
-              {selectedPreview ? (
+              {showGeneratingPlaceholder ? (
+                <div className="image-empty">
+                  <Loader2 size={20} className="spin" />
+                  <span>图片正在生成……</span>
+                </div>
+              ) : selectedPreview ? (
                 <>
                   <img
+                    key={`${selectedPreview.key}-${selectedPreview.url}`}
                     src={selectedPreview.url}
                     alt="生成图片预览"
-                    className="image-preview-main"
+                    className={`image-preview-main${
+                      selectedPreview.source === "generated" ? " is-generated" : ""
+                    }`}
                     loading="lazy"
                   />
 
-                  <div className="image-preview-actions">
+                  <div
+                    className={`image-preview-actions${
+                      selectedPreview.source === "generated" ? " is-generated" : ""
+                    }`}
+                  >
                     <a
                       href={selectedPreview.url}
                       download={makeDownloadName(selectedPreview)}

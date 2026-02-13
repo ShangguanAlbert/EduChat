@@ -38,7 +38,6 @@ import "../styles/admin-settings.css";
 
 const AUTO_SAVE_MS = 5 * 60 * 1000;
 const PROVIDER_OPTIONS = [
-  { value: "inherit", label: "跟随 .env 默认" },
   { value: "openrouter", label: "OpenRouter" },
   { value: "volcengine", label: "火山引擎 Ark" },
   { value: "aliyun", label: "阿里云 DashScope" },
@@ -1411,7 +1410,7 @@ export default function AdminSettingsPage() {
         )}
 
         <div className="admin-grid">
-          <section className="admin-panel">
+          <section className="admin-panel admin-panel-prompt">
             <div className="admin-panel-head">
               <h2>提示词设置</h2>
               <span>{selectedAgentName}</span>
@@ -1423,7 +1422,7 @@ export default function AdminSettingsPage() {
             </label>
             <textarea
               id="admin-prompt-input"
-              className="admin-textarea"
+              className="admin-textarea admin-prompt-textarea"
               rows={14}
               value={selectedPrompt}
               onChange={(e) => updatePrompt(e.target.value)}
@@ -1431,7 +1430,7 @@ export default function AdminSettingsPage() {
               disabled={loading}
             />
 
-            <div className="admin-tip-card">
+            <div className="admin-tip-card admin-default-prompt-card">
               <p className="admin-tip-title">
                 <span>默认系统提示词</span>
                 <InfoHint text="默认值来自 .env 的 DEFAULT_SYSTEM_PROMPT。" />
@@ -1452,7 +1451,7 @@ export default function AdminSettingsPage() {
               <div className="admin-field-row split">
                 <span>服务商</span>
                 <AdminPortalSelect
-                  value={selectedRuntime.provider}
+                  value={selectedProvider}
                   options={PROVIDER_OPTIONS}
                   onChange={(next) => updateRuntimeField("provider", next)}
                   disabled={loading}
@@ -1474,24 +1473,24 @@ export default function AdminSettingsPage() {
                   disabled={loading}
                 />
               </label>
-              {matchedTokenProfile ? (
-                <p className="admin-field-note">
-                  {showOpenRouterPanel
-                    ? `已自动匹配模型规格：上下文 ${matchedTokenProfile.contextWindowTokens}，最大输入 ${matchedTokenProfile.maxInputTokens}，最大输出 ${matchedTokenProfile.maxOutputTokens}。OpenRouter 实际下发仅 max_tokens（最大输出）。`
-                    : `已自动匹配长度限制：上下文 ${matchedTokenProfile.contextWindowTokens}，最大输入 ${matchedTokenProfile.maxInputTokens}，最大输出 ${matchedTokenProfile.maxOutputTokens}。`}
-                </p>
-              ) : (
-                <p className="admin-field-note">
-                  未匹配到内置模型长度规则，将使用当前智能体默认规格。
-                </p>
-              )}
+              {!showOpenRouterPanel ? (
+                matchedTokenProfile ? (
+                  <p className="admin-field-note">
+                    {`已自动匹配长度限制：上下文 ${matchedTokenProfile.contextWindowTokens}，最大输入 ${matchedTokenProfile.maxInputTokens}，最大输出 ${matchedTokenProfile.maxOutputTokens}。`}
+                  </p>
+                ) : (
+                  <p className="admin-field-note">
+                    未匹配到内置模型长度规则，将使用当前智能体默认规格。
+                  </p>
+                )
+              ) : null}
               {showVolcenginePanel ? (
                 <p className="admin-field-note">
                   说明：Responses 协议下，上下文窗口与最大输入为自动匹配只读项；最大输出会映射到上游接口参数。
                 </p>
               ) : showOpenRouterPanel ? (
                 <p className="admin-field-note">
-                  说明：OpenRouter Chat 场景只下发最大输出（max_tokens）；上下文窗口与最大输入长度不单独配置。
+                  Openrouter api仅支持最大输出（max_tokens）配置。
                 </p>
               ) : (
                 <p className="admin-field-note">
@@ -1914,34 +1913,23 @@ export default function AdminSettingsPage() {
                           compact
                         />
                       </div>
-
-                      <p className="admin-field-note">
-                        推理内容返回策略已固定：开启深度思考时自动返回推理内容，关闭深度思考时不返回。
-                      </p>
-                      <p className="admin-field-note">
-                        Preset 已固定为默认（留空），不在此界面单独配置。
-                      </p>
-                      <p className="admin-field-note">
-                        Web 插件与 Response Healing 已固定关闭，不在此界面配置。
-                      </p>
-                      <p className="admin-field-note">
-                        Auto Router（智能路由）已固定关闭，不在此界面配置。
-                      </p>
                     </>
                   ) : null}
 
-                  <p className="admin-field-note">
-                    当前服务商：{selectedProviderName}
-                    {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
-                    {showOpenRouterPanel
-                      ? "OpenRouter 使用 Chat Completions；下方 OpenRouter 专属参数仅在该服务商下生效。"
-                      : "该服务商当前仅使用 Chat 协议，Responses 参数已自动隐藏。"}
-                  </p>
-                  <p
-                    className={`admin-field-note ${providerSupportsReasoning ? "" : "warning"}`}
-                  >
-                    {providerReasoningHint}
-                  </p>
+                  {!showOpenRouterPanel ? (
+                    <p className="admin-field-note">
+                      当前服务商：{selectedProviderName}
+                      {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
+                      该服务商当前仅使用 Chat 协议，Responses 参数已自动隐藏。
+                    </p>
+                  ) : null}
+                  {!showOpenRouterPanel ? (
+                    <p
+                      className={`admin-field-note ${providerSupportsReasoning ? "" : "warning"}`}
+                    >
+                      {providerReasoningHint}
+                    </p>
+                  ) : null}
                 </>
               )}
             </div>

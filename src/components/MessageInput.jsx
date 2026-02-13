@@ -150,7 +150,7 @@ export default function MessageInput({
   }, [text]);
 
   return (
-    <div className="composer">
+    <div className={`composer${disabled ? " is-disabled" : ""}`}>
       {hasQuote && (
         <div className="composer-quote">
           <span className="composer-quote-text" title={quoteText}>

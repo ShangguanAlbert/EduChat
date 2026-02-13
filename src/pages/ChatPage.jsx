@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Info, LogOut, X } from "lucide-react";
+import { Info, LogOut, Menu, X } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import Sidebar from "../components/Sidebar.jsx";
 import AgentSelect from "../components/AgentSelect.jsx";
@@ -63,6 +63,7 @@ import {
   saveImageReturnContext,
 } from "./image/returnContext.js";
 import "../styles/chat.css";
+import "../styles/chat-motion.css";
 
 const DEFAULT_GROUPS = [{ id: "g1", name: "新组", description: "" }];
 const DEFAULT_SESSIONS = [{ id: "s1", title: "新对话 1", groupId: null, pinned: false }];
@@ -79,6 +80,24 @@ const DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   C: "volcengine",
   D: "openrouter",
 });
+const SIDEBAR_VISIBILITY_STORAGE_KEY = "chat_sidebar_visible";
+
+function detectMobileViewport() {
+  if (typeof window === "undefined") return false;
+  return window.innerWidth <= 720;
+}
+
+function readInitialSidebarVisible() {
+  if (typeof window === "undefined") return true;
+  try {
+    const raw = localStorage.getItem(SIDEBAR_VISIBILITY_STORAGE_KEY);
+    if (raw === "1") return true;
+    if (raw === "0") return false;
+  } catch {
+    // Ignore localStorage errors and fall back to viewport-based defaults.
+  }
+  return !detectMobileViewport();
+}
 
 function sanitizeProvider(value, fallback = "openrouter") {
   const key = String(value || "")
@@ -144,6 +163,8 @@ export default function ChatPage() {
   const [userInfo, setUserInfo] = useState(DEFAULT_USER_INFO);
   const [userInfoErrors, setUserInfoErrors] = useState({});
   const [userInfoSaving, setUserInfoSaving] = useState(false);
+  const [sidebarVisible, setSidebarVisible] = useState(readInitialSidebarVisible);
+  const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [bootstrapError, setBootstrapError] = useState("");
   const [dismissedRoundWarningBySession, setDismissedRoundWarningBySession] = useState({});
@@ -177,6 +198,8 @@ export default function ChatPage() {
     () => messages.filter((m) => m.role === "user").length,
     [messages],
   );
+  const hasAtLeastOneSession = sessions.length > 0;
+  const canUseMessageInput = hasAtLeastOneSession && !!activeSession;
   const roundWarningDismissed = !!dismissedRoundWarningBySession[activeId];
   const userInfoComplete = useMemo(() => isUserInfoComplete(userInfo), [userInfo]);
   const interactionLocked = bootstrapLoading || forceUserInfoModal || userInfoSaving;
@@ -1438,14 +1461,62 @@ export default function ChatPage() {
     setIsAtLatest(true);
   }, [activeId]);
 
+  useEffect(() => {
+    function onWindowResize() {
+      setIsMobileViewport(detectMobileViewport());
+    }
+
+    onWindowResize();
+    window.addEventListener("resize", onWindowResize);
+    return () => window.removeEventListener("resize", onWindowResize);
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SIDEBAR_VISIBILITY_STORAGE_KEY,
+        sidebarVisible ? "1" : "0",
+      );
+    } catch {
+      // Ignore localStorage errors.
+    }
+  }, [sidebarVisible]);
+
+  useEffect(() => {
+    if (!isMobileViewport || !sidebarVisible) return undefined;
+
+    function onKeyDown(e) {
+      if (e.key === "Escape") {
+        setSidebarVisible(false);
+      }
+    }
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [isMobileViewport, sidebarVisible]);
+
+  const chatLayoutClassName = `chat-layout${sidebarVisible ? "" : " sidebar-hidden"}${
+    isMobileViewport && sidebarVisible ? " sidebar-mobile-open" : ""
+  }`;
+
   return (
-    <div className="chat-layout">
+    <div className={chatLayoutClassName}>
       <Sidebar
         sessions={sessions}
         groups={groups}
         activeId={activeId}
-        onSelect={setActiveId}
-        onNewChat={onNewChat}
+        onSelect={(sessionId) => {
+          setActiveId(sessionId);
+          if (isMobileViewport) {
+            setSidebarVisible(false);
+          }
+        }}
+        onNewChat={() => {
+          onNewChat();
+          if (isMobileViewport) {
+            setSidebarVisible(false);
+          }
+        }}
         onOpenImageGeneration={onOpenImageGeneration}
         onDeleteSession={onDeleteSession}
         onBatchDeleteSessions={onBatchDeleteSessions}
@@ -1458,10 +1529,27 @@ export default function ChatPage() {
         hasUserInfo={userInfoComplete}
         onOpenUserInfoModal={() => openUserInfoModal(false)}
       />
+      {isMobileViewport && sidebarVisible ? (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          onClick={() => setSidebarVisible(false)}
+          aria-label="关闭侧边栏"
+        />
+      ) : null}
 
       <div className="chat-main">
         <div className="chat-topbar">
           <div className="chat-topbar-left">
+            <button
+              type="button"
+              className="chat-sidebar-toggle"
+              onClick={() => setSidebarVisible((prev) => !prev)}
+              aria-label={sidebarVisible ? "隐藏侧边栏" : "展开侧边栏"}
+              title={sidebarVisible ? "隐藏侧边栏" : "展开侧边栏"}
+            >
+              <Menu size={16} aria-hidden="true" />
+            </button>
             <AgentSelect
               key={agentSwitchLocked ? "agent-locked" : "agent-unlocked"}
               value={agent}
@@ -1596,7 +1684,7 @@ export default function ChatPage() {
           <MessageInput
             onSend={onSend}
             onPrepareFiles={onPrepareFiles}
-            disabled={isStreaming || interactionLocked}
+            disabled={isStreaming || interactionLocked || !canUseMessageInput}
             quoteText={selectedAskText}
             onClearQuote={() => setSelectedAskText("")}
             onConsumeQuote={() => setSelectedAskText("")}

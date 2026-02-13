@@ -3,7 +3,15 @@
   box-sizing: border-box;
 }
 
+.image-page,
+.image-page *:not(input):not(textarea):not(pre) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .image-page {
+  --image-motion-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --image-motion-smooth: cubic-bezier(0.16, 1, 0.3, 1);
   height: 100vh;
   width: 100%;
   display: flex;
@@ -102,6 +110,32 @@
   font-size: 12px;
   line-height: 1.5;
   padding: 8px 10px;
+  overflow: hidden;
+  max-height: 88px;
+  opacity: 1;
+  filter: blur(0);
+  transform: translateY(0) scale(1);
+  transform-origin: top center;
+  transition:
+    max-height 420ms var(--image-motion-spring),
+    opacity 320ms var(--image-motion-smooth),
+    transform 420ms var(--image-motion-spring),
+    margin 420ms var(--image-motion-spring),
+    padding 320ms var(--image-motion-smooth),
+    border-color 280ms var(--image-motion-smooth),
+    filter 320ms var(--image-motion-smooth);
+}
+
+.image-terms-lock-tip.is-hidden {
+  max-height: 0;
+  margin-top: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  filter: blur(2px);
+  transform: translateY(-8px) scale(0.98);
+  border-color: transparent;
+  pointer-events: none;
 }
 
 .image-workspace.is-locked {
@@ -380,6 +414,11 @@
   box-shadow: 0 6px 20px rgba(15, 23, 42, 0.08);
 }
 
+.image-preview-main.is-generated {
+  transform-origin: center center;
+  animation: image-preview-pop 540ms var(--image-motion-spring);
+}
+
 .image-preview-actions {
   display: flex;
   align-items: center;
@@ -389,6 +428,10 @@
   right: 16px;
   bottom: 16px;
   z-index: 2;
+}
+
+.image-preview-actions.is-generated {
+  animation: image-preview-actions-pop 460ms var(--image-motion-spring);
 }
 
 .image-action-btn {
@@ -418,9 +461,49 @@
   width: 100%;
   height: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   color: #64748b;
+  text-align: center;
+}
+
+.image-empty span {
+  font-size: 14px;
+  font-weight: 500;
+  color: #475569;
+}
+
+@keyframes image-preview-pop {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(12px) scale(0.965);
+  }
+  72% {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(-1px) scale(1.004);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes image-preview-actions-pop {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+    transform: translateY(8px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
 }
 
 .image-capsule-wrap {

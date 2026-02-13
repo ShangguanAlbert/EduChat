@@ -1,6 +1,9 @@
 import { Settings } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+
+const SIDEBAR_ROW_ENTER_MS = 560;
+const SIDEBAR_ROW_EXIT_MS = 420;
 
 export default function Sidebar({
   sessions,
@@ -36,6 +39,13 @@ export default function Sidebar({
   const [batchMode, setBatchMode] = useState(false);
   const [selectedSessionIds, setSelectedSessionIds] = useState([]);
   const [showBatchMove, setShowBatchMove] = useState(false);
+  const [enteringSessionIds, setEnteringSessionIds] = useState([]);
+  const [exitingSessionIds, setExitingSessionIds] = useState([]);
+  const expectInsertAnimationRef = useRef(false);
+  const previousSessionIdsRef = useRef(new Set(sessions.map((item) => item.id)));
+  const enterTimersRef = useRef(new Map());
+  const exitTimersRef = useRef(new Map());
+  const batchDeleteTimerRef = useRef(0);
 
   const grouped = useMemo(() => {
     const map = new Map();
@@ -85,6 +95,14 @@ export default function Sidebar({
     () => Array.from(selectedSessionIdSet),
     [selectedSessionIdSet],
   );
+  const enteringSessionIdSet = useMemo(
+    () => new Set(enteringSessionIds),
+    [enteringSessionIds],
+  );
+  const exitingSessionIdSet = useMemo(
+    () => new Set(exitingSessionIds),
+    [exitingSessionIds],
+  );
   const menuPosition = useMemo(() => {
     if (!menuSessionId || !menuAnchor) {
       return { top: 0, left: 0 };
@@ -128,6 +146,50 @@ export default function Sidebar({
     setMenuSessionId("");
     setMoveMenuSessionId("");
     setMenuAnchor(null);
+  }
+
+  function markSessionsExiting(sessionIds) {
+    const valid = new Set(sessions.map((item) => item.id));
+    const target = Array.from(
+      new Set(
+        (Array.isArray(sessionIds) ? sessionIds : [])
+          .map((item) => String(item || "").trim())
+          .filter((item) => item && valid.has(item)),
+      ),
+    );
+    if (target.length === 0) return [];
+    setExitingSessionIds((prev) => {
+      const merged = new Set(prev);
+      target.forEach((id) => merged.add(id));
+      return Array.from(merged);
+    });
+    return target;
+  }
+
+  function clearSessionTimer(mapRef, sessionId) {
+    const timer = mapRef.current.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    mapRef.current.delete(sessionId);
+  }
+
+  function triggerDeleteSession(sessionId) {
+    const sid = String(sessionId || "").trim();
+    if (!sid || exitingSessionIdSet.has(sid)) return;
+    const target = markSessionsExiting([sid]);
+    if (target.length === 0) return;
+    closeChatMenu();
+    clearSessionTimer(exitTimersRef, sid);
+    const timer = window.setTimeout(() => {
+      exitTimersRef.current.delete(sid);
+      onDeleteSession?.(sid);
+    }, SIDEBAR_ROW_EXIT_MS);
+    exitTimersRef.current.set(sid, timer);
+  }
+
+  function handleNewChatClick() {
+    expectInsertAnimationRef.current = true;
+    onNewChat?.();
   }
 
   function toggleChatMenu(sessionId, triggerEl) {
@@ -201,7 +263,18 @@ export default function Sidebar({
 
   function handleBatchDelete() {
     if (!selectedSessionIdList.length) return;
-    onBatchDeleteSessions?.(selectedSessionIdList);
+    const targetIds = markSessionsExiting(selectedSessionIdList);
+    if (targetIds.length === 0) {
+      exitBatchMode();
+      return;
+    }
+    if (batchDeleteTimerRef.current) {
+      clearTimeout(batchDeleteTimerRef.current);
+    }
+    batchDeleteTimerRef.current = window.setTimeout(() => {
+      batchDeleteTimerRef.current = 0;
+      onBatchDeleteSessions?.(targetIds);
+    }, SIDEBAR_ROW_EXIT_MS);
     exitBatchMode();
   }
 
@@ -242,17 +315,66 @@ export default function Sidebar({
     };
   }, [menuSessionId]);
 
+  useEffect(() => {
+    const previousIds = previousSessionIdsRef.current;
+    const currentIds = sessions.map((item) => item.id);
+    const currentIdSet = new Set(currentIds);
+    const addedIds = currentIds.filter((id) => !previousIds.has(id));
+
+    if (addedIds.length > 0 && expectInsertAnimationRef.current) {
+      setEnteringSessionIds((prev) => {
+        const merged = new Set(prev);
+        addedIds.forEach((id) => merged.add(id));
+        return Array.from(merged);
+      });
+      addedIds.forEach((id) => {
+        clearSessionTimer(enterTimersRef, id);
+        const timer = window.setTimeout(() => {
+          enterTimersRef.current.delete(id);
+          setEnteringSessionIds((prev) => prev.filter((item) => item !== id));
+        }, SIDEBAR_ROW_ENTER_MS);
+        enterTimersRef.current.set(id, timer);
+      });
+    }
+    if (addedIds.length > 0) {
+      expectInsertAnimationRef.current = false;
+    }
+
+    setExitingSessionIds((prev) => prev.filter((id) => currentIdSet.has(id)));
+    previousSessionIdsRef.current = currentIdSet;
+  }, [sessions]);
+
+  useEffect(
+    () => () => {
+      enterTimersRef.current.forEach((timer) => clearTimeout(timer));
+      enterTimersRef.current.clear();
+      exitTimersRef.current.forEach((timer) => clearTimeout(timer));
+      exitTimersRef.current.clear();
+      if (batchDeleteTimerRef.current) {
+        clearTimeout(batchDeleteTimerRef.current);
+        batchDeleteTimerRef.current = 0;
+      }
+    },
+    [],
+  );
+
   function renderSessionRow(session) {
     const isMenuOpen = menuSessionId === session.id;
     const isChecked = selectedSessionIdSet.has(session.id);
+    const isEntering = enteringSessionIdSet.has(session.id);
+    const isExiting = exitingSessionIdSet.has(session.id);
+    const rowClassName = `sidebar-chat-row${isEntering ? " entering" : ""}${
+      isExiting ? " exiting" : ""
+    }`;
 
     return (
-      <div key={session.id} className="sidebar-chat-row">
+      <div key={session.id} className={rowClassName}>
         {batchMode && (
           <button
             className={`sidebar-check ${isChecked ? "checked" : ""}`}
             type="button"
             aria-label={`${isChecked ? "取消" : "选择"}聊天 ${session.title}`}
+            disabled={isExiting}
             onClick={() => toggleBatchSelect(session.id)}
           >
             {isChecked ? "✓" : ""}
@@ -262,6 +384,7 @@ export default function Sidebar({
         <button
           className={`sidebar-item ${session.id === activeId ? "active" : ""}`}
           onClick={() => {
+            if (isExiting) return;
             if (batchMode) {
               toggleBatchSelect(session.id);
               return;
@@ -269,6 +392,7 @@ export default function Sidebar({
             onSelect(session.id);
           }}
           title={session.title}
+          disabled={isExiting}
         >
           <span className="sidebar-item-title">{session.title}</span>
           {session.pinned && <span className="sidebar-item-pin">置顶</span>}
@@ -281,6 +405,7 @@ export default function Sidebar({
               type="button"
               aria-label={`聊天菜单 ${session.title}`}
               title="更多操作"
+              disabled={isExiting}
               onClick={(e) => toggleChatMenu(session.id, e.currentTarget)}
             >
               ⋯
@@ -298,8 +423,7 @@ export default function Sidebar({
                     className="sidebar-row-menu-item danger"
                     type="button"
                     onClick={() => {
-                      onDeleteSession?.(currentMenuSession.id);
-                      closeChatMenu();
+                      triggerDeleteSession(currentMenuSession.id);
                     }}
                   >
                     删除
@@ -389,7 +513,7 @@ export default function Sidebar({
     <aside className="sidebar">
       <div className="sidebar-top">
         <div className="sidebar-actions">
-          <button className="sidebar-new" onClick={() => onNewChat()}>
+          <button className="sidebar-new" onClick={handleNewChatClick}>
             + 新聊天
           </button>
           <button
