@@ -1,0 +1,22 @@
+{
+  "id": "quant-methods",
+  "name": "Quantitative Methods Review",
+  "description": "Quantitative method quality checks for SSCI education papers.",
+  "version": "1.0.0",
+  "defaultPriority": 90,
+  "enabledByDefault": true,
+  "versionPin": "1.x",
+  "triggers": [
+    "rct",
+    "randomized",
+    "regression",
+    "anova",
+    "ancova",
+    "sem",
+    "pls",
+    "effect size",
+    "confidence interval",
+    "p value"
+  ],
+  "promptFallback": "检查样本量与功效、测量工具信效度、统计假设检验、效应量与置信区间报告完整性，以及结果解释是否超出数据支持。"
+}

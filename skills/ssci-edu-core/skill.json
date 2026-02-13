@@ -1,0 +1,17 @@
+{
+  "id": "ssci-edu-core",
+  "name": "SSCI Education Core Review",
+  "description": "Core SSCI education/edtech manuscript review logic with structured output and evidence anchors.",
+  "version": "1.0.0",
+  "defaultPriority": 100,
+  "enabledByDefault": true,
+  "versionPin": "1.x",
+  "triggers": [
+    "ssci",
+    "education",
+    "edtech",
+    "educational technology",
+    "manuscript"
+  ],
+  "promptFallback": "聚焦期刊契合度、理论贡献、研究问题清晰度、教育情境有效性，以及讨论部分是否回到教育实践与政策含义。"
+}

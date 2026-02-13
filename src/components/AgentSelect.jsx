@@ -7,6 +7,7 @@ const AGENTS = [
   { id: "B", name: "智能体 B" },
   { id: "C", name: "智能体 C" },
   { id: "D", name: "智能体 D" },
+  { id: "E", name: "智能体 E" },
 ];
 
 export default function AgentSelect({

@@ -3,6 +3,7 @@ export const AGENT_META = {
   B: { name: "智能体 B" },
   C: { name: "智能体 C" },
   D: { name: "智能体 D" },
+  E: { name: "智能体 E" },
 };
 
 export const DEFAULT_SYSTEM_PROMPT = "你是用户的助手";

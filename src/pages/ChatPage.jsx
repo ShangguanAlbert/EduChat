@@ -79,6 +79,7 @@ const DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   B: "volcengine",
   C: "volcengine",
   D: "openrouter",
+  E: "openrouter",
 });
 const SIDEBAR_VISIBILITY_STORAGE_KEY = "chat_sidebar_visible";
 
@@ -116,6 +117,7 @@ function sanitizeAgentProviderDefaults(raw) {
     B: sanitizeProvider(source.B, DEFAULT_AGENT_PROVIDER_MAP.B),
     C: sanitizeProvider(source.C, DEFAULT_AGENT_PROVIDER_MAP.C),
     D: sanitizeProvider(source.D, DEFAULT_AGENT_PROVIDER_MAP.D),
+    E: sanitizeProvider(source.E, DEFAULT_AGENT_PROVIDER_MAP.E),
   };
 }
 
@@ -793,6 +795,7 @@ export default function ChatPage() {
     );
 
     const formData = new FormData();
+    const streamEndpoint = agent === "E" ? "/api/chat/stream-e" : "/api/chat/stream";
     formData.append("agentId", agent);
     formData.append(
       "temperature",
@@ -816,7 +819,7 @@ export default function ChatPage() {
     streamBufferRef.current = { content: "", reasoning: "", firstTextAt: "" };
 
     try {
-      const resp = await fetch("/api/chat/stream", {
+      const resp = await fetch(streamEndpoint, {
         method: "POST",
         headers: {
           ...getAuthTokenHeader(),
@@ -965,6 +968,7 @@ export default function ChatPage() {
     );
 
     const formData = new FormData();
+    const streamEndpoint = agent === "E" ? "/api/chat/stream-e" : "/api/chat/stream";
     formData.append("agentId", agent);
     formData.append(
       "temperature",
@@ -987,7 +991,7 @@ export default function ChatPage() {
     streamBufferRef.current = { content: "", reasoning: "", firstTextAt: "" };
 
     try {
-      const resp = await fetch("/api/chat/stream", {
+      const resp = await fetch(streamEndpoint, {
         method: "POST",
         headers: {
           ...getAuthTokenHeader(),

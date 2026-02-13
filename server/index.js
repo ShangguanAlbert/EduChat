@@ -12,6 +12,16 @@ import { PDFParse } from "pdf-parse";
 import mongoose from "mongoose";
 import { SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT } from "./prompts/leakProtectionPrompt.js";
 import { PROMPT_LEAK_PROBE_KEYWORDS } from "./prompts/leakProtectionKeywords.js";
+import { AGENT_E_CONFIG_KEY, AGENT_E_ID } from "./agent-e/constants.js";
+import {
+  buildAgentEAdminSettingsResponse,
+  createAgentEConfigModel,
+  normalizeAgentEConfigDoc,
+  sanitizeAgentEConfigPayload,
+  sanitizeAgentERuntime,
+} from "./agent-e/config.js";
+import { selectAgentESkills } from "./agent-e/skills/registry.js";
+import { buildAgentESystemPrompt } from "./agent-e/promptComposer.js";
 
 dotenv.config();
 
@@ -844,6 +854,7 @@ const adminConfigSchema = new mongoose.Schema(
 
 const AdminConfig =
   mongoose.models.AdminConfig || mongoose.model("AdminConfig", adminConfigSchema);
+const AgentEConfig = createAgentEConfigModel(mongoose);
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -1235,6 +1246,46 @@ app.put("/api/auth/admin/agent-settings", async (req, res) => {
   res.json(buildAdminAgentSettingsResponse(config));
 });
 
+app.get("/api/auth/admin/agent-e/settings", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+  const config = await readAgentEConfig();
+  res.json(buildAgentEAdminSettingsResponse(config));
+});
+
+app.put("/api/auth/admin/agent-e/settings", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+  const next = await writeAgentEConfig(req.body || {});
+  res.json(buildAgentEAdminSettingsResponse(next));
+});
+
+app.get("/api/auth/admin/agent-e/skills", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+  const config = await readAgentEConfig();
+  const payload = buildAgentEAdminSettingsResponse(config);
+  res.json({
+    ok: true,
+    skills: payload.config.skills,
+    availableSkills: payload.availableSkills,
+    updatedAt: payload.config.updatedAt,
+  });
+});
+
+app.put("/api/auth/admin/agent-e/skills", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+  const config = await readAgentEConfig();
+  const next = await writeAgentEConfig({
+    ...config,
+    skills: Array.isArray(req.body?.skills) ? req.body.skills : [],
+  });
+  const payload = buildAgentEAdminSettingsResponse(next);
+  res.json({
+    ok: true,
+    skills: payload.config.skills,
+    availableSkills: payload.availableSkills,
+    updatedAt: payload.config.updatedAt,
+  });
+});
+
 app.get("/api/auth/admin/users", async (req, res) => {
   if (!(await authenticateAdminRequest(req, res))) return;
 
@@ -1373,6 +1424,24 @@ app.post(
 );
 
 app.post(
+  "/api/auth/admin/agent-e/debug-stream",
+  requireAdminAuth,
+  upload.array("files", MAX_FILES),
+  async (req, res) => {
+    const messages = readRequestMessages(req.body?.messages);
+    const files = Array.isArray(req.files) ? req.files : [];
+    const runtimeOverride = readJsonLikeField(req.body?.runtimeOverride, null);
+    await streamAgentEResponse({
+      res,
+      messages,
+      files,
+      runtimeOverride,
+      attachUploadedFiles: files.length > 0,
+    });
+  },
+);
+
+app.post(
   "/api/chat/volcengine-files/upload",
   requireChatAuth,
   upload.array("files", MAX_FILES),
@@ -1480,6 +1549,35 @@ app.post(
       contextMode,
       attachUploadedFiles: true,
       volcengineFileRefs,
+    });
+  },
+);
+
+app.post(
+  "/api/chat/stream-e",
+  requireChatAuth,
+  upload.array("files", MAX_FILES),
+  async (req, res) => {
+    const sessionId = sanitizeId(req.body?.sessionId, "");
+    const smartContextEnabled = sanitizeRuntimeBoolean(req.body?.smartContextEnabled, false);
+    const contextMode = sanitizeSmartContextMode(req.body?.contextMode);
+    let messages = [];
+    try {
+      messages = JSON.parse(req.body.messages || "[]");
+    } catch {
+      res.status(400).json({ error: "Invalid messages JSON" });
+      return;
+    }
+
+    await streamAgentEResponse({
+      res,
+      messages,
+      files: req.files || [],
+      chatUserId: String(req.authUser?._id || ""),
+      sessionId,
+      smartContextEnabled,
+      contextMode,
+      attachUploadedFiles: true,
     });
   },
 );
@@ -2164,6 +2262,78 @@ async function attachFilesToLatestUserMessageByLocalParsing(messages, files) {
   return null;
 }
 
+async function streamAgentEResponse({
+  res,
+  messages,
+  files = [],
+  runtimeOverride = null,
+  chatUserId = "",
+  sessionId = "",
+  smartContextEnabled = false,
+  contextMode = "append",
+  attachUploadedFiles = true,
+}) {
+  const config = await readAgentEConfig();
+  if (!config.enabled) {
+    res.status(403).json({ error: "Agent E 当前已被管理员禁用。" });
+    return;
+  }
+
+  let runtime = sanitizeAgentERuntime(runtimeOverride, config.runtime);
+  const providerPolicy = config.providerPolicy || {};
+  const lockedMode = String(providerPolicy.mode || "")
+    .trim()
+    .toLowerCase() !== "selectable";
+  const effectiveProvider = lockedMode
+    ? normalizeProvider(providerPolicy.lockedProvider || "openrouter")
+    : normalizeProvider(runtime.provider || "openrouter");
+  runtime = sanitizeSingleAgentRuntimeConfig(
+    {
+      ...runtime,
+      provider: effectiveProvider,
+    },
+    "A",
+  );
+  runtime.provider = effectiveProvider;
+
+  const selectedSkills = selectAgentESkills({
+    messages,
+    bindings: config.skills,
+    maxSkills: config.skillPolicy?.maxSkillsPerTurn,
+    autoSelect: !!config.skillPolicy?.autoSelect,
+  });
+  const composedSystemPrompt = buildAgentESystemPrompt({
+    config,
+    selectedSkills,
+  });
+
+  await streamAgentResponse({
+    res,
+    agentId: AGENT_E_ID,
+    messages,
+    files,
+    runtimeConfig: runtime,
+    systemPromptOverride: composedSystemPrompt,
+    providerOverride: effectiveProvider,
+    modelOverride: runtime.model,
+    metaExtras: {
+      selectedSkills: selectedSkills.map((item) => item.id),
+      skillStrictMode: !!config.skillPolicy?.strictMode,
+      outputSchema: config.reviewPolicy?.forceStructuredOutput
+        ? "ssci-problem-list-v1"
+        : "ssci-problem-list-flex-v1",
+      evidenceAnchorsRequired: !!config.reviewPolicy?.requireEvidenceAnchors,
+      providerMode: lockedMode ? "locked" : "selectable",
+      providerLockedTo: lockedMode ? effectiveProvider : "",
+    },
+    chatUserId,
+    sessionId,
+    smartContextEnabled,
+    contextMode,
+    attachUploadedFiles,
+  });
+}
+
 async function streamAgentResponse({
   res,
   agentId,
@@ -2171,16 +2341,27 @@ async function streamAgentResponse({
   files = [],
   volcengineFileRefs = [],
   runtimeConfig = null,
+  systemPromptOverride = "",
+  providerOverride = "",
+  modelOverride = "",
+  metaExtras = null,
   chatUserId = "",
   sessionId = "",
   smartContextEnabled = false,
   contextMode = "append",
   attachUploadedFiles = true,
 }) {
-  const systemPrompt = await getSystemPromptByAgent(agentId);
+  const hasSystemPromptOverride =
+    typeof systemPromptOverride === "string" && !!systemPromptOverride.trim();
+  const systemPrompt = hasSystemPromptOverride
+    ? String(systemPromptOverride || "")
+    : await getSystemPromptByAgent(agentId);
   const config = runtimeConfig || (await getResolvedAgentRuntimeConfig(agentId));
-  const provider = getProviderByAgent(agentId, config);
-  const model = getModelByAgent(agentId, config);
+  const provider = providerOverride
+    ? normalizeProvider(providerOverride)
+    : getProviderByAgent(agentId, config);
+  const model =
+    sanitizeRuntimeModel(modelOverride) || getModelByAgent(agentId, config);
   const protocolInfo = resolveRequestProtocol(config.protocol, provider);
   if (!protocolInfo.supported) {
     res.status(400).json({ error: protocolInfo.message });
@@ -2402,6 +2583,7 @@ async function streamAgentResponse({
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
+  const safeMetaExtras = metaExtras && typeof metaExtras === "object" ? metaExtras : {};
   writeEvent(res, "meta", {
     provider,
     protocol,
@@ -2423,6 +2605,7 @@ async function streamAgentResponse({
     promptLeakGuardEnabled,
     promptLeakDetected,
     runtimeConfig: config,
+    ...safeMetaExtras,
   });
 
   if (promptLeakDetected) {
@@ -3820,7 +4003,7 @@ async function readSessionContextRef({ userId, sessionId }) {
     provider,
     protocol,
     model,
-    agentId: ["A", "B", "C", "D"].includes(agentId) ? agentId : "",
+    agentId: ["A", "B", "C", "D", AGENT_E_ID].includes(agentId) ? agentId : "",
     updatedAt: sanitizeIsoDate(raw.updatedAt),
   };
 }
@@ -4809,6 +4992,32 @@ function getDefaultSystemPrompt() {
 async function readAdminAgentConfig() {
   const doc = await AdminConfig.findOne({ key: ADMIN_CONFIG_KEY }).lean();
   return normalizeAdminConfigDoc(doc);
+}
+
+async function readAgentEConfig() {
+  const doc = await AgentEConfig.findOne({ key: AGENT_E_CONFIG_KEY }).lean();
+  return normalizeAgentEConfigDoc(doc);
+}
+
+async function writeAgentEConfig(raw) {
+  const previous = await readAgentEConfig();
+  const normalized = sanitizeAgentEConfigPayload(raw, previous);
+  const { updatedAt: _ignore, ...payload } = normalized;
+  const doc = await AgentEConfig.findOneAndUpdate(
+    { key: AGENT_E_CONFIG_KEY },
+    {
+      $set: {
+        ...payload,
+        key: AGENT_E_CONFIG_KEY,
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+    },
+  ).lean();
+  return normalizeAgentEConfigDoc(doc);
 }
 
 function normalizeAdminConfigDoc(doc) {
@@ -5913,7 +6122,7 @@ function sanitizeAgent(value) {
   const id = String(value || "")
     .trim()
     .toUpperCase();
-  if (["A", "B", "C", "D"].includes(id)) return id;
+  if (["A", "B", "C", "D", AGENT_E_ID].includes(id)) return id;
   return "A";
 }
 

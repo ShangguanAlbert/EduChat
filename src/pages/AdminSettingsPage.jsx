@@ -23,6 +23,10 @@ import {
   saveAdminAgentSettings,
   streamAdminAgentDebug,
 } from "./admin/adminApi.js";
+import {
+  fetchAdminAgentESettings,
+  saveAdminAgentESettings,
+} from "./admin/agentEApi.js";
 import { clearAdminToken, getAdminToken } from "./login/adminSession.js";
 import {
   AGENT_IDS,
@@ -41,6 +45,14 @@ const PROVIDER_OPTIONS = [
   { value: "openrouter", label: "OpenRouter" },
   { value: "volcengine", label: "火山引擎 Ark" },
   { value: "aliyun", label: "阿里云 DashScope" },
+];
+const PROVIDER_MODE_OPTIONS = [
+  { value: "locked", label: "锁定（推荐）" },
+  { value: "selectable", label: "可切换" },
+];
+const LANGUAGE_OPTIONS = [
+  { value: "zh-CN", label: "中文（zh-CN）" },
+  { value: "en-US", label: "英文（en-US）" },
 ];
 const KNOWN_PROVIDERS = new Set(["openrouter", "volcengine", "aliyun"]);
 const OPENROUTER_PDF_ENGINE_OPTIONS = [
@@ -91,6 +103,7 @@ const VOLCENGINE_WEB_SEARCH_SOURCE_OPTIONS = [
   { key: "webSearchSourceMoji", value: "moji", label: "墨迹天气（moji）" },
   { key: "webSearchSourceToutiao", value: "toutiao", label: "头条图文（toutiao）" },
 ];
+const ADMIN_AGENT_IDS = [...AGENT_IDS, "E"];
 
 function createDefaultAgentProviderMap() {
   return {
@@ -583,6 +596,7 @@ export default function AdminSettingsPage() {
   const draftRef = useRef({
     prompts: { A: "", B: "", C: "", D: "" },
     runtimeConfigs: createDefaultAgentRuntimeConfigMap(),
+    agentEConfig: null,
   });
   const dirtyRef = useRef(false);
 
@@ -599,6 +613,8 @@ export default function AdminSettingsPage() {
     createDefaultAgentModelMap(),
   );
   const [selectedAgent, setSelectedAgent] = useState("A");
+  const [agentEConfig, setAgentEConfig] = useState(null);
+  const [agentEAvailableSkills, setAgentEAvailableSkills] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -676,17 +692,38 @@ export default function AdminSettingsPage() {
         ? "该模型支持深度思考，开启联网搜索后会自动注入“边想边搜”规范提示词。"
         : "该模型不支持深度思考联动，联网搜索将按默认模式直接调用。";
 
-  const selectedPrompt = prompts[selectedAgent] || "";
+  const isAgentESelected = selectedAgent === "E";
+  const isCoreAgentSelected = AGENT_IDS.includes(selectedAgent);
+  const selectedPrompt = isAgentESelected ? "" : prompts[selectedAgent] || "";
   const selectedAgentName = AGENT_META[selectedAgent]?.name || `智能体 ${selectedAgent}`;
-  const previewMessages = debugByAgent[selectedAgent] || [];
+  const previewMessages = isAgentESelected ? [] : debugByAgent[selectedAgent] || [];
   const agentOptions = useMemo(
     () =>
-      AGENT_IDS.map((agentId) => ({
+      ADMIN_AGENT_IDS.map((agentId) => ({
         value: agentId,
         label: AGENT_META[agentId]?.name || `智能体 ${agentId}`,
       })),
     [],
   );
+  const agentESelectedSkills = useMemo(() => {
+    const list = Array.isArray(agentEConfig?.skills) ? agentEConfig.skills : [];
+    const rowMap = new Map(list.map((item) => [item.id, item]));
+    return agentEAvailableSkills.map((meta) => {
+      const row = rowMap.get(meta.id) || {};
+      return {
+        id: meta.id,
+        name: meta.name,
+        version: meta.version,
+        enabled: !!row.enabled,
+        priority: Number(row.priority || meta.defaultPriority || 50),
+      };
+    });
+  }, [agentEAvailableSkills, agentEConfig?.skills]);
+  const agentEProviderMode = String(agentEConfig?.providerPolicy?.mode || "locked");
+  const agentEProviderLocked = agentEProviderMode !== "selectable";
+  const agentEEffectiveProvider = agentEProviderLocked
+    ? String(agentEConfig?.providerPolicy?.lockedProvider || "openrouter")
+    : String(agentEConfig?.runtime?.provider || "openrouter");
 
   const markDirty = useCallback(() => {
     dirtyRef.current = true;
@@ -719,7 +756,12 @@ export default function AdminSettingsPage() {
           prompts: draftRef.current.prompts,
           runtimeConfigs: draftRef.current.runtimeConfigs,
         };
-        const data = await saveAdminAgentSettings(adminToken, payload);
+        const [data, agentEData] = await Promise.all([
+          saveAdminAgentSettings(adminToken, payload),
+          draftRef.current.agentEConfig
+            ? saveAdminAgentESettings(adminToken, draftRef.current.agentEConfig)
+            : Promise.resolve(null),
+        ]);
 
         const nextPrompts = {
           A: String(data?.prompts?.A || ""),
@@ -742,14 +784,31 @@ export default function AdminSettingsPage() {
         draftRef.current = {
           prompts: nextPrompts,
           runtimeConfigs: nextRuntimeConfigs,
+          agentEConfig: agentEData?.config || draftRef.current.agentEConfig,
         };
         setDefaultSystemPrompt(
           String(data?.defaultSystemPrompt || DEFAULT_SYSTEM_PROMPT),
         );
+        if (agentEData?.config) {
+          setAgentEConfig(agentEData.config);
+          setAgentEAvailableSkills(
+            Array.isArray(agentEData?.availableSkills) ? agentEData.availableSkills : [],
+          );
+        }
 
         dirtyRef.current = false;
-        const now = new Date().toISOString();
-        setLastSavedAt(now);
+        const candidateTimes = [
+          String(data?.updatedAt || ""),
+          String(agentEData?.config?.updatedAt || ""),
+          new Date().toISOString(),
+        ]
+          .map((iso) => new Date(iso))
+          .filter((date) => !Number.isNaN(date.getTime()));
+        const latest =
+          candidateTimes.length > 0
+            ? candidateTimes.sort((a, b) => b.getTime() - a.getTime())[0].toISOString()
+            : "";
+        setLastSavedAt(latest);
         return true;
       } catch (error) {
         if (handleAuthError(error)) return false;
@@ -774,7 +833,10 @@ export default function AdminSettingsPage() {
       setLoadError("");
 
       try {
-        const data = await fetchAdminAgentSettings(adminToken);
+        const [data, agentEData] = await Promise.all([
+          fetchAdminAgentSettings(adminToken),
+          fetchAdminAgentESettings(adminToken),
+        ]);
         if (cancelled) return;
 
         const nextPrompts = {
@@ -798,12 +860,27 @@ export default function AdminSettingsPage() {
         setRuntimeConfigs(nextRuntimeConfigs);
         setAgentProviderDefaults(nextProviderDefaults);
         setAgentModelDefaults(nextModelDefaults);
+        setAgentEConfig(agentEData?.config || null);
+        setAgentEAvailableSkills(
+          Array.isArray(agentEData?.availableSkills) ? agentEData.availableSkills : [],
+        );
         draftRef.current = {
           prompts: nextPrompts,
           runtimeConfigs: nextRuntimeConfigs,
+          agentEConfig: agentEData?.config || null,
         };
         dirtyRef.current = false;
-        setLastSavedAt(String(data?.updatedAt || ""));
+        const candidateTimes = [
+          String(data?.updatedAt || ""),
+          String(agentEData?.config?.updatedAt || ""),
+        ]
+          .map((iso) => new Date(iso))
+          .filter((date) => !Number.isNaN(date.getTime()));
+        const latest =
+          candidateTimes.length > 0
+            ? candidateTimes.sort((a, b) => b.getTime() - a.getTime())[0].toISOString()
+            : "";
+        setLastSavedAt(latest);
       } catch (error) {
         if (cancelled) return;
         if (handleAuthError(error)) return;
@@ -825,8 +902,9 @@ export default function AdminSettingsPage() {
     draftRef.current = {
       prompts,
       runtimeConfigs,
+      agentEConfig,
     };
-  }, [prompts, runtimeConfigs]);
+  }, [agentEConfig, prompts, runtimeConfigs]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -852,6 +930,7 @@ export default function AdminSettingsPage() {
   }, [showExportMenu]);
 
   useEffect(() => {
+    if (!isCoreAgentSelected) return;
     const expectedProtocol = showVolcenginePanel ? "responses" : "chat";
     if (selectedRuntime.protocol === expectedProtocol) return;
 
@@ -868,6 +947,7 @@ export default function AdminSettingsPage() {
     });
     markDirty();
   }, [
+    isCoreAgentSelected,
     markDirty,
     selectedAgent,
     selectedRuntime.protocol,
@@ -875,6 +955,7 @@ export default function AdminSettingsPage() {
   ]);
 
   useEffect(() => {
+    if (!isCoreAgentSelected) return;
     if (!showVolcenginePanel) return;
     if (webSearchSupported) return;
     if (!selectedRuntime.enableWebSearch) return;
@@ -892,6 +973,7 @@ export default function AdminSettingsPage() {
     });
     markDirty();
   }, [
+    isCoreAgentSelected,
     markDirty,
     selectedAgent,
     selectedRuntime.enableWebSearch,
@@ -900,6 +982,7 @@ export default function AdminSettingsPage() {
   ]);
 
   function updatePrompt(value) {
+    if (!isCoreAgentSelected) return;
     setPrompts((prev) => ({
       ...prev,
       [selectedAgent]: value,
@@ -908,6 +991,7 @@ export default function AdminSettingsPage() {
   }
 
   function updateRuntimeField(field, value) {
+    if (!isCoreAgentSelected) return;
     setRuntimeConfigs((prev) => {
       const current = prev[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
       const shouldSwitchCustom = field === "temperature" || field === "topP";
@@ -936,6 +1020,113 @@ export default function AdminSettingsPage() {
       return {
         ...prev,
         [selectedAgent]: next,
+      };
+    });
+    markDirty();
+  }
+
+  function updateAgentEConfigRoot(field, value) {
+    setAgentEConfig((prev) => ({
+      ...(prev || {}),
+      [field]: value,
+    }));
+    markDirty();
+  }
+
+  function updateAgentERuntime(field, value) {
+    setAgentEConfig((prev) => {
+      const current = prev || {};
+      const runtime =
+        current.runtime && typeof current.runtime === "object"
+          ? current.runtime
+          : {};
+      return {
+        ...current,
+        runtime: {
+          ...runtime,
+          [field]: value,
+        },
+      };
+    });
+    markDirty();
+  }
+
+  function updateAgentEProviderPolicy(field, value) {
+    setAgentEConfig((prev) => {
+      const current = prev || {};
+      const policy =
+        current.providerPolicy && typeof current.providerPolicy === "object"
+          ? current.providerPolicy
+          : {};
+      return {
+        ...current,
+        providerPolicy: {
+          ...policy,
+          [field]: value,
+        },
+      };
+    });
+    markDirty();
+  }
+
+  function updateAgentEReviewPolicy(field, value) {
+    setAgentEConfig((prev) => {
+      const current = prev || {};
+      const policy =
+        current.reviewPolicy && typeof current.reviewPolicy === "object"
+          ? current.reviewPolicy
+          : {};
+      return {
+        ...current,
+        reviewPolicy: {
+          ...policy,
+          [field]: value,
+        },
+      };
+    });
+    markDirty();
+  }
+
+  function updateAgentESkillPolicy(field, value) {
+    setAgentEConfig((prev) => {
+      const current = prev || {};
+      const policy =
+        current.skillPolicy && typeof current.skillPolicy === "object"
+          ? current.skillPolicy
+          : {};
+      return {
+        ...current,
+        skillPolicy: {
+          ...policy,
+          [field]: value,
+        },
+      };
+    });
+    markDirty();
+  }
+
+  function updateAgentESkill(id, patch) {
+    setAgentEConfig((prev) => {
+      const current = prev || {};
+      const list = Array.isArray(current.skills) ? current.skills : [];
+      let touched = false;
+      const next = list.map((item) => {
+        if (item.id !== id) return item;
+        touched = true;
+        return { ...item, ...patch };
+      });
+      if (!touched) {
+        next.push({
+          id,
+          enabled: true,
+          priority: 50,
+          versionPin: "1.x",
+          ...patch,
+        });
+      }
+      return {
+        ...current,
+        skills: next,
       };
     });
     markDirty();
@@ -1336,7 +1527,7 @@ export default function AdminSettingsPage() {
               type="button"
               className="admin-save-btn"
               onClick={onManualSave}
-              disabled={saving || loading}
+              disabled={saving || loading || (isAgentESelected && !agentEConfig)}
             >
               <Save size={16} />
               <span>{saving ? "保存中..." : "保存"}</span>
@@ -1410,7 +1601,318 @@ export default function AdminSettingsPage() {
         )}
 
         <div className="admin-grid">
-          <section className="admin-panel admin-panel-prompt">
+          {isAgentESelected ? (
+            <>
+              <section className="admin-panel admin-panel-api">
+                <div className="admin-panel-head">
+                  <h2>API 参数</h2>
+                  <span>Agent E 独立策略</span>
+                </div>
+
+                <div className="admin-field-grid">
+                  <div className="admin-field-row split">
+                    <span>启用 Agent E</span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!agentEConfig?.enabled}
+                        onChange={(e) => updateAgentEConfigRoot("enabled", e.target.checked)}
+                        disabled={loading || !agentEConfig}
+                      />
+                      <span>{agentEConfig?.enabled ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>服务商模式</span>
+                    <AdminPortalSelect
+                      value={agentEProviderMode}
+                      options={PROVIDER_MODE_OPTIONS}
+                      onChange={(next) => updateAgentEProviderPolicy("mode", next)}
+                      disabled={loading || !agentEConfig}
+                    />
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>锁定服务商</span>
+                    <AdminPortalSelect
+                      value={String(agentEConfig?.providerPolicy?.lockedProvider || "openrouter")}
+                      options={PROVIDER_OPTIONS}
+                      onChange={(next) => updateAgentEProviderPolicy("lockedProvider", next)}
+                      disabled={loading || !agentEConfig || !agentEProviderLocked}
+                    />
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>运行时服务商</span>
+                    <AdminPortalSelect
+                      value={String(agentEConfig?.runtime?.provider || "openrouter")}
+                      options={PROVIDER_OPTIONS}
+                      onChange={(next) => updateAgentERuntime("provider", next)}
+                      disabled={loading || !agentEConfig || agentEProviderLocked}
+                    />
+                  </div>
+
+                  <p className="admin-field-note">当前生效服务商：{agentEEffectiveProvider}</p>
+
+                  <label className="admin-field-row" htmlFor="admin-agent-e-model">
+                    <span>模型 ID</span>
+                    <input
+                      id="admin-agent-e-model"
+                      type="text"
+                      value={String(agentEConfig?.runtime?.model || "")}
+                      onChange={(e) => updateAgentERuntime("model", e.target.value)}
+                      disabled={loading || !agentEConfig}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-agent-e-temperature">
+                    <span>生成随机性</span>
+                    <NumberRuntimeInput
+                      id="admin-agent-e-temperature"
+                      value={Number(agentEConfig?.runtime?.temperature ?? 0.3)}
+                      min={0}
+                      max={2}
+                      step={0.1}
+                      onChange={(next) => updateAgentERuntime("temperature", next)}
+                      disabled={loading || !agentEConfig}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-agent-e-top-p">
+                    <span>累计概率</span>
+                    <NumberRuntimeInput
+                      id="admin-agent-e-top-p"
+                      value={Number(agentEConfig?.runtime?.topP ?? 0.9)}
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      onChange={(next) => updateAgentERuntime("topP", next)}
+                      disabled={loading || !agentEConfig}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-agent-e-context-rounds">
+                    <span>上下文轮数</span>
+                    <NumberRuntimeInput
+                      id="admin-agent-e-context-rounds"
+                      value={Number(agentEConfig?.runtime?.contextRounds ?? 12)}
+                      min={1}
+                      max={20}
+                      step={1}
+                      onChange={(next) => updateAgentERuntime("contextRounds", next)}
+                      disabled={loading || !agentEConfig}
+                    />
+                  </label>
+
+                  <label className="admin-field-row split" htmlFor="admin-agent-e-max-output">
+                    <span>最大输出长度</span>
+                    <NumberRuntimeInput
+                      id="admin-agent-e-max-output"
+                      value={Number(agentEConfig?.runtime?.maxOutputTokens ?? 8192)}
+                      min={64}
+                      max={131072}
+                      step={64}
+                      onChange={(next) => updateAgentERuntime("maxOutputTokens", next)}
+                      disabled={loading || !agentEConfig}
+                    />
+                  </label>
+
+                  <div className="admin-field-row split">
+                    <span>深度思考</span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!agentEConfig?.runtime?.enableThinking}
+                        onChange={(e) => updateAgentERuntime("enableThinking", e.target.checked)}
+                        disabled={loading || !agentEConfig}
+                      />
+                      <span>{agentEConfig?.runtime?.enableThinking ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>注入安全提示</span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!agentEConfig?.runtime?.injectSafetyPrompt}
+                        onChange={(e) =>
+                          updateAgentERuntime("injectSafetyPrompt", e.target.checked)
+                        }
+                        disabled={loading || !agentEConfig}
+                      />
+                      <span>{agentEConfig?.runtime?.injectSafetyPrompt ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+                </div>
+              </section>
+
+              <section className="admin-panel admin-panel-api">
+                <div className="admin-panel-head">
+                  <h2>审稿策略</h2>
+                  <span>reviewPolicy + skillPolicy</span>
+                </div>
+
+                <div className="admin-field-grid">
+                  <div className="admin-field-row split">
+                    <span>强制结构化输出</span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!agentEConfig?.reviewPolicy?.forceStructuredOutput}
+                        onChange={(e) =>
+                          updateAgentEReviewPolicy("forceStructuredOutput", e.target.checked)
+                        }
+                        disabled={loading || !agentEConfig}
+                      />
+                      <span>
+                        {agentEConfig?.reviewPolicy?.forceStructuredOutput ? "开启" : "关闭"}
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>强制证据锚点</span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!agentEConfig?.reviewPolicy?.requireEvidenceAnchors}
+                        onChange={(e) =>
+                          updateAgentEReviewPolicy("requireEvidenceAnchors", e.target.checked)
+                        }
+                        disabled={loading || !agentEConfig}
+                      />
+                      <span>
+                        {agentEConfig?.reviewPolicy?.requireEvidenceAnchors ? "开启" : "关闭"}
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>输出语言</span>
+                    <AdminPortalSelect
+                      value={String(agentEConfig?.reviewPolicy?.language || "zh-CN")}
+                      options={LANGUAGE_OPTIONS}
+                      onChange={(next) => updateAgentEReviewPolicy("language", next)}
+                      disabled={loading || !agentEConfig}
+                    />
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>自动选择技能</span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!agentEConfig?.skillPolicy?.autoSelect}
+                        onChange={(e) => updateAgentESkillPolicy("autoSelect", e.target.checked)}
+                        disabled={loading || !agentEConfig}
+                      />
+                      <span>{agentEConfig?.skillPolicy?.autoSelect ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+
+                  <div className="admin-field-row split">
+                    <span>严格模式（慎用）</span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!agentEConfig?.skillPolicy?.strictMode}
+                        onChange={(e) => updateAgentESkillPolicy("strictMode", e.target.checked)}
+                        disabled={loading || !agentEConfig}
+                      />
+                      <span>{agentEConfig?.skillPolicy?.strictMode ? "开启" : "关闭"}</span>
+                    </label>
+                  </div>
+
+                  <p className="admin-field-note">
+                    常规期刊审稿建议关闭严格模式，先按事实列问题，再给可补救建议。
+                  </p>
+
+                  <div className="admin-field-row split">
+                    <span>允许通用兜底</span>
+                    <label className="admin-switch-row">
+                      <input
+                        type="checkbox"
+                        checked={!!agentEConfig?.skillPolicy?.allowFallbackGeneralAnswer}
+                        onChange={(e) =>
+                          updateAgentESkillPolicy("allowFallbackGeneralAnswer", e.target.checked)
+                        }
+                        disabled={loading || !agentEConfig}
+                      />
+                      <span>
+                        {agentEConfig?.skillPolicy?.allowFallbackGeneralAnswer ? "开启" : "关闭"}
+                      </span>
+                    </label>
+                  </div>
+
+                  <label className="admin-field-row split" htmlFor="admin-agent-e-max-skills">
+                    <span>每轮最多技能数</span>
+                    <NumberRuntimeInput
+                      id="admin-agent-e-max-skills"
+                      value={Number(agentEConfig?.skillPolicy?.maxSkillsPerTurn ?? 3)}
+                      min={1}
+                      max={6}
+                      step={1}
+                      onChange={(next) => updateAgentESkillPolicy("maxSkillsPerTurn", next)}
+                      disabled={loading || !agentEConfig}
+                    />
+                  </label>
+                </div>
+              </section>
+
+              <section className="admin-panel admin-panel-api">
+                <div className="admin-panel-head">
+                  <h2>Skills</h2>
+                  <span>启用与优先级</span>
+                </div>
+
+                <div className="admin-field-grid">
+                  {agentESelectedSkills.map((skill) => (
+                    <div className="admin-tip-card admin-skill-card" key={skill.id}>
+                      <div className="admin-skill-meta">
+                        <p className="admin-skill-name">{skill.name}</p>
+                        <span className="admin-skill-version">{skill.version}</span>
+                      </div>
+
+                      <div className="admin-field-row split">
+                        <span>启用</span>
+                        <label className="admin-switch-row">
+                          <input
+                            type="checkbox"
+                            checked={!!skill.enabled}
+                            onChange={(e) =>
+                              updateAgentESkill(skill.id, { enabled: e.target.checked })
+                            }
+                            disabled={loading || !agentEConfig}
+                          />
+                          <span>{skill.enabled ? "开启" : "关闭"}</span>
+                        </label>
+                      </div>
+
+                      <label
+                        className="admin-field-row split"
+                        htmlFor={`admin-agent-e-skill-${skill.id}`}
+                      >
+                        <span>优先级</span>
+                        <NumberRuntimeInput
+                          id={`admin-agent-e-skill-${skill.id}`}
+                          value={Number(skill.priority || 50)}
+                          min={1}
+                          max={999}
+                          step={1}
+                          onChange={(next) => updateAgentESkill(skill.id, { priority: next })}
+                          disabled={loading || !agentEConfig}
+                        />
+                      </label>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </>
+          ) : (
+            <>
+              <section className="admin-panel admin-panel-prompt">
             <div className="admin-panel-head">
               <h2>提示词设置</h2>
               <span>{selectedAgentName}</span>
@@ -1935,7 +2437,7 @@ export default function AdminSettingsPage() {
             </div>
           </section>
 
-          <section className="admin-panel preview">
+              <section className="admin-panel preview">
             <div className="admin-panel-head">
               <div className="admin-panel-head-title">
                 <h2>预览与调试</h2>
@@ -1978,7 +2480,9 @@ export default function AdminSettingsPage() {
                 </button>
               </div>
             ) : null}
-          </section>
+              </section>
+            </>
+          )}
         </div>
       </div>
 

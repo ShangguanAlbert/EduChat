@@ -23,6 +23,8 @@
   width: 100%;
   padding: 22px;
   overflow: hidden;
+  -webkit-user-select: text;
+  user-select: text;
   color: var(--admin-text);
   background:
     radial-gradient(860px 440px at 4% 8%, rgba(111, 153, 211, 0.2), transparent 62%),
@@ -37,6 +39,18 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.admin-settings-page .admin-panel-head h2,
+.admin-settings-page .admin-panel-head span,
+.admin-settings-page .admin-field-row > span,
+.admin-settings-page .admin-field-note,
+.admin-settings-page .admin-field-label,
+.admin-settings-page .admin-switch-row span,
+.admin-settings-page .admin-skill-name,
+.admin-settings-page .admin-skill-version {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .admin-settings-topbar {
@@ -414,6 +428,34 @@
   overflow: auto;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.admin-skill-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.admin-skill-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-skill-name {
+  margin: 0;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.admin-skill-version {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .admin-panel-prompt {

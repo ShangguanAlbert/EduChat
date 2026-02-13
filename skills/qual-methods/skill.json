@@ -1,0 +1,20 @@
+{
+  "id": "qual-methods",
+  "name": "Qualitative Methods Review",
+  "description": "Qualitative method quality checks for SSCI education papers.",
+  "version": "1.0.0",
+  "defaultPriority": 80,
+  "enabledByDefault": true,
+  "versionPin": "1.x",
+  "triggers": [
+    "qualitative",
+    "interview",
+    "focus group",
+    "grounded theory",
+    "thematic",
+    "coding",
+    "case study",
+    "ethnography"
+  ],
+  "promptFallback": "检查抽样策略、资料饱和、编码流程透明度、研究者反身性、三角互证与可信度保障是否充分。"
+}

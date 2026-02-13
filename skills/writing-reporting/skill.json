@@ -1,0 +1,19 @@
+{
+  "id": "writing-reporting",
+  "name": "Academic Writing & Reporting",
+  "description": "Academic writing and reporting quality checks for SSCI education papers.",
+  "version": "1.0.0",
+  "defaultPriority": 70,
+  "enabledByDefault": true,
+  "versionPin": "1.x",
+  "triggers": [
+    "abstract",
+    "introduction",
+    "literature review",
+    "discussion",
+    "limitation",
+    "reference",
+    "apa"
+  ],
+  "promptFallback": "检查摘要信息密度、引言-文献-问题链条、图表可读性、术语一致性、引用规范与结论措辞谨慎性。"
+}

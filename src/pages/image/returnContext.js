@@ -11,7 +11,7 @@ export function normalizeImageReturnContext(raw) {
 
   return {
     sessionId,
-    agentId: ["A", "B", "C", "D"].includes(agentId) ? agentId : "",
+    agentId: ["A", "B", "C", "D", "E"].includes(agentId) ? agentId : "",
     timestamp: Number.isFinite(timestamp) ? timestamp : Date.now(),
   };
 }

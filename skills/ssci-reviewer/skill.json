@@ -1,0 +1,28 @@
+{
+  "id": "ssci-reviewer",
+  "name": "SSCI Reviewer (Orchestrator)",
+  "description": "Unified entry skill for SSCI education manuscript review; internally composes core + quant + qual + writing checks.",
+  "version": "1.0.0",
+  "defaultPriority": 100,
+  "enabledByDefault": true,
+  "versionPin": "1.x",
+  "triggers": [
+    "ssci",
+    "peer review",
+    "reviewer",
+    "education",
+    "edtech",
+    "manuscript",
+    "major revision",
+    "minor revision",
+    "reject",
+    "accept"
+  ],
+  "includes": [
+    "ssci-edu-core",
+    "quant-methods",
+    "qual-methods",
+    "writing-reporting"
+  ],
+  "promptFallback": "执行 SSCI 教育学/教育技术学论文审稿，输出结构化审稿报告并给出可执行修改建议与推荐结论。"
+}

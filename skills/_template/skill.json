@@ -1,0 +1,15 @@
+{
+  "id": "your-skill-id",
+  "name": "Your Skill Name",
+  "description": "One-line summary for admin panel and routing.",
+  "version": "1.0.0",
+  "defaultPriority": 50,
+  "enabledByDefault": true,
+  "versionPin": "1.x",
+  "includes": [],
+  "triggers": [
+    "keyword-1",
+    "keyword-2"
+  ],
+  "promptFallback": "Fallback rules when SKILL.md is missing or empty."
+}
