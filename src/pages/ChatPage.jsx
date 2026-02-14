@@ -483,6 +483,10 @@ export default function ChatPage() {
     });
   }
 
+  function onOpenGroupChat() {
+    navigate("/party");
+  }
+
   function onDeleteSession(sessionId) {
     setSessions((prev) => {
       const next = prev.filter((s) => s.id !== sessionId);
@@ -1678,6 +1682,7 @@ export default function ChatPage() {
           }
         }}
         onOpenImageGeneration={onOpenImageGeneration}
+        onOpenGroupChat={onOpenGroupChat}
         onDeleteSession={onDeleteSession}
         onBatchDeleteSessions={onBatchDeleteSessions}
         onMoveSessionToGroup={onMoveSessionToGroup}
