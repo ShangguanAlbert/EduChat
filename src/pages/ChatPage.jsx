@@ -46,6 +46,7 @@ import {
   updateStreamDraft,
 } from "./chat/streamDraftStore.js";
 import {
+  clearChatSmartContext,
   fetchChatBootstrap,
   getAuthTokenHeader,
   saveChatSessionMessages,
@@ -74,6 +75,7 @@ const DEFAULT_SESSION_MESSAGES = {
 };
 const CONTEXT_USER_ROUNDS = 10;
 const VIDEO_EXTENSIONS = new Set(["mp4", "avi", "mov"]);
+const CHAT_AGENT_IDS = Object.freeze(["A", "B", "C", "D", "E"]);
 const DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   A: "volcengine",
   B: "volcengine",
@@ -132,6 +134,117 @@ function resolveAgentProvider(agentId, runtimeConfig, providerDefaults) {
   return sanitizeProvider(providerDefaults?.[safeAgentId], DEFAULT_AGENT_PROVIDER_MAP[safeAgentId]);
 }
 
+function resolveRuntimeConfigForAgent(agentId, runtimeConfigs) {
+  const safeAgentId = AGENT_META[agentId] ? agentId : "A";
+  const base = runtimeConfigs?.[safeAgentId] || DEFAULT_AGENT_RUNTIME_CONFIG;
+  if (safeAgentId !== "E") return base;
+  return {
+    ...base,
+    provider: "volcengine",
+    protocol: "responses",
+  };
+}
+
+function getSmartContextDefaultEnabled(agentId) {
+  return String(agentId || "")
+    .trim()
+    .toUpperCase() === "E";
+}
+
+function sanitizeSmartContextSessionId(value) {
+  const text = String(value || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[.$]/g, "");
+  if (!text) return "";
+  return text.slice(0, 80);
+}
+
+function sanitizeSmartContextAgentId(value) {
+  const id = String(value || "")
+    .trim()
+    .toUpperCase();
+  if (CHAT_AGENT_IDS.includes(id)) return id;
+  return "";
+}
+
+function buildSmartContextKey(sessionId, agentId) {
+  const safeSessionId = sanitizeSmartContextSessionId(sessionId);
+  const safeAgentId = sanitizeSmartContextAgentId(agentId);
+  if (!safeSessionId || !safeAgentId) return "";
+  return `${safeSessionId}::${safeAgentId}`;
+}
+
+function sanitizeSmartContextEnabledMap(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const normalized = {};
+
+  Object.entries(source)
+    .slice(0, 1200)
+    .forEach(([rawKey, rawValue]) => {
+      if (rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) {
+        const safeSessionId = sanitizeSmartContextSessionId(rawKey);
+        if (!safeSessionId) return;
+        Object.entries(rawValue)
+          .slice(0, CHAT_AGENT_IDS.length)
+          .forEach(([rawAgentId, nestedValue]) => {
+            const key = buildSmartContextKey(safeSessionId, rawAgentId);
+            if (!key) return;
+            normalized[key] = !!nestedValue;
+          });
+        return;
+      }
+      const [rawSessionId, rawAgentId] = String(rawKey || "").split("::");
+      const key = buildSmartContextKey(rawSessionId, rawAgentId);
+      if (!key) return;
+      normalized[key] = !!rawValue;
+    });
+
+  return normalized;
+}
+
+function readSmartContextEnabledBySessionAgent(map, sessionId, agentId) {
+  const key = buildSmartContextKey(sessionId, agentId);
+  const fallback = getSmartContextDefaultEnabled(agentId);
+  if (!key) return fallback;
+
+  const source = map && typeof map === "object" ? map : {};
+  if (Object.prototype.hasOwnProperty.call(source, key)) {
+    return !!source[key];
+  }
+  return fallback;
+}
+
+function patchSmartContextEnabledBySessionAgent(map, sessionId, agentId, enabled) {
+  const key = buildSmartContextKey(sessionId, agentId);
+  const source = sanitizeSmartContextEnabledMap(map);
+  if (!key) return source;
+  const nextEnabled = !!enabled;
+  if (source[key] === nextEnabled) return source;
+  return {
+    ...source,
+    [key]: nextEnabled,
+  };
+}
+
+function removeSmartContextBySessions(map, sessionIds) {
+  const source = sanitizeSmartContextEnabledMap(map);
+  const remove = sessionIds instanceof Set ? sessionIds : new Set();
+  if (remove.size === 0) return source;
+
+  let changed = false;
+  const next = {};
+  Object.entries(source).forEach(([key, value]) => {
+    const [sessionId] = String(key || "").split("::");
+    if (remove.has(sessionId)) {
+      changed = true;
+      return;
+    }
+    next[key] = !!value;
+  });
+  return changed ? next : source;
+}
+
 export default function ChatPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -155,7 +268,7 @@ export default function ChatPage() {
   const [streamError, setStreamError] = useState("");
   const [stateSaveError, setStateSaveError] = useState("");
   const [lastAppliedReasoning, setLastAppliedReasoning] = useState("high");
-  const [smartContextEnabled, setSmartContextEnabled] = useState(false);
+  const [smartContextEnabledBySessionAgent, setSmartContextEnabledBySessionAgent] = useState({});
   const [selectedAskText, setSelectedAskText] = useState("");
   const [focusUserMessageId, setFocusUserMessageId] = useState("");
   const [isAtLatest, setIsAtLatest] = useState(true);
@@ -207,12 +320,21 @@ export default function ChatPage() {
   const interactionLocked = bootstrapLoading || forceUserInfoModal || userInfoSaving;
   const activeAgent = useMemo(() => AGENT_META[agent] || AGENT_META.A, [agent]);
   const activeRuntimeConfig = useMemo(
-    () => agentRuntimeConfigs[agent] || DEFAULT_AGENT_RUNTIME_CONFIG,
+    () => resolveRuntimeConfigForAgent(agent, agentRuntimeConfigs),
     [agentRuntimeConfigs, agent],
   );
   const activeProvider = useMemo(
     () => resolveAgentProvider(agent, activeRuntimeConfig, agentProviderDefaults),
     [agent, activeRuntimeConfig, agentProviderDefaults],
+  );
+  const smartContextEnabled = useMemo(
+    () =>
+      readSmartContextEnabledBySessionAgent(
+        smartContextEnabledBySessionAgent,
+        activeId,
+        agent,
+      ),
+    [smartContextEnabledBySessionAgent, activeId, agent],
   );
   const smartContextSupported = activeProvider === "volcengine";
   const effectiveSmartContextEnabled = smartContextSupported && smartContextEnabled;
@@ -222,18 +344,17 @@ export default function ChatPage() {
     ? "开启后将锁定当前智能体进行对话，不得切换智能体"
     : "仅火山引擎智能体支持智能上下文管理，当前智能体已默认关闭";
   const agentSwitchLocked = effectiveSmartContextEnabled;
-  const makeRuntimeSnapshot = (agentId = agent) =>
-    createRuntimeSnapshot({
+  const makeRuntimeSnapshot = (agentId = agent) => {
+    const runtime = resolveRuntimeConfigForAgent(agentId, agentRuntimeConfigs);
+    return createRuntimeSnapshot({
       agentId,
       agentMeta: AGENT_META,
-      apiTemperature:
-        agentRuntimeConfigs[agentId]?.temperature ??
-        DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
-      apiTopP: agentRuntimeConfigs[agentId]?.topP ?? DEFAULT_AGENT_RUNTIME_CONFIG.topP,
+      apiTemperature: runtime?.temperature ?? DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
+      apiTopP: runtime?.topP ?? DEFAULT_AGENT_RUNTIME_CONFIG.topP,
       enableThinking:
-        agentRuntimeConfigs[agentId]?.enableThinking ??
-        DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
+        runtime?.enableThinking ?? DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
     });
+  };
 
   function patchAssistantMessage(sessionId, assistantId, updater, onPatched) {
     if (typeof updater !== "function") return;
@@ -388,6 +509,9 @@ export default function ChatPage() {
       delete next[sessionId];
       return next;
     });
+    setSmartContextEnabledBySessionAgent((prev) =>
+      removeSmartContextBySessions(prev, new Set([sessionId])),
+    );
     clearStreamDraft(sessionId);
     clearSessionMessageQueue(sessionId);
 
@@ -434,8 +558,31 @@ export default function ChatPage() {
       });
       return changed ? next : prev;
     });
+    setSmartContextEnabledBySessionAgent((prev) =>
+      removeSmartContextBySessions(prev, remove),
+    );
     clearManyStreamDrafts(sessionIds);
     sessionIds.forEach((id) => clearSessionMessageQueue(id));
+  }
+
+  async function clearSmartContextReferenceBySession(sessionId) {
+    const safeSessionId = sanitizeSmartContextSessionId(sessionId);
+    if (!safeSessionId) return;
+    try {
+      await clearChatSmartContext(safeSessionId);
+    } catch (error) {
+      setStateSaveError(error?.message || "智能上下文引用清理失败");
+    }
+  }
+
+  function onToggleSmartContext(enabled) {
+    const nextEnabled = !!enabled;
+    setSmartContextEnabledBySessionAgent((prev) =>
+      patchSmartContextEnabledBySessionAgent(prev, activeId, agent, nextEnabled),
+    );
+    if (!nextEnabled) {
+      void clearSmartContextReferenceBySession(activeId);
+    }
   }
 
   function onMoveSessionToGroup(sessionId, groupId) {
@@ -639,7 +786,7 @@ export default function ChatPage() {
     const safePicked = Array.isArray(pickedFiles) ? pickedFiles.filter(Boolean) : [];
     if (safePicked.length === 0) return [];
 
-    const runtimeConfig = agentRuntimeConfigs[agent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+    const runtimeConfig = resolveRuntimeConfigForAgent(agent, agentRuntimeConfigs);
     if (!shouldUseVolcengineFilesApi(runtimeConfig)) {
       return safePicked.map((file) => ({
         kind: "local",
@@ -701,7 +848,7 @@ export default function ChatPage() {
 
   async function onSend(text, files) {
     if (!activeId || isStreaming || interactionLocked || !userInfoComplete) return;
-    const runtimeConfig = agentRuntimeConfigs[agent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+    const runtimeConfig = resolveRuntimeConfigForAgent(agent, agentRuntimeConfigs);
 
     setStreamError("");
     const askedAt = new Date().toISOString();
@@ -923,7 +1070,7 @@ export default function ChatPage() {
     if (!activeId || isStreaming || !promptMessageId || interactionLocked || !userInfoComplete) {
       return;
     }
-    const runtimeConfig = agentRuntimeConfigs[agent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+    const runtimeConfig = resolveRuntimeConfigForAgent(agent, agentRuntimeConfigs);
 
     const currentSessionId = activeId;
     const list = sessionMessages[currentSessionId] || [];
@@ -1264,8 +1411,9 @@ export default function ChatPage() {
           nextRuntime,
           nextProviderDefaults,
         );
-        const nextSmartContextEnabled =
-          nextProvider === "volcengine" ? !!stateSettings.smartContextEnabled : false;
+        const nextSmartContextEnabledMap = sanitizeSmartContextEnabledMap(
+          stateSettings.smartContextEnabledBySessionAgent,
+        );
 
         let resolvedSessions = nextSessions;
         let resolvedMessages = nextSessionMessages;
@@ -1281,6 +1429,16 @@ export default function ChatPage() {
           resolvedActiveId = restoreContext.sessionId;
         }
 
+        if (stateSettings.smartContextEnabled && nextProvider === "volcengine") {
+          const legacyKey = buildSmartContextKey(resolvedActiveId, nextAgent);
+          if (
+            legacyKey &&
+            !Object.prototype.hasOwnProperty.call(nextSmartContextEnabledMap, legacyKey)
+          ) {
+            nextSmartContextEnabledMap[legacyKey] = true;
+          }
+        }
+
         setGroups(nextGroups);
         setSessions(resolvedSessions);
         setSessionMessages(resolvedMessages);
@@ -1292,7 +1450,7 @@ export default function ChatPage() {
         setApiTopP(nextApiTopP);
         setApiReasoningEffort(nextApiReasoning);
         setLastAppliedReasoning(nextAppliedReasoning);
-        setSmartContextEnabled(nextSmartContextEnabled);
+        setSmartContextEnabledBySessionAgent(nextSmartContextEnabledMap);
 
         const profile = sanitizeUserInfo(data?.profile);
         setUserInfo(profile);
@@ -1340,12 +1498,6 @@ export default function ChatPage() {
   }, [activeRuntimeConfig]);
 
   useEffect(() => {
-    if (smartContextSupported) return;
-    if (!smartContextEnabled) return;
-    setSmartContextEnabled(false);
-  }, [smartContextEnabled, smartContextSupported]);
-
-  useEffect(() => {
     if (!persistReadyRef.current || bootstrapLoading) return;
     pendingMetaSaveRef.current = true;
 
@@ -1377,6 +1529,9 @@ export default function ChatPage() {
             apiReasoningEffort: normalizeReasoningEffort(apiReasoningEffort),
             lastAppliedReasoning: normalizeReasoningEffort(lastAppliedReasoning),
             smartContextEnabled: effectiveSmartContextEnabled,
+            smartContextEnabledBySessionAgent: sanitizeSmartContextEnabledMap(
+              smartContextEnabledBySessionAgent,
+            ),
           },
         });
         setStateSaveError("");
@@ -1396,6 +1551,7 @@ export default function ChatPage() {
     apiReasoningEffort,
     lastAppliedReasoning,
     effectiveSmartContextEnabled,
+    smartContextEnabledBySessionAgent,
     bootstrapLoading,
     isStreaming,
   ]);
@@ -1569,7 +1725,7 @@ export default function ChatPage() {
                   id="smart-context-toggle"
                   type="checkbox"
                   checked={effectiveSmartContextEnabled}
-                  onChange={(e) => setSmartContextEnabled(e.target.checked)}
+                  onChange={(e) => onToggleSmartContext(e.target.checked)}
                   disabled={smartContextToggleDisabled}
                 />
                 <span className="smart-context-slider" aria-hidden="true" />

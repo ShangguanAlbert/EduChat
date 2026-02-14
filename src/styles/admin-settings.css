@@ -216,18 +216,11 @@
 @keyframes admin-tooltip-pop {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.92);
-    filter: blur(2px);
-  }
-  72% {
-    opacity: 1;
-    transform: translateY(-1px) scale(1.01);
-    filter: blur(0);
+    transform: translateX(var(--admin-tooltip-x, -50%)) translateY(6px) scale(0.96);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: blur(0);
+    transform: translateX(var(--admin-tooltip-x, -50%)) translateY(0) scale(1);
   }
 }
 
@@ -307,6 +300,53 @@
   grid-template-columns: minmax(300px, 1.05fr) minmax(420px, 1.15fr) minmax(320px, 1.05fr);
   gap: 12px;
   flex: 1;
+  min-height: 0;
+}
+
+.admin-grid.admin-grid-agent-e {
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.admin-grid.admin-grid-agent-e .admin-agent-e-api-panel {
+  grid-column: 1;
+  grid-row: 1;
+  min-height: 0;
+}
+
+.admin-grid.admin-grid-agent-e .admin-agent-e-middle-column {
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 0;
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-self: stretch;
+  justify-self: stretch;
+}
+
+.admin-grid.admin-grid-agent-e .admin-agent-e-skills-panel {
+  height: auto;
+  width: 100%;
+  flex: 0 0 auto;
+  max-height: none;
+  align-self: stretch;
+}
+
+.admin-grid.admin-grid-agent-e .admin-agent-e-review-panel {
+  height: auto;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  align-self: stretch;
+}
+
+.admin-grid.admin-grid-agent-e .admin-agent-e-debug-panel {
+  grid-column: 3;
+  grid-row: 1;
   min-height: 0;
 }
 
@@ -890,6 +930,7 @@
 .admin-info-tooltip-layer {
   position: fixed;
   pointer-events: none;
+  --admin-tooltip-x: -50%;
   min-width: 220px;
   max-width: 320px;
   border-radius: 10px;
@@ -900,6 +941,7 @@
   line-height: 1.5;
   padding: 8px 10px;
   box-shadow: 0 12px 24px rgba(15, 23, 42, 0.14);
+  transform: translateX(var(--admin-tooltip-x));
   transform-origin: center bottom;
   animation: admin-tooltip-pop 280ms var(--admin-motion-spring-out);
   z-index: 1200;
@@ -991,6 +1033,25 @@
 
   .admin-grid {
     grid-template-columns: 1fr;
+    flex: none;
+  }
+
+  .admin-grid.admin-grid-agent-e .admin-agent-e-api-panel,
+  .admin-grid.admin-grid-agent-e .admin-agent-e-middle-column,
+  .admin-grid.admin-grid-agent-e .admin-agent-e-skills-panel,
+  .admin-grid.admin-grid-agent-e .admin-agent-e-review-panel,
+  .admin-grid.admin-grid-agent-e .admin-agent-e-debug-panel {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .admin-grid.admin-grid-agent-e .admin-agent-e-middle-column {
+    height: auto;
+  }
+
+  .admin-grid.admin-grid-agent-e .admin-agent-e-skills-panel,
+  .admin-grid.admin-grid-agent-e .admin-agent-e-review-panel {
+    width: auto;
     flex: none;
   }
 

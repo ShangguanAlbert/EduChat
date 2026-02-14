@@ -4,6 +4,12 @@ import {
   AGENT_E_DEFAULT_REVIEW_POLICY,
   AGENT_E_DEFAULT_RUNTIME,
   AGENT_E_DEFAULT_SKILL_POLICY,
+  AGENT_E_FIXED_MAX_OUTPUT_TOKENS,
+  AGENT_E_FIXED_MODEL,
+  AGENT_E_FIXED_PROTOCOL,
+  AGENT_E_FIXED_PROVIDER,
+  AGENT_E_FIXED_TEMPERATURE,
+  AGENT_E_FIXED_TOP_P,
 } from "./constants.js";
 import {
   AGENT_E_SKILL_REGISTRY,
@@ -41,40 +47,6 @@ function sanitizeInteger(value, fallback, min, max) {
   return Math.min(max, Math.max(min, fixed));
 }
 
-function sanitizeProvider(value, fallback = "openrouter") {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "openrouter" || key === "volcengine" || key === "aliyun") {
-    return key;
-  }
-  return fallback;
-}
-
-function sanitizeProtocol(value, fallback = "chat") {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "responses" || key === "response") return "responses";
-  if (key === "chat") return "chat";
-  return fallback;
-}
-
-function sanitizeProviderMode(value) {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "selectable") return "selectable";
-  return "locked";
-}
-
-function sanitizeLanguage(value, fallback = "zh-CN") {
-  const key = String(value || "")
-    .trim();
-  if (!key) return fallback;
-  return key.slice(0, 16);
-}
-
 export function buildDefaultAgentEConfig() {
   return {
     key: AGENT_E_CONFIG_KEY,
@@ -92,11 +64,11 @@ export function buildDefaultAgentEConfig() {
 export function sanitizeAgentERuntime(raw, fallback = AGENT_E_DEFAULT_RUNTIME) {
   const source = raw && typeof raw === "object" ? raw : {};
   return {
-    provider: sanitizeProvider(source.provider, fallback.provider),
-    model: sanitizeText(source.model, fallback.model, 180),
-    protocol: sanitizeProtocol(source.protocol, fallback.protocol),
-    temperature: sanitizeNumber(source.temperature, fallback.temperature, 0, 2),
-    topP: sanitizeNumber(source.topP, fallback.topP, 0, 1),
+    provider: AGENT_E_FIXED_PROVIDER,
+    model: AGENT_E_FIXED_MODEL,
+    protocol: AGENT_E_FIXED_PROTOCOL,
+    temperature: AGENT_E_FIXED_TEMPERATURE,
+    topP: AGENT_E_FIXED_TOP_P,
     frequencyPenalty: sanitizeNumber(
       source.frequencyPenalty,
       fallback.frequencyPenalty,
@@ -105,7 +77,7 @@ export function sanitizeAgentERuntime(raw, fallback = AGENT_E_DEFAULT_RUNTIME) {
     ),
     presencePenalty: sanitizeNumber(source.presencePenalty, fallback.presencePenalty, -2, 2),
     contextRounds: sanitizeInteger(source.contextRounds, fallback.contextRounds, 1, 20),
-    maxOutputTokens: sanitizeInteger(source.maxOutputTokens, fallback.maxOutputTokens, 64, 131072),
+    maxOutputTokens: AGENT_E_FIXED_MAX_OUTPUT_TOKENS,
     maxReasoningTokens: sanitizeInteger(
       source.maxReasoningTokens,
       fallback.maxReasoningTokens,
@@ -120,18 +92,17 @@ export function sanitizeAgentERuntime(raw, fallback = AGENT_E_DEFAULT_RUNTIME) {
   };
 }
 
-function sanitizeProviderPolicy(raw, fallback = AGENT_E_DEFAULT_PROVIDER_POLICY) {
-  const source = raw && typeof raw === "object" ? raw : {};
+function sanitizeProviderPolicy() {
   return {
-    mode: sanitizeProviderMode(source.mode || fallback.mode),
-    lockedProvider: sanitizeProvider(source.lockedProvider, fallback.lockedProvider),
+    mode: "locked",
+    lockedProvider: AGENT_E_FIXED_PROVIDER,
   };
 }
 
 function sanitizeReviewPolicy(raw, fallback = AGENT_E_DEFAULT_REVIEW_POLICY) {
   const source = raw && typeof raw === "object" ? raw : {};
   return {
-    language: sanitizeLanguage(source.language, fallback.language),
+    language: "zh-CN",
     requireEvidenceAnchors: sanitizeBoolean(
       source.requireEvidenceAnchors,
       fallback.requireEvidenceAnchors,

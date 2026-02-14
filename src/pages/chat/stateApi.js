@@ -53,6 +53,15 @@ export function saveChatStateMeta(payload) {
   });
 }
 
+export function clearChatSmartContext(sessionId) {
+  return request("/api/chat/smart-context/clear", {
+    method: "POST",
+    body: JSON.stringify({
+      sessionId: String(sessionId || "").trim(),
+    }),
+  });
+}
+
 export function saveChatSessionMessages(payload) {
   return request("/api/chat/state/messages", {
     method: "PUT",

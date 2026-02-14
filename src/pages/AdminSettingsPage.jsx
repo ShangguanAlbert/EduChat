@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ArrowLeft,
@@ -20,6 +20,7 @@ import {
   exportAdminChatsZip,
   exportAdminUsersTxt,
   fetchAdminAgentSettings,
+  uploadAdminVolcengineDebugFiles,
   saveAdminAgentSettings,
   streamAdminAgentDebug,
 } from "./admin/adminApi.js";
@@ -31,7 +32,11 @@ import { clearAdminToken, getAdminToken } from "./login/adminSession.js";
 import {
   AGENT_IDS,
   DEFAULT_AGENT_RUNTIME_CONFIG,
+  VOLCENGINE_FIXED_SAMPLING_MODEL_ID,
+  VOLCENGINE_FIXED_TOP_P,
+  VOLCENGINE_FIXED_TEMPERATURE,
   createDefaultAgentRuntimeConfigMap,
+  isVolcengineFixedSamplingModel,
   resolveRuntimeTokenProfileByModel,
   sanitizeRuntimeConfigMap,
   sanitizeSingleRuntimeConfig,
@@ -46,21 +51,23 @@ const PROVIDER_OPTIONS = [
   { value: "volcengine", label: "火山引擎 Ark" },
   { value: "aliyun", label: "阿里云 DashScope" },
 ];
-const PROVIDER_MODE_OPTIONS = [
-  { value: "locked", label: "锁定（推荐）" },
-  { value: "selectable", label: "可切换" },
-];
-const LANGUAGE_OPTIONS = [
-  { value: "zh-CN", label: "中文（zh-CN）" },
-  { value: "en-US", label: "英文（en-US）" },
-];
 const KNOWN_PROVIDERS = new Set(["openrouter", "volcengine", "aliyun"]);
+const AGENT_E_FIXED_MAX_OUTPUT_TOKENS = 131072;
+const AGENT_E_LOCKED_RUNTIME_FIELDS = new Set([
+  "provider",
+  "model",
+  "protocol",
+  "temperature",
+  "topP",
+  "maxOutputTokens",
+]);
 const OPENROUTER_PDF_ENGINE_OPTIONS = [
   { value: "auto", label: "自动（默认）" },
   { value: "pdf-text", label: "pdf-text（免费）" },
   { value: "mistral-ocr", label: "mistral-ocr（OCR）" },
   { value: "native", label: "native（模型原生）" },
 ];
+const DEBUG_VIDEO_EXTENSIONS = new Set(["mp4", "avi", "mov"]);
 const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = [
   {
     id: "doubao-seed-1-8-251228",
@@ -304,6 +311,42 @@ function toPreviewMessages(list) {
     .filter((item) => item.content.trim().length > 0);
 }
 
+function formatTokenCountAsK(value) {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount) || amount <= 0) return "0k";
+  if (amount % 1000 === 0) return `${amount / 1000}k`;
+  if (amount % 1024 === 0) return `${amount / 1024}k`;
+  const rounded = Math.round((amount / 1000) * 10) / 10;
+  return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)}k`;
+}
+
+function stripVolcengineReadonlyTokenFields(runtimeConfigs) {
+  const source =
+    runtimeConfigs && typeof runtimeConfigs === "object" ? runtimeConfigs : {};
+  const next = {};
+
+  AGENT_IDS.forEach((agentId) => {
+    const current = sanitizeSingleRuntimeConfig(
+      source[agentId] || DEFAULT_AGENT_RUNTIME_CONFIG,
+      agentId,
+    );
+    const provider = String(current.provider || "")
+      .trim()
+      .toLowerCase();
+    if (provider !== "volcengine") {
+      next[agentId] = current;
+      return;
+    }
+
+    const { contextWindowTokens, maxInputTokens, ...rest } = current;
+    void contextWindowTokens;
+    void maxInputTokens;
+    next[agentId] = rest;
+  });
+
+  return next;
+}
+
 function InfoHint({ text }) {
   const iconRef = useRef(null);
   const [open, setOpen] = useState(false);
@@ -334,7 +377,7 @@ function InfoHint({ text }) {
     });
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
     updateTipPosition();
 
@@ -369,7 +412,7 @@ function InfoHint({ text }) {
             style={{
               top: `${tipPos.top}px`,
               left: `${tipPos.left}px`,
-              transform: `translateX(${tipPos.xMode})`,
+              "--admin-tooltip-x": tipPos.xMode,
             }}
           >
             {text}
@@ -660,10 +703,19 @@ export default function AdminSettingsPage() {
   const selectedModelForMatching = String(
     selectedRuntime.model || selectedModelDefault || "",
   ).trim();
+  const samplingLockedByModel = useMemo(
+    () => isVolcengineFixedSamplingModel(selectedModelForMatching),
+    [selectedModelForMatching],
+  );
   const matchedTokenProfile = useMemo(
     () => resolveRuntimeTokenProfileByModel(selectedModelForMatching),
     [selectedModelForMatching],
   );
+  const volcMatchedMaxOutputText = useMemo(() => {
+    const raw =
+      matchedTokenProfile?.maxOutputTokens ?? selectedRuntime?.maxOutputTokens ?? 0;
+    return formatTokenCountAsK(raw);
+  }, [matchedTokenProfile?.maxOutputTokens, selectedRuntime?.maxOutputTokens]);
   const volcWebSearchCapability = useMemo(
     () => resolveVolcengineWebSearchCapability(selectedModelForMatching),
     [selectedModelForMatching],
@@ -696,7 +748,7 @@ export default function AdminSettingsPage() {
   const isCoreAgentSelected = AGENT_IDS.includes(selectedAgent);
   const selectedPrompt = isAgentESelected ? "" : prompts[selectedAgent] || "";
   const selectedAgentName = AGENT_META[selectedAgent]?.name || `智能体 ${selectedAgent}`;
-  const previewMessages = isAgentESelected ? [] : debugByAgent[selectedAgent] || [];
+  const previewMessages = debugByAgent[selectedAgent] || [];
   const agentOptions = useMemo(
     () =>
       ADMIN_AGENT_IDS.map((agentId) => ({
@@ -719,12 +771,6 @@ export default function AdminSettingsPage() {
       };
     });
   }, [agentEAvailableSkills, agentEConfig?.skills]);
-  const agentEProviderMode = String(agentEConfig?.providerPolicy?.mode || "locked");
-  const agentEProviderLocked = agentEProviderMode !== "selectable";
-  const agentEEffectiveProvider = agentEProviderLocked
-    ? String(agentEConfig?.providerPolicy?.lockedProvider || "openrouter")
-    : String(agentEConfig?.runtime?.provider || "openrouter");
-
   const markDirty = useCallback(() => {
     dirtyRef.current = true;
     setSaveError("");
@@ -754,7 +800,9 @@ export default function AdminSettingsPage() {
       try {
         const payload = {
           prompts: draftRef.current.prompts,
-          runtimeConfigs: draftRef.current.runtimeConfigs,
+          runtimeConfigs: stripVolcengineReadonlyTokenFields(
+            draftRef.current.runtimeConfigs,
+          ),
         };
         const [data, agentEData] = await Promise.all([
           saveAdminAgentSettings(adminToken, payload),
@@ -994,6 +1042,15 @@ export default function AdminSettingsPage() {
     if (!isCoreAgentSelected) return;
     setRuntimeConfigs((prev) => {
       const current = prev[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+      const modelForMatching = String(
+        current.model || agentModelDefaults[selectedAgent] || "",
+      ).trim();
+      if (
+        isVolcengineFixedSamplingModel(modelForMatching) &&
+        (field === "temperature" || field === "topP")
+      ) {
+        return prev;
+      }
       const shouldSwitchCustom = field === "temperature" || field === "topP";
       const draft = {
         ...current,
@@ -1036,6 +1093,9 @@ export default function AdminSettingsPage() {
   function updateAgentERuntime(field, value) {
     setAgentEConfig((prev) => {
       const current = prev || {};
+      if (AGENT_E_LOCKED_RUNTIME_FIELDS.has(field)) {
+        return current;
+      }
       const runtime =
         current.runtime && typeof current.runtime === "object"
           ? current.runtime
@@ -1044,24 +1104,6 @@ export default function AdminSettingsPage() {
         ...current,
         runtime: {
           ...runtime,
-          [field]: value,
-        },
-      };
-    });
-    markDirty();
-  }
-
-  function updateAgentEProviderPolicy(field, value) {
-    setAgentEConfig((prev) => {
-      const current = prev || {};
-      const policy =
-        current.providerPolicy && typeof current.providerPolicy === "object"
-          ? current.providerPolicy
-          : {};
-      return {
-        ...current,
-        providerPolicy: {
-          ...policy,
           [field]: value,
         },
       };
@@ -1219,13 +1261,175 @@ export default function AdminSettingsPage() {
     }
   }
 
+  function resolveDebugRuntimeConfig(agentId) {
+    if (agentId === "E") {
+      const runtime = agentEConfig?.runtime;
+      return runtime && typeof runtime === "object" ? runtime : {};
+    }
+    return runtimeConfigs[agentId] || DEFAULT_AGENT_RUNTIME_CONFIG;
+  }
+
+  function shouldUseDebugVolcengineFilesApi(agentId, runtimeConfig) {
+    if (agentId === "E") return true;
+    const runtimeProvider = String(runtimeConfig?.provider || "")
+      .trim()
+      .toLowerCase();
+    const provider =
+      runtimeProvider && runtimeProvider !== "inherit"
+        ? runtimeProvider
+        : String(agentProviderDefaults?.[agentId] || "openrouter")
+            .trim()
+            .toLowerCase();
+    const protocol = String(runtimeConfig?.protocol || "")
+      .trim()
+      .toLowerCase();
+    return provider === "volcengine" && protocol === "responses";
+  }
+
+  function classifyDebugVolcengineFilesApiType(file) {
+    const mime = String(file?.type || "")
+      .trim()
+      .toLowerCase();
+    const name = String(file?.name || "")
+      .trim()
+      .toLowerCase();
+    const ext = name.includes(".") ? name.split(".").pop() : "";
+
+    if (mime.includes("pdf") || ext === "pdf") return "input_file";
+    if (mime.startsWith("image/")) return "input_image";
+    if (mime.startsWith("video/") || DEBUG_VIDEO_EXTENSIONS.has(ext)) return "input_video";
+    return "";
+  }
+
+  function splitDebugFileItems(files = []) {
+    const safeItems = Array.isArray(files) ? files.filter(Boolean) : [];
+    const localFiles = [];
+    const volcengineFileRefs = [];
+    const attachments = safeItems.map((item) => {
+      if (item?.kind === "volc_ref") {
+        const fileId = String(item?.fileId || "").trim();
+        const inputType = String(item?.inputType || "")
+          .trim()
+          .toLowerCase();
+        if (
+          fileId &&
+          (inputType === "input_file" ||
+            inputType === "input_image" ||
+            inputType === "input_video")
+        ) {
+          volcengineFileRefs.push({
+            fileId,
+            inputType,
+            name: String(item?.name || ""),
+            mimeType: String(item?.mimeType || item?.type || ""),
+            size: Number(item?.size || 0),
+          });
+        }
+        return {
+          name: String(item?.name || "文件"),
+          size: Number(item?.size || 0),
+          type: String(item?.mimeType || item?.type || ""),
+          fileId,
+          inputType,
+        };
+      }
+
+      const rawFile = item?.kind === "local" ? item.file : item;
+      if (rawFile instanceof File) {
+        localFiles.push(rawFile);
+        return {
+          name: rawFile.name,
+          size: rawFile.size,
+          type: rawFile.type,
+        };
+      }
+
+      return {
+        name: String(item?.name || "文件"),
+        size: Number(item?.size || 0),
+        type: String(item?.type || ""),
+      };
+    });
+
+    return {
+      localFiles,
+      volcengineFileRefs,
+      attachments,
+    };
+  }
+
+  async function onDebugPrepareFiles(pickedFiles) {
+    if (!adminToken) return [];
+    const safePicked = Array.isArray(pickedFiles) ? pickedFiles.filter(Boolean) : [];
+    if (safePicked.length === 0) return [];
+
+    const agentId = selectedAgent;
+    const runtimeConfig = resolveDebugRuntimeConfig(agentId);
+    if (!shouldUseDebugVolcengineFilesApi(agentId, runtimeConfig)) {
+      return safePicked.map((file) => ({
+        kind: "local",
+        file,
+        name: String(file?.name || ""),
+        size: Number(file?.size || 0),
+        type: String(file?.type || ""),
+      }));
+    }
+
+    const indexedPicked = safePicked.map((file, index) => ({
+      index,
+      file,
+      inputType: classifyDebugVolcengineFilesApiType(file),
+    }));
+    const remoteCandidates = indexedPicked.filter((item) => !!item.inputType);
+    const localCandidates = indexedPicked.filter((item) => !item.inputType);
+    const localItems = localCandidates.map((item) => ({
+      index: item.index,
+      kind: "local",
+      file: item.file,
+      name: String(item.file?.name || ""),
+      size: Number(item.file?.size || 0),
+      type: String(item.file?.type || ""),
+    }));
+    if (remoteCandidates.length === 0) {
+      return localItems.sort((a, b) => a.index - b.index);
+    }
+
+    const uploadResult = await uploadAdminVolcengineDebugFiles(adminToken, {
+      agentId,
+      files: remoteCandidates.map((item) => item.file),
+    });
+    const remoteRefs = Array.isArray(uploadResult?.files) ? uploadResult.files : [];
+    if (remoteRefs.length !== remoteCandidates.length) {
+      throw new Error("文件上传结果异常，请重试。");
+    }
+
+    const remoteItems = remoteRefs.map((ref, idx) => ({
+      index: remoteCandidates[idx].index,
+      kind: "volc_ref",
+      name: String(remoteCandidates[idx].file?.name || ref?.name || ""),
+      size: Number(ref?.size || remoteCandidates[idx].file?.size || 0),
+      type: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
+      mimeType: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
+      inputType: String(ref?.inputType || remoteCandidates[idx].inputType || ""),
+      fileId: String(ref?.fileId || ""),
+    }));
+
+    return [...localItems, ...remoteItems]
+      .sort((a, b) => a.index - b.index)
+      .map((item) => {
+        const nextItem = { ...item };
+        delete nextItem.index;
+        return nextItem;
+      });
+  }
+
   async function onDebugSend(text, files = []) {
     if (!adminToken || debugLoading) return;
     const agentId = selectedAgent;
-    const runtimeConfig =
-      runtimeConfigs[agentId] || DEFAULT_AGENT_RUNTIME_CONFIG;
+    const runtimeConfig = resolveDebugRuntimeConfig(agentId);
     const content = String(text || "").trim();
     const safeFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+    const { localFiles, volcengineFileRefs, attachments } = splitDebugFileItems(safeFiles);
     if (!content && safeFiles.length === 0) return;
     const userContent =
       content || (safeFiles.length > 0 ? "请分析我上传的附件内容。" : "");
@@ -1236,11 +1440,7 @@ export default function AdminSettingsPage() {
       role: "user",
       content: userContent,
       sourceFiles: safeFiles,
-      attachments: safeFiles.map((file) => ({
-        name: String(file?.name || ""),
-        size: Number(file?.size || 0),
-        type: String(file?.type || ""),
-      })),
+      attachments,
     };
     const assistantMessageId = `a-${Date.now()}`;
     const assistantMessage = {
@@ -1266,7 +1466,8 @@ export default function AdminSettingsPage() {
           agentId,
           messages: toPreviewMessages([...existing, userMessage]),
           runtimeConfig,
-          files: safeFiles,
+          files: localFiles,
+          volcengineFileRefs,
         },
         {
           onToken: (chunk) => {
@@ -1369,7 +1570,7 @@ export default function AdminSettingsPage() {
     if (!adminToken || debugLoading || !assistantMessageId || !promptMessageId) return;
 
     const agentId = selectedAgent;
-    const runtimeConfig = runtimeConfigs[agentId] || DEFAULT_AGENT_RUNTIME_CONFIG;
+    const runtimeConfig = resolveDebugRuntimeConfig(agentId);
     const list = debugByAgent[agentId] || [];
     const promptIndex = list.findIndex(
       (item) => item.id === promptMessageId && item.role === "user",
@@ -1381,6 +1582,7 @@ export default function AdminSettingsPage() {
 
     const promptMsg = list[promptIndex];
     const sourceFiles = Array.isArray(promptMsg.sourceFiles) ? promptMsg.sourceFiles : [];
+    const { localFiles, volcengineFileRefs } = splitDebugFileItems(sourceFiles);
     const historyForApi = toPreviewMessages(list.slice(0, promptIndex + 1));
     if (historyForApi.length === 0 && sourceFiles.length === 0) return;
 
@@ -1410,7 +1612,8 @@ export default function AdminSettingsPage() {
           agentId,
           messages: historyForApi,
           runtimeConfig,
-          files: sourceFiles,
+          files: localFiles,
+          volcengineFileRefs,
         },
         {
           onToken: (chunk) => {
@@ -1600,18 +1803,18 @@ export default function AdminSettingsPage() {
           </div>
         )}
 
-        <div className="admin-grid">
+        <div className={`admin-grid${isAgentESelected ? " admin-grid-agent-e" : ""}`}>
           {isAgentESelected ? (
             <>
-              <section className="admin-panel admin-panel-api">
+              <section className="admin-panel admin-panel-api admin-agent-e-api-panel">
                 <div className="admin-panel-head">
                   <h2>API 参数</h2>
-                  <span>Agent E 独立策略</span>
+                  <span>SSCI审稿人独立策略</span>
                 </div>
 
                 <div className="admin-field-grid">
                   <div className="admin-field-row split">
-                    <span>启用 Agent E</span>
+                    <span>启用 SSCI审稿人</span>
                     <label className="admin-switch-row">
                       <input
                         type="checkbox"
@@ -1623,46 +1826,14 @@ export default function AdminSettingsPage() {
                     </label>
                   </div>
 
-                  <div className="admin-field-row split">
-                    <span>服务商模式</span>
-                    <AdminPortalSelect
-                      value={agentEProviderMode}
-                      options={PROVIDER_MODE_OPTIONS}
-                      onChange={(next) => updateAgentEProviderPolicy("mode", next)}
-                      disabled={loading || !agentEConfig}
-                    />
-                  </div>
-
-                  <div className="admin-field-row split">
-                    <span>锁定服务商</span>
-                    <AdminPortalSelect
-                      value={String(agentEConfig?.providerPolicy?.lockedProvider || "openrouter")}
-                      options={PROVIDER_OPTIONS}
-                      onChange={(next) => updateAgentEProviderPolicy("lockedProvider", next)}
-                      disabled={loading || !agentEConfig || !agentEProviderLocked}
-                    />
-                  </div>
-
-                  <div className="admin-field-row split">
-                    <span>运行时服务商</span>
-                    <AdminPortalSelect
-                      value={String(agentEConfig?.runtime?.provider || "openrouter")}
-                      options={PROVIDER_OPTIONS}
-                      onChange={(next) => updateAgentERuntime("provider", next)}
-                      disabled={loading || !agentEConfig || agentEProviderLocked}
-                    />
-                  </div>
-
-                  <p className="admin-field-note">当前生效服务商：{agentEEffectiveProvider}</p>
-
                   <label className="admin-field-row" htmlFor="admin-agent-e-model">
                     <span>模型 ID</span>
                     <input
                       id="admin-agent-e-model"
                       type="text"
-                      value={String(agentEConfig?.runtime?.model || "")}
-                      onChange={(e) => updateAgentERuntime("model", e.target.value)}
-                      disabled={loading || !agentEConfig}
+                      value={VOLCENGINE_FIXED_SAMPLING_MODEL_ID}
+                      readOnly
+                      disabled
                     />
                   </label>
 
@@ -1670,12 +1841,12 @@ export default function AdminSettingsPage() {
                     <span>生成随机性</span>
                     <NumberRuntimeInput
                       id="admin-agent-e-temperature"
-                      value={Number(agentEConfig?.runtime?.temperature ?? 0.3)}
+                      value={VOLCENGINE_FIXED_TEMPERATURE}
                       min={0}
                       max={2}
                       step={0.1}
-                      onChange={(next) => updateAgentERuntime("temperature", next)}
-                      disabled={loading || !agentEConfig}
+                      onChange={() => {}}
+                      disabled
                     />
                   </label>
 
@@ -1683,12 +1854,12 @@ export default function AdminSettingsPage() {
                     <span>累计概率</span>
                     <NumberRuntimeInput
                       id="admin-agent-e-top-p"
-                      value={Number(agentEConfig?.runtime?.topP ?? 0.9)}
+                      value={VOLCENGINE_FIXED_TOP_P}
                       min={0}
                       max={1}
                       step={0.05}
-                      onChange={(next) => updateAgentERuntime("topP", next)}
-                      disabled={loading || !agentEConfig}
+                      onChange={() => {}}
+                      disabled
                     />
                   </label>
 
@@ -1709,14 +1880,18 @@ export default function AdminSettingsPage() {
                     <span>最大输出长度</span>
                     <NumberRuntimeInput
                       id="admin-agent-e-max-output"
-                      value={Number(agentEConfig?.runtime?.maxOutputTokens ?? 8192)}
+                      value={AGENT_E_FIXED_MAX_OUTPUT_TOKENS}
                       min={64}
                       max={131072}
                       step={64}
-                      onChange={(next) => updateAgentERuntime("maxOutputTokens", next)}
-                      disabled={loading || !agentEConfig}
+                      onChange={() => {}}
+                      disabled
                     />
                   </label>
+
+                  <p className="admin-field-note">
+                    temperature/top_p 已按模型策略固定，且调用时会忽略外部传入值。
+                  </p>
 
                   <div className="admin-field-row split">
                     <span>深度思考</span>
@@ -1748,166 +1923,204 @@ export default function AdminSettingsPage() {
                 </div>
               </section>
 
-              <section className="admin-panel admin-panel-api">
-                <div className="admin-panel-head">
-                  <h2>审稿策略</h2>
-                  <span>reviewPolicy + skillPolicy</span>
-                </div>
-
-                <div className="admin-field-grid">
-                  <div className="admin-field-row split">
-                    <span>强制结构化输出</span>
-                    <label className="admin-switch-row">
-                      <input
-                        type="checkbox"
-                        checked={!!agentEConfig?.reviewPolicy?.forceStructuredOutput}
-                        onChange={(e) =>
-                          updateAgentEReviewPolicy("forceStructuredOutput", e.target.checked)
-                        }
-                        disabled={loading || !agentEConfig}
-                      />
-                      <span>
-                        {agentEConfig?.reviewPolicy?.forceStructuredOutput ? "开启" : "关闭"}
-                      </span>
-                    </label>
+              <div className="admin-agent-e-middle-column">
+                <section className="admin-panel admin-panel-api admin-agent-e-skills-panel">
+                  <div className="admin-panel-head">
+                    <h2>Skills</h2>
+                    <span>启用与优先级</span>
                   </div>
 
-                  <div className="admin-field-row split">
-                    <span>强制证据锚点</span>
-                    <label className="admin-switch-row">
-                      <input
-                        type="checkbox"
-                        checked={!!agentEConfig?.reviewPolicy?.requireEvidenceAnchors}
-                        onChange={(e) =>
-                          updateAgentEReviewPolicy("requireEvidenceAnchors", e.target.checked)
-                        }
-                        disabled={loading || !agentEConfig}
-                      />
-                      <span>
-                        {agentEConfig?.reviewPolicy?.requireEvidenceAnchors ? "开启" : "关闭"}
-                      </span>
-                    </label>
-                  </div>
+                  <div className="admin-field-grid">
+                    {agentESelectedSkills.map((skill) => (
+                      <div className="admin-tip-card admin-skill-card" key={skill.id}>
+                        <div className="admin-skill-meta">
+                          <p className="admin-skill-name">{skill.name}</p>
+                          <span className="admin-skill-version">{skill.version}</span>
+                        </div>
 
-                  <div className="admin-field-row split">
-                    <span>输出语言</span>
-                    <AdminPortalSelect
-                      value={String(agentEConfig?.reviewPolicy?.language || "zh-CN")}
-                      options={LANGUAGE_OPTIONS}
-                      onChange={(next) => updateAgentEReviewPolicy("language", next)}
-                      disabled={loading || !agentEConfig}
-                    />
-                  </div>
+                        <div className="admin-field-row split">
+                          <span>启用</span>
+                          <label className="admin-switch-row">
+                            <input
+                              type="checkbox"
+                              checked={!!skill.enabled}
+                              onChange={(e) =>
+                                updateAgentESkill(skill.id, { enabled: e.target.checked })
+                              }
+                              disabled={loading || !agentEConfig}
+                            />
+                            <span>{skill.enabled ? "开启" : "关闭"}</span>
+                          </label>
+                        </div>
 
-                  <div className="admin-field-row split">
-                    <span>自动选择技能</span>
-                    <label className="admin-switch-row">
-                      <input
-                        type="checkbox"
-                        checked={!!agentEConfig?.skillPolicy?.autoSelect}
-                        onChange={(e) => updateAgentESkillPolicy("autoSelect", e.target.checked)}
-                        disabled={loading || !agentEConfig}
-                      />
-                      <span>{agentEConfig?.skillPolicy?.autoSelect ? "开启" : "关闭"}</span>
-                    </label>
-                  </div>
-
-                  <div className="admin-field-row split">
-                    <span>严格模式（慎用）</span>
-                    <label className="admin-switch-row">
-                      <input
-                        type="checkbox"
-                        checked={!!agentEConfig?.skillPolicy?.strictMode}
-                        onChange={(e) => updateAgentESkillPolicy("strictMode", e.target.checked)}
-                        disabled={loading || !agentEConfig}
-                      />
-                      <span>{agentEConfig?.skillPolicy?.strictMode ? "开启" : "关闭"}</span>
-                    </label>
-                  </div>
-
-                  <p className="admin-field-note">
-                    常规期刊审稿建议关闭严格模式，先按事实列问题，再给可补救建议。
-                  </p>
-
-                  <div className="admin-field-row split">
-                    <span>允许通用兜底</span>
-                    <label className="admin-switch-row">
-                      <input
-                        type="checkbox"
-                        checked={!!agentEConfig?.skillPolicy?.allowFallbackGeneralAnswer}
-                        onChange={(e) =>
-                          updateAgentESkillPolicy("allowFallbackGeneralAnswer", e.target.checked)
-                        }
-                        disabled={loading || !agentEConfig}
-                      />
-                      <span>
-                        {agentEConfig?.skillPolicy?.allowFallbackGeneralAnswer ? "开启" : "关闭"}
-                      </span>
-                    </label>
-                  </div>
-
-                  <label className="admin-field-row split" htmlFor="admin-agent-e-max-skills">
-                    <span>每轮最多技能数</span>
-                    <NumberRuntimeInput
-                      id="admin-agent-e-max-skills"
-                      value={Number(agentEConfig?.skillPolicy?.maxSkillsPerTurn ?? 3)}
-                      min={1}
-                      max={6}
-                      step={1}
-                      onChange={(next) => updateAgentESkillPolicy("maxSkillsPerTurn", next)}
-                      disabled={loading || !agentEConfig}
-                    />
-                  </label>
-                </div>
-              </section>
-
-              <section className="admin-panel admin-panel-api">
-                <div className="admin-panel-head">
-                  <h2>Skills</h2>
-                  <span>启用与优先级</span>
-                </div>
-
-                <div className="admin-field-grid">
-                  {agentESelectedSkills.map((skill) => (
-                    <div className="admin-tip-card admin-skill-card" key={skill.id}>
-                      <div className="admin-skill-meta">
-                        <p className="admin-skill-name">{skill.name}</p>
-                        <span className="admin-skill-version">{skill.version}</span>
-                      </div>
-
-                      <div className="admin-field-row split">
-                        <span>启用</span>
-                        <label className="admin-switch-row">
-                          <input
-                            type="checkbox"
-                            checked={!!skill.enabled}
-                            onChange={(e) =>
-                              updateAgentESkill(skill.id, { enabled: e.target.checked })
-                            }
+                        <label
+                          className="admin-field-row split"
+                          htmlFor={`admin-agent-e-skill-${skill.id}`}
+                        >
+                          <span>优先级</span>
+                          <NumberRuntimeInput
+                            id={`admin-agent-e-skill-${skill.id}`}
+                            value={Number(skill.priority || 50)}
+                            min={1}
+                            max={999}
+                            step={1}
+                            onChange={(next) => updateAgentESkill(skill.id, { priority: next })}
                             disabled={loading || !agentEConfig}
                           />
-                          <span>{skill.enabled ? "开启" : "关闭"}</span>
                         </label>
                       </div>
+                    ))}
+                  </div>
+                </section>
 
-                      <label
-                        className="admin-field-row split"
-                        htmlFor={`admin-agent-e-skill-${skill.id}`}
-                      >
-                        <span>优先级</span>
-                        <NumberRuntimeInput
-                          id={`admin-agent-e-skill-${skill.id}`}
-                          value={Number(skill.priority || 50)}
-                          min={1}
-                          max={999}
-                          step={1}
-                          onChange={(next) => updateAgentESkill(skill.id, { priority: next })}
+                <section className="admin-panel admin-panel-api admin-agent-e-review-panel">
+                  <div className="admin-panel-head">
+                    <h2>审稿策略</h2>
+                    <span>reviewPolicy + skillPolicy</span>
+                  </div>
+
+                  <div className="admin-field-grid">
+                    <div className="admin-field-row split">
+                      <span>强制结构化输出</span>
+                      <label className="admin-switch-row">
+                        <input
+                          type="checkbox"
+                          checked={!!agentEConfig?.reviewPolicy?.forceStructuredOutput}
+                          onChange={(e) =>
+                            updateAgentEReviewPolicy("forceStructuredOutput", e.target.checked)
+                          }
                           disabled={loading || !agentEConfig}
                         />
+                        <span>
+                          {agentEConfig?.reviewPolicy?.forceStructuredOutput ? "开启" : "关闭"}
+                        </span>
                       </label>
                     </div>
-                  ))}
+
+                    <div className="admin-field-row split">
+                      <span>强制证据锚点</span>
+                      <label className="admin-switch-row">
+                        <input
+                          type="checkbox"
+                          checked={!!agentEConfig?.reviewPolicy?.requireEvidenceAnchors}
+                          onChange={(e) =>
+                            updateAgentEReviewPolicy("requireEvidenceAnchors", e.target.checked)
+                          }
+                          disabled={loading || !agentEConfig}
+                        />
+                        <span>
+                          {agentEConfig?.reviewPolicy?.requireEvidenceAnchors ? "开启" : "关闭"}
+                        </span>
+                      </label>
+                    </div>
+                    <div className="admin-field-row split">
+                      <span>自动选择技能</span>
+                      <label className="admin-switch-row">
+                        <input
+                          type="checkbox"
+                          checked={!!agentEConfig?.skillPolicy?.autoSelect}
+                          onChange={(e) => updateAgentESkillPolicy("autoSelect", e.target.checked)}
+                          disabled={loading || !agentEConfig}
+                        />
+                        <span>{agentEConfig?.skillPolicy?.autoSelect ? "开启" : "关闭"}</span>
+                      </label>
+                    </div>
+
+                    <div className="admin-field-row split">
+                      <span className="admin-label-with-hint">
+                        <span>严格模式</span>
+                        <InfoHint text="常规期刊审稿建议关闭严格模式，先按事实列问题，再给可补救建议。" />
+                      </span>
+                      <label className="admin-switch-row">
+                        <input
+                          type="checkbox"
+                          checked={!!agentEConfig?.skillPolicy?.strictMode}
+                          onChange={(e) => updateAgentESkillPolicy("strictMode", e.target.checked)}
+                          disabled={loading || !agentEConfig}
+                        />
+                        <span>{agentEConfig?.skillPolicy?.strictMode ? "开启" : "关闭"}</span>
+                      </label>
+                    </div>
+
+                    <div className="admin-field-row split">
+                      <span>允许通用兜底</span>
+                      <label className="admin-switch-row">
+                        <input
+                          type="checkbox"
+                          checked={!!agentEConfig?.skillPolicy?.allowFallbackGeneralAnswer}
+                          onChange={(e) =>
+                            updateAgentESkillPolicy("allowFallbackGeneralAnswer", e.target.checked)
+                          }
+                          disabled={loading || !agentEConfig}
+                        />
+                        <span>
+                          {agentEConfig?.skillPolicy?.allowFallbackGeneralAnswer
+                            ? "开启"
+                            : "关闭"}
+                        </span>
+                      </label>
+                    </div>
+
+                    <label className="admin-field-row split" htmlFor="admin-agent-e-max-skills">
+                      <span>每轮最多技能数</span>
+                      <NumberRuntimeInput
+                        id="admin-agent-e-max-skills"
+                        value={Number(agentEConfig?.skillPolicy?.maxSkillsPerTurn ?? 3)}
+                        min={1}
+                        max={6}
+                        step={1}
+                        onChange={(next) => updateAgentESkillPolicy("maxSkillsPerTurn", next)}
+                        disabled={loading || !agentEConfig}
+                      />
+                    </label>
+                  </div>
+                </section>
+              </div>
+
+              <section className="admin-panel preview admin-agent-e-debug-panel">
+                <div className="admin-panel-head">
+                  <div className="admin-panel-head-title">
+                    <h2>预览与调试</h2>
+                    <InfoHint text="仅用于当前 API 参数调试，调试记录不写入数据库。" />
+                  </div>
+                  <button
+                    type="button"
+                    className="admin-ghost-btn"
+                    onClick={onDebugClear}
+                    disabled={debugLoading || loading}
+                  >
+                    清空
+                  </button>
                 </div>
+
+                <div className="admin-preview-chat">
+                  <MessageList
+                    activeSessionId={`admin-debug-${selectedAgent}`}
+                    messages={previewMessages}
+                    isStreaming={debugLoading}
+                    onAssistantFeedback={onDebugAssistantFeedback}
+                    onAssistantRegenerate={onDebugAssistantRegenerate}
+                  />
+                  <MessageInput
+                    onSend={onDebugSend}
+                    onPrepareFiles={onDebugPrepareFiles}
+                    disabled={debugLoading || loading}
+                  />
+                </div>
+                {debugError ? (
+                  <div className="admin-preview-error" role="alert">
+                    <span>{debugError}</span>
+                    <button
+                      type="button"
+                      className="admin-preview-error-close"
+                      onClick={() => setDebugError("")}
+                      aria-label="关闭错误提示"
+                      title="关闭错误提示"
+                    >
+                      <CloseXIcon />
+                    </button>
+                  </div>
+                ) : null}
               </section>
             </>
           ) : (
@@ -1975,7 +2188,11 @@ export default function AdminSettingsPage() {
                   disabled={loading}
                 />
               </label>
-              {!showOpenRouterPanel ? (
+              {showVolcenginePanel ? (
+                <p className="admin-field-note">
+                  {`已自动匹配长度限制：最大输出 ${volcMatchedMaxOutputText}。`}
+                </p>
+              ) : !showOpenRouterPanel ? (
                 matchedTokenProfile ? (
                   <p className="admin-field-note">
                     {`已自动匹配长度限制：上下文 ${matchedTokenProfile.contextWindowTokens}，最大输入 ${matchedTokenProfile.maxInputTokens}，最大输出 ${matchedTokenProfile.maxOutputTokens}。`}
@@ -1986,19 +2203,21 @@ export default function AdminSettingsPage() {
                   </p>
                 )
               ) : null}
-              {showVolcenginePanel ? (
-                <p className="admin-field-note">
-                  说明：Responses 协议下，上下文窗口与最大输入为自动匹配只读项；最大输出会映射到上游接口参数。
-                </p>
-              ) : showOpenRouterPanel ? (
+              {showOpenRouterPanel ? (
                 <p className="admin-field-note">
                   Openrouter api仅支持最大输出（max_tokens）配置。
                 </p>
-              ) : (
+              ) : !showVolcenginePanel ? (
                 <p className="admin-field-note">
                   说明：Chat 协议下，上下文窗口、最大输入长度、最大输出长度可独立编辑；最大输出会映射到上游接口参数。
                 </p>
-              )}
+              ) : null}
+              {samplingLockedByModel ? (
+                <p className="admin-field-note">
+                  当前模型已固定采样参数：temperature = {VOLCENGINE_FIXED_TEMPERATURE}、
+                  top_p = {VOLCENGINE_FIXED_TOP_P}；已禁用手动调节。
+                </p>
+              ) : null}
 
               {showVolcenginePanel ? (
                 <>
@@ -2011,7 +2230,7 @@ export default function AdminSettingsPage() {
                       max={2}
                       step={0.1}
                       onChange={(next) => updateRuntimeField("temperature", next)}
-                      disabled={loading}
+                      disabled={loading || samplingLockedByModel}
                     />
                   </label>
 
@@ -2024,7 +2243,7 @@ export default function AdminSettingsPage() {
                       max={1}
                       step={0.05}
                       onChange={(next) => updateRuntimeField("topP", next)}
-                      disabled={loading}
+                      disabled={loading || samplingLockedByModel}
                     />
                   </label>
 
@@ -2038,38 +2257,6 @@ export default function AdminSettingsPage() {
                       step={1}
                       onChange={(next) => updateRuntimeField("contextRounds", next)}
                       disabled={loading}
-                    />
-                  </label>
-
-                  <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens">
-                    <span className="admin-label-with-hint">
-                      上下文窗口
-                      <InfoHint text="仅展示模型规格，不会传到上游 API。" />
-                    </span>
-                    <NumberRuntimeInput
-                      id="admin-runtime-context-window-tokens"
-                      value={selectedRuntime.contextWindowTokens}
-                      min={1024}
-                      max={512000}
-                      step={1024}
-                      onChange={() => {}}
-                      disabled
-                    />
-                  </label>
-
-                  <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens">
-                    <span className="admin-label-with-hint">
-                      最大输入长度
-                      <InfoHint text="仅展示模型规格，不会传到上游 API。" />
-                    </span>
-                    <NumberRuntimeInput
-                      id="admin-runtime-max-input-tokens"
-                      value={selectedRuntime.maxInputTokens}
-                      min={1024}
-                      max={512000}
-                      step={1024}
-                      onChange={() => {}}
-                      disabled
                     />
                   </label>
 
@@ -2261,7 +2448,7 @@ export default function AdminSettingsPage() {
                       max={2}
                       step={0.1}
                       onChange={(next) => updateRuntimeField("temperature", next)}
-                      disabled={loading}
+                      disabled={loading || samplingLockedByModel}
                     />
                   </label>
 
@@ -2274,7 +2461,7 @@ export default function AdminSettingsPage() {
                       max={1}
                       step={0.05}
                       onChange={(next) => updateRuntimeField("topP", next)}
-                      disabled={loading}
+                      disabled={loading || samplingLockedByModel}
                     />
                   </label>
 
@@ -2437,7 +2624,11 @@ export default function AdminSettingsPage() {
             </div>
           </section>
 
-              <section className="admin-panel preview">
+              <section
+                className={`admin-panel preview${
+                  isAgentESelected ? " admin-agent-e-debug-panel" : ""
+                }`}
+              >
             <div className="admin-panel-head">
               <div className="admin-panel-head-title">
                 <h2>预览与调试</h2>
@@ -2463,6 +2654,7 @@ export default function AdminSettingsPage() {
               />
               <MessageInput
                 onSend={onDebugSend}
+                onPrepareFiles={onDebugPrepareFiles}
                 disabled={debugLoading || loading}
               />
             </div>

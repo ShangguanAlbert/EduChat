@@ -12,7 +12,11 @@ import { PDFParse } from "pdf-parse";
 import mongoose from "mongoose";
 import { SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT } from "./prompts/leakProtectionPrompt.js";
 import { PROMPT_LEAK_PROBE_KEYWORDS } from "./prompts/leakProtectionKeywords.js";
-import { AGENT_E_CONFIG_KEY, AGENT_E_ID } from "./agent-e/constants.js";
+import {
+  AGENT_E_CONFIG_KEY,
+  AGENT_E_FIXED_PROVIDER,
+  AGENT_E_ID,
+} from "./agent-e/constants.js";
 import {
   buildAgentEAdminSettingsResponse,
   createAgentEConfigModel,
@@ -53,6 +57,9 @@ const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
 const RUNTIME_MAX_INPUT_TOKENS = 512000;
 const RUNTIME_MAX_OUTPUT_TOKENS = 1048576;
 const RUNTIME_MAX_REASONING_TOKENS = 128000;
+const VOLCENGINE_FIXED_SAMPLING_MODEL_ID = "doubao-seed-2-0-pro-260215";
+const VOLCENGINE_FIXED_TEMPERATURE = 1;
+const VOLCENGINE_FIXED_TOP_P = 0.95;
 const UPLOADED_FILE_CONTEXT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const GENERATED_IMAGE_HISTORY_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
@@ -128,6 +135,45 @@ const AGENT_RUNTIME_DEFAULTS = Object.freeze({
   }),
 });
 const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
+  {
+    id: "doubao-seed-2-0-pro-260215",
+    aliases: [
+      "doubao-seed-2-0-pro-260215",
+      "doubao-seed-2-0-pro",
+      "doubao-seed-2.0-pro-260215",
+      "doubao-seed-2.0-pro",
+    ],
+    contextWindowTokens: 256000,
+    maxInputTokens: 256000,
+    maxOutputTokens: 128000,
+    maxReasoningTokens: 128000,
+  },
+  {
+    id: "doubao-seed-2-0-lite-260215",
+    aliases: [
+      "doubao-seed-2-0-lite-260215",
+      "doubao-seed-2-0-lite",
+      "doubao-seed-2.0-lite-260215",
+      "doubao-seed-2.0-lite",
+    ],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-seed-2-0-mini-260215",
+    aliases: [
+      "doubao-seed-2-0-mini-260215",
+      "doubao-seed-2-0-mini",
+      "doubao-seed-2.0-mini-260215",
+      "doubao-seed-2.0-mini",
+    ],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
   {
     id: "doubao-seed-1-8-251228",
     aliases: ["doubao-seed-1-8-251228", "doubao-seed-1-8"],
@@ -611,6 +657,10 @@ const chatStateSchema = new mongoose.Schema(
           apiReasoningEffort: { type: String, default: "high" },
           lastAppliedReasoning: { type: String, default: "high" },
           smartContextEnabled: { type: Boolean, default: false },
+          smartContextEnabledBySessionAgent: {
+            type: mongoose.Schema.Types.Mixed,
+            default: () => ({}),
+          },
         },
         { _id: false },
       ),
@@ -621,6 +671,7 @@ const chatStateSchema = new mongoose.Schema(
         apiReasoningEffort: "high",
         lastAppliedReasoning: "high",
         smartContextEnabled: false,
+        smartContextEnabledBySessionAgent: {},
       }),
     },
   },
@@ -963,6 +1014,21 @@ app.put("/api/chat/state/meta", requireChatAuth, async (req, res) => {
     },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
+
+  res.json({ ok: true });
+});
+
+app.post("/api/chat/smart-context/clear", requireChatAuth, async (req, res) => {
+  const sessionId = sanitizeId(req.body?.sessionId, "");
+  if (!sessionId) {
+    res.status(400).json({ error: "缺少有效 sessionId。" });
+    return;
+  }
+
+  await clearSessionContextRef({
+    userId: String(req.authUser?._id || ""),
+    sessionId,
+  });
 
   res.json({ ok: true });
 });
@@ -1411,12 +1477,16 @@ app.post(
       agentId,
     );
     const files = Array.isArray(req.files) ? req.files : [];
+    const volcengineFileRefs = readRequestVolcengineFileRefs(
+      req.body?.volcengineFileRefs,
+    );
 
     await streamAgentResponse({
       res,
       agentId,
       messages,
       files,
+      volcengineFileRefs,
       runtimeConfig,
       attachUploadedFiles: files.length > 0,
     });
@@ -1431,13 +1501,73 @@ app.post(
     const messages = readRequestMessages(req.body?.messages);
     const files = Array.isArray(req.files) ? req.files : [];
     const runtimeOverride = readJsonLikeField(req.body?.runtimeOverride, null);
+    const volcengineFileRefs = readRequestVolcengineFileRefs(
+      req.body?.volcengineFileRefs,
+    );
     await streamAgentEResponse({
       res,
       messages,
       files,
+      volcengineFileRefs,
       runtimeOverride,
       attachUploadedFiles: files.length > 0,
     });
+  },
+);
+
+app.post(
+  "/api/auth/admin/volcengine-files/upload",
+  requireAdminAuth,
+  upload.array("files", MAX_FILES),
+  async (req, res) => {
+    const agentId = sanitizeAgent(req.body?.agentId || "A");
+    const files = Array.isArray(req.files) ? req.files.filter(Boolean) : [];
+    if (files.length === 0) {
+      res.json({ ok: true, files: [] });
+      return;
+    }
+
+    const runtimeConfig = await getResolvedAgentRuntimeConfig(agentId);
+    const provider = getProviderByAgent(agentId, runtimeConfig);
+    const protocol = resolveRequestProtocol(runtimeConfig.protocol, provider).value;
+    if (provider !== "volcengine" || protocol !== "responses") {
+      res.status(400).json({ error: "当前智能体不是火山引擎 Responses 协议，不能使用 Files API 上传。" });
+      return;
+    }
+
+    const providerConfig = getProviderConfig("volcengine");
+    if (!providerConfig.apiKey) {
+      res.status(500).json({ error: providerConfig.missingKeyMessage });
+      return;
+    }
+    if (!providerConfig.filesEndpoint) {
+      res.status(500).json({ error: "未配置火山引擎 Files API 端点。" });
+      return;
+    }
+
+    try {
+      const model = getModelByAgent(agentId, runtimeConfig);
+      const { uploadedRefs } = await uploadVolcengineMultipartFilesAsRefs({
+        files,
+        model,
+        filesEndpoint: providerConfig.filesEndpoint,
+        apiKey: providerConfig.apiKey,
+        strictSupportedTypes: true,
+      });
+
+      res.json({
+        ok: true,
+        files: uploadedRefs,
+      });
+    } catch (error) {
+      const message = error?.message || "火山文件上传失败，请稍后重试。";
+      const status = String(message).includes("文件类型不支持 Files API 上传")
+        ? 400
+        : 500;
+      res.status(status).json({
+        error: message,
+      });
+    }
   },
 );
 
@@ -1473,46 +1603,25 @@ app.post(
 
     try {
       const model = getModelByAgent(agentId, runtimeConfig);
-      const uploaded = [];
-      for (const file of files) {
-        const normalizedOriginalName = normalizeMultipartFileName(file.originalname);
-        const normalizedFile =
-          normalizedOriginalName && normalizedOriginalName !== file.originalname
-            ? { ...file, originalname: normalizedOriginalName }
-            : file;
-
-        const inputType = classifyVolcengineFileInputType(normalizedFile);
-        if (!inputType) {
-          res.status(400).json({
-            error: `文件类型不支持 Files API 上传：${normalizedFile.originalname || "未命名文件"}`,
-          });
-          return;
-        }
-
-        const result = await uploadVolcengineFileAndWaitActive({
-          file: normalizedFile,
-          inputType,
-          model,
-          filesEndpoint: providerConfig.filesEndpoint,
-          apiKey: providerConfig.apiKey,
-        });
-
-        uploaded.push({
-          fileId: result.fileId,
-          inputType,
-          name: String(normalizedFile.originalname || ""),
-          mimeType: String(normalizedFile.mimetype || ""),
-          size: Number(normalizedFile.size || 0),
-        });
-      }
+      const { uploadedRefs } = await uploadVolcengineMultipartFilesAsRefs({
+        files,
+        model,
+        filesEndpoint: providerConfig.filesEndpoint,
+        apiKey: providerConfig.apiKey,
+        strictSupportedTypes: true,
+      });
 
       res.json({
         ok: true,
-        files: uploaded,
+        files: uploadedRefs,
       });
     } catch (error) {
-      res.status(500).json({
-        error: error?.message || "火山文件上传失败，请稍后重试。",
+      const message = error?.message || "火山文件上传失败，请稍后重试。";
+      const status = String(message).includes("文件类型不支持 Files API 上传")
+        ? 400
+        : 500;
+      res.status(status).json({
+        error: message,
       });
     }
   },
@@ -1561,6 +1670,9 @@ app.post(
     const sessionId = sanitizeId(req.body?.sessionId, "");
     const smartContextEnabled = sanitizeRuntimeBoolean(req.body?.smartContextEnabled, false);
     const contextMode = sanitizeSmartContextMode(req.body?.contextMode);
+    const volcengineFileRefs = readRequestVolcengineFileRefs(
+      req.body?.volcengineFileRefs,
+    );
     let messages = [];
     try {
       messages = JSON.parse(req.body.messages || "[]");
@@ -1578,6 +1690,7 @@ app.post(
       smartContextEnabled,
       contextMode,
       attachUploadedFiles: true,
+      volcengineFileRefs,
     });
   },
 );
@@ -2266,6 +2379,7 @@ async function streamAgentEResponse({
   res,
   messages,
   files = [],
+  volcengineFileRefs = [],
   runtimeOverride = null,
   chatUserId = "",
   sessionId = "",
@@ -2275,18 +2389,12 @@ async function streamAgentEResponse({
 }) {
   const config = await readAgentEConfig();
   if (!config.enabled) {
-    res.status(403).json({ error: "Agent E 当前已被管理员禁用。" });
+    res.status(403).json({ error: "SSCI审稿人当前已被管理员禁用。" });
     return;
   }
 
   let runtime = sanitizeAgentERuntime(runtimeOverride, config.runtime);
-  const providerPolicy = config.providerPolicy || {};
-  const lockedMode = String(providerPolicy.mode || "")
-    .trim()
-    .toLowerCase() !== "selectable";
-  const effectiveProvider = lockedMode
-    ? normalizeProvider(providerPolicy.lockedProvider || "openrouter")
-    : normalizeProvider(runtime.provider || "openrouter");
+  const effectiveProvider = AGENT_E_FIXED_PROVIDER;
   runtime = sanitizeSingleAgentRuntimeConfig(
     {
       ...runtime,
@@ -2312,6 +2420,7 @@ async function streamAgentEResponse({
     agentId: AGENT_E_ID,
     messages,
     files,
+    volcengineFileRefs,
     runtimeConfig: runtime,
     systemPromptOverride: composedSystemPrompt,
     providerOverride: effectiveProvider,
@@ -2323,8 +2432,8 @@ async function streamAgentEResponse({
         ? "ssci-problem-list-v1"
         : "ssci-problem-list-flex-v1",
       evidenceAnchorsRequired: !!config.reviewPolicy?.requireEvidenceAnchors,
-      providerMode: lockedMode ? "locked" : "selectable",
-      providerLockedTo: lockedMode ? effectiveProvider : "",
+      providerMode: "locked",
+      providerLockedTo: effectiveProvider,
     },
     chatUserId,
     sessionId,
@@ -2415,12 +2524,12 @@ async function streamAgentResponse({
   });
 
   let safeMessages = normalizeMessages(messages);
-  const safeVolcengineFileRefs = sanitizeVolcengineFileRefsPayload(volcengineFileRefs);
+  let filesForLocalAttach = Array.isArray(files) ? files.filter(Boolean) : [];
+  let effectiveVolcengineFileRefs = sanitizeVolcengineFileRefsPayload(volcengineFileRefs);
   if (
     safeMessages.length === 0 &&
     attachUploadedFiles &&
-    Array.isArray(files) &&
-    files.length > 0
+    filesForLocalAttach.length > 0
   ) {
     safeMessages = [{ role: "user", content: "请基于附件内容进行分析和回答。" }];
   }
@@ -2495,7 +2604,7 @@ async function streamAgentResponse({
   let requestMessages = [...narrowedMessages];
   if (
     attachUploadedFiles &&
-    files.length > 0 &&
+    filesForLocalAttach.length > 0 &&
     !requestMessages.some((item) => item?.role === "user")
   ) {
     requestMessages.push({
@@ -2505,7 +2614,7 @@ async function streamAgentResponse({
   }
   if (
     shouldUsePersistentFileContext &&
-    safeVolcengineFileRefs.length > 0 &&
+    effectiveVolcengineFileRefs.length > 0 &&
     !requestMessages.some((item) => item?.role === "user")
   ) {
     requestMessages.push({
@@ -2514,11 +2623,42 @@ async function streamAgentResponse({
     });
   }
 
+  if (
+    attachUploadedFiles &&
+    filesForLocalAttach.length > 0 &&
+    provider === "volcengine" &&
+    protocol === "responses"
+  ) {
+    if (!providerConfig.filesEndpoint) {
+      res.status(500).json({ error: "未配置火山引擎 Files API 端点。" });
+      return;
+    }
+    try {
+      const uploadedBundle = await uploadVolcengineMultipartFilesAsRefs({
+        files: filesForLocalAttach,
+        model,
+        filesEndpoint: providerConfig.filesEndpoint,
+        apiKey: providerConfig.apiKey,
+        strictSupportedTypes: false,
+      });
+      filesForLocalAttach = uploadedBundle.fallbackFiles;
+      effectiveVolcengineFileRefs = sanitizeVolcengineFileRefsPayload([
+        ...effectiveVolcengineFileRefs,
+        ...uploadedBundle.uploadedRefs,
+      ]);
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "火山文件上传失败，请稍后重试。",
+      });
+      return;
+    }
+  }
+
   let uploadedFileContextRecord = null;
-  if (attachUploadedFiles && files.length > 0) {
+  if (attachUploadedFiles && filesForLocalAttach.length > 0) {
     uploadedFileContextRecord = await attachFilesToLatestUserMessage(
       requestMessages,
-      files,
+      filesForLocalAttach,
       { provider, protocol },
     );
     if (shouldUsePersistentFileContext && uploadedFileContextRecord?.messageId) {
@@ -2532,13 +2672,13 @@ async function streamAgentResponse({
   }
   if (
     shouldUsePersistentFileContext &&
-    safeVolcengineFileRefs.length > 0
+    effectiveVolcengineFileRefs.length > 0
   ) {
     // Files API 文件（PDF/图片/视频）由火山侧保存 7 天，这里只在本次请求挂载 file_id，
     // 不再写入本地附件上下文库；本地库仅用于非 Files API 的本地解析文件。
     attachVolcengineFileRefsToLatestUserMessage(
       requestMessages,
-      safeVolcengineFileRefs,
+      effectiveVolcengineFileRefs,
     );
   }
   if (smartContextRuntime.usePreviousResponseId) {
@@ -3322,6 +3462,7 @@ function buildChatRequestPayload({
   config,
   reasoning,
 }) {
+  const fixedSampling = isVolcengineFixedSamplingModel(model);
   const finalMessages = [];
   if (systemPrompt) {
     finalMessages.push({ role: "system", content: systemPrompt });
@@ -3332,18 +3473,22 @@ function buildChatRequestPayload({
     model,
     stream: true,
     messages: finalMessages,
-    temperature: sanitizeRuntimeNumber(
-      config.temperature,
-      DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
-      0,
-      2,
-    ),
-    top_p: sanitizeRuntimeNumber(
-      config.topP,
-      DEFAULT_AGENT_RUNTIME_CONFIG.topP,
-      0,
-      1,
-    ),
+    temperature: fixedSampling
+      ? VOLCENGINE_FIXED_TEMPERATURE
+      : sanitizeRuntimeNumber(
+          config.temperature,
+          DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
+          0,
+          2,
+        ),
+    top_p: fixedSampling
+      ? VOLCENGINE_FIXED_TOP_P
+      : sanitizeRuntimeNumber(
+          config.topP,
+          DEFAULT_AGENT_RUNTIME_CONFIG.topP,
+          0,
+          1,
+        ),
     frequency_penalty: sanitizeRuntimeNumber(
       config.frequencyPenalty,
       DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty,
@@ -3670,6 +3815,11 @@ function resolveRuntimeTokenProfileByModel(model) {
   };
 }
 
+function isVolcengineFixedSamplingModel(model) {
+  const matched = resolveRuntimeTokenProfileByModel(model);
+  return matched?.matchedModelId === VOLCENGINE_FIXED_SAMPLING_MODEL_ID;
+}
+
 function buildResponsesInputItems(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return "";
 
@@ -3826,6 +3976,18 @@ function mapReasoningEffortToResponses(effort) {
 
 function supportsVolcengineResponsesReasoningEffort(model) {
   const defaults = [
+    "doubao-seed-2-0-pro-260215",
+    "doubao-seed-2-0-pro",
+    "doubao-seed-2.0-pro-260215",
+    "doubao-seed-2.0-pro",
+    "doubao-seed-2-0-lite-260215",
+    "doubao-seed-2-0-lite",
+    "doubao-seed-2.0-lite-260215",
+    "doubao-seed-2.0-lite",
+    "doubao-seed-2-0-mini-260215",
+    "doubao-seed-2-0-mini",
+    "doubao-seed-2.0-mini-260215",
+    "doubao-seed-2.0-mini",
     "doubao-seed-1-8-251228",
     "doubao-seed-1-6-lite-251015",
     "doubao-seed-1-6-251015",
@@ -4148,6 +4310,64 @@ function classifyVolcengineFileInputType(file) {
   if (mime.startsWith("image/")) return "input_image";
   if (mime.startsWith("video/") || VIDEO_EXTENSIONS.has(ext)) return "input_video";
   return "";
+}
+
+function normalizeMultipartUploadFile(file) {
+  const rawFile = file && typeof file === "object" ? file : null;
+  if (!rawFile) return null;
+  const normalizedOriginalName = normalizeMultipartFileName(rawFile.originalname);
+  if (normalizedOriginalName && normalizedOriginalName !== rawFile.originalname) {
+    return { ...rawFile, originalname: normalizedOriginalName };
+  }
+  return rawFile;
+}
+
+async function uploadVolcengineMultipartFilesAsRefs({
+  files = [],
+  model = "",
+  filesEndpoint = "",
+  apiKey = "",
+  strictSupportedTypes = false,
+}) {
+  const sourceFiles = Array.isArray(files) ? files : [];
+  const uploadedRefs = [];
+  const fallbackFiles = [];
+
+  for (const file of sourceFiles) {
+    const normalizedFile = normalizeMultipartUploadFile(file);
+    if (!normalizedFile) continue;
+
+    const inputType = classifyVolcengineFileInputType(normalizedFile);
+    if (!inputType) {
+      if (strictSupportedTypes) {
+        throw new Error(
+          `文件类型不支持 Files API 上传：${normalizedFile.originalname || "未命名文件"}`,
+        );
+      }
+      fallbackFiles.push(normalizedFile);
+      continue;
+    }
+
+    const result = await uploadVolcengineFileAndWaitActive({
+      file: normalizedFile,
+      inputType,
+      model,
+      filesEndpoint,
+      apiKey,
+    });
+    uploadedRefs.push({
+      fileId: result.fileId,
+      inputType,
+      name: String(normalizedFile.originalname || ""),
+      mimeType: String(normalizedFile.mimetype || ""),
+      size: Number(normalizedFile.size || 0),
+    });
+  }
+
+  return {
+    uploadedRefs,
+    fallbackFiles,
+  };
 }
 
 async function uploadVolcengineFileAndWaitActive({
@@ -4972,6 +5192,15 @@ async function getSystemPromptByAgent(agentId) {
 
 async function getResolvedAgentRuntimeConfig(agentId) {
   const targetAgent = sanitizeAgent(agentId);
+  if (targetAgent === AGENT_E_ID) {
+    try {
+      const agentEConfig = await readAgentEConfig();
+      return sanitizeAgentERuntime(agentEConfig?.runtime, agentEConfig?.runtime);
+    } catch (error) {
+      console.error("Failed to load agent E runtime config:", error);
+      return sanitizeAgentERuntime();
+    }
+  }
   try {
     const config = await readAdminAgentConfig();
     const resolved = resolveAgentRuntimeConfigs(config.runtimeConfigs);
@@ -5198,7 +5427,7 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
   );
   const openrouterPdfEngine = sanitizeOpenRouterPdfEngine(source.openrouterPdfEngine);
 
-  return {
+  const next = {
     provider,
     model,
     protocol,
@@ -5231,6 +5460,13 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     openrouterUseResponseHealing,
     openrouterPdfEngine,
   };
+
+  if (isVolcengineFixedSamplingModel(modelForMatching)) {
+    next.temperature = VOLCENGINE_FIXED_TEMPERATURE;
+    next.topP = VOLCENGINE_FIXED_TOP_P;
+  }
+
+  return next;
 }
 
 function resolveAgentRuntimeConfigs(runtimeConfigs) {
@@ -5245,7 +5481,7 @@ function resolveAgentRuntimeConfigs(runtimeConfigs) {
 function normalizeRuntimeConfigFromPreset(runtimeConfig, agentId = "A") {
   const config = sanitizeSingleAgentRuntimeConfig(runtimeConfig, agentId);
   const base = getRuntimePresetDefaults(config.creativityMode);
-  return {
+  const next = {
     ...config,
     temperature:
       config.creativityMode === "custom"
@@ -5264,6 +5500,17 @@ function normalizeRuntimeConfigFromPreset(runtimeConfig, agentId = "A") {
         ? config.presencePenalty
         : sanitizeRuntimeNumber(base.presencePenalty, config.presencePenalty, -2, 2),
   };
+
+  const normalizedAgentId = sanitizeAgent(agentId);
+  const modelForMatching =
+    sanitizeRuntimeModel(config.model) ||
+    getModelByAgent(normalizedAgentId, { model: "" });
+  if (isVolcengineFixedSamplingModel(modelForMatching)) {
+    next.temperature = VOLCENGINE_FIXED_TEMPERATURE;
+    next.topP = VOLCENGINE_FIXED_TOP_P;
+  }
+
+  return next;
 }
 
 function getRuntimePresetDefaults(mode) {
@@ -5813,6 +6060,7 @@ function defaultChatState() {
       apiReasoningEffort: "high",
       lastAppliedReasoning: "high",
       smartContextEnabled: false,
+      smartContextEnabledBySessionAgent: {},
     },
   };
 }
@@ -5870,6 +6118,50 @@ function sanitizeSessionMessageUpsertsPayload(payload) {
   return Array.from(deduped.values());
 }
 
+function sanitizeSmartContextMapAgentId(value) {
+  const key = String(value || "")
+    .trim()
+    .toUpperCase();
+  if (["A", "B", "C", "D", AGENT_E_ID].includes(key)) return key;
+  return "";
+}
+
+function buildSmartContextEnabledMapKey(sessionId, agentId) {
+  const safeSessionId = sanitizeId(sessionId, "");
+  const safeAgentId = sanitizeSmartContextMapAgentId(agentId);
+  if (!safeSessionId || !safeAgentId) return "";
+  return `${safeSessionId}::${safeAgentId}`;
+}
+
+function sanitizeSmartContextEnabledBySessionAgent(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const normalized = {};
+
+  Object.entries(source)
+    .slice(0, 1200)
+    .forEach(([rawKey, rawValue]) => {
+      if (rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) {
+        const safeSessionId = sanitizeId(rawKey, "");
+        if (!safeSessionId) return;
+        Object.entries(rawValue)
+          .slice(0, 8)
+          .forEach(([rawAgentId, nestedValue]) => {
+            const key = buildSmartContextEnabledMapKey(safeSessionId, rawAgentId);
+            if (!key) return;
+            normalized[key] = sanitizeRuntimeBoolean(nestedValue, false);
+          });
+        return;
+      }
+
+      const [rawSessionId, rawAgentId] = String(rawKey || "").split("::");
+      const key = buildSmartContextEnabledMapKey(rawSessionId, rawAgentId);
+      if (!key) return;
+      normalized[key] = sanitizeRuntimeBoolean(rawValue, false);
+    });
+
+  return normalized;
+}
+
 function sanitizeStateSettings(raw) {
   const source = raw && typeof raw === "object" ? raw : {};
   const agent = sanitizeAgent(source.agent);
@@ -5878,6 +6170,9 @@ function sanitizeStateSettings(raw) {
   const apiReasoningEffort = sanitizeReasoning(source.apiReasoningEffort, "high");
   const lastAppliedReasoning = sanitizeReasoning(source.lastAppliedReasoning, "high");
   const smartContextEnabled = sanitizeRuntimeBoolean(source.smartContextEnabled, false);
+  const smartContextEnabledBySessionAgent = sanitizeSmartContextEnabledBySessionAgent(
+    source.smartContextEnabledBySessionAgent,
+  );
 
   return {
     agent,
@@ -5886,6 +6181,7 @@ function sanitizeStateSettings(raw) {
     apiReasoningEffort,
     lastAppliedReasoning,
     smartContextEnabled,
+    smartContextEnabledBySessionAgent,
   };
 }
 

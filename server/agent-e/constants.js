@@ -1,33 +1,39 @@
 export const AGENT_E_ID = "E";
 export const AGENT_E_CONFIG_KEY = "global";
+export const AGENT_E_FIXED_PROVIDER = "volcengine";
+export const AGENT_E_FIXED_PROTOCOL = "responses";
+export const AGENT_E_FIXED_MODEL = "doubao-seed-2-0-pro-260215";
+export const AGENT_E_FIXED_TEMPERATURE = 1;
+export const AGENT_E_FIXED_TOP_P = 0.95;
+export const AGENT_E_FIXED_MAX_OUTPUT_TOKENS = 131072;
 
 export const AGENT_E_DEFAULT_RUNTIME = Object.freeze({
-  provider: "openrouter",
-  model: "z-ai/glm-4.7-flash",
-  protocol: "chat",
-  temperature: 0.3,
-  topP: 0.9,
+  provider: AGENT_E_FIXED_PROVIDER,
+  model: AGENT_E_FIXED_MODEL,
+  protocol: AGENT_E_FIXED_PROTOCOL,
+  temperature: AGENT_E_FIXED_TEMPERATURE,
+  topP: AGENT_E_FIXED_TOP_P,
   frequencyPenalty: 0,
   presencePenalty: 0,
   contextRounds: 12,
-  maxOutputTokens: 8192,
+  maxOutputTokens: AGENT_E_FIXED_MAX_OUTPUT_TOKENS,
   maxReasoningTokens: 32000,
   enableThinking: true,
   includeCurrentTime: false,
-  injectSafetyPrompt: true,
+  injectSafetyPrompt: false,
   preventPromptLeak: false,
   openrouterPdfEngine: "auto",
 });
 
 export const AGENT_E_DEFAULT_PROVIDER_POLICY = Object.freeze({
   mode: "locked",
-  lockedProvider: "openrouter",
+  lockedProvider: AGENT_E_FIXED_PROVIDER,
 });
 
 export const AGENT_E_DEFAULT_REVIEW_POLICY = Object.freeze({
   language: "zh-CN",
   requireEvidenceAnchors: true,
-  forceStructuredOutput: true,
+  forceStructuredOutput: false,
 });
 
 export const AGENT_E_DEFAULT_SKILL_POLICY = Object.freeze({
@@ -37,7 +43,7 @@ export const AGENT_E_DEFAULT_SKILL_POLICY = Object.freeze({
   allowFallbackGeneralAnswer: false,
 });
 
-export const AGENT_E_BASE_SYSTEM_PROMPT = `你是 SSCI 教育学/教育技术学论文审稿助手（Agent E）。
+export const AGENT_E_BASE_SYSTEM_PROMPT = `你是 SSCI教育学/教育技术学论文审稿助手（SSCI审稿人）。
 
 遵循以下规则：
 1. 优先识别研究问题、理论框架、方法、结果与结论是否一致。

@@ -106,26 +106,43 @@ export function deleteAllUserChats(adminToken) {
 export async function streamAdminAgentDebug(adminToken, payload, handlers = {}) {
   const safePayload =
     payload && typeof payload === "object" ? payload : {};
+  const agentId = String(safePayload.agentId || "A")
+    .trim()
+    .toUpperCase();
+  const isAgentE = agentId === "E";
+  const endpoint = isAgentE
+    ? "/api/auth/admin/agent-e/debug-stream"
+    : "/api/auth/admin/agent-debug-stream";
+  const runtimeKey = isAgentE ? "runtimeOverride" : "runtimeConfig";
+  const runtimePayload =
+    safePayload.runtimeOverride && typeof safePayload.runtimeOverride === "object"
+      ? safePayload.runtimeOverride
+      : safePayload.runtimeConfig && typeof safePayload.runtimeConfig === "object"
+        ? safePayload.runtimeConfig
+        : {};
   const files = Array.isArray(safePayload.files)
     ? safePayload.files.filter(Boolean)
+    : [];
+  const volcengineFileRefs = Array.isArray(safePayload.volcengineFileRefs)
+    ? safePayload.volcengineFileRefs.filter(Boolean)
     : [];
 
   let body;
   let headers;
 
-  if (files.length > 0) {
+  if (files.length > 0 || volcengineFileRefs.length > 0) {
     const formData = new FormData();
-    formData.append("agentId", String(safePayload.agentId || "A"));
+    formData.append("agentId", agentId);
     formData.append(
       "messages",
       JSON.stringify(
         Array.isArray(safePayload.messages) ? safePayload.messages : [],
       ),
     );
-    formData.append(
-      "runtimeConfig",
-      JSON.stringify(safePayload.runtimeConfig || {}),
-    );
+    formData.append(runtimeKey, JSON.stringify(runtimePayload));
+    if (volcengineFileRefs.length > 0) {
+      formData.append("volcengineFileRefs", JSON.stringify(volcengineFileRefs));
+    }
     files.forEach((file) => {
       formData.append("files", file);
     });
@@ -135,9 +152,10 @@ export async function streamAdminAgentDebug(adminToken, payload, handlers = {}) 
     });
   } else {
     body = JSON.stringify({
-      agentId: String(safePayload.agentId || "A"),
+      agentId,
       messages: Array.isArray(safePayload.messages) ? safePayload.messages : [],
-      runtimeConfig: safePayload.runtimeConfig || {},
+      [runtimeKey]: runtimePayload,
+      volcengineFileRefs,
     });
     headers = authHeader(adminToken, {
       "Content-Type": "application/json",
@@ -145,7 +163,7 @@ export async function streamAdminAgentDebug(adminToken, payload, handlers = {}) 
     });
   }
 
-  const resp = await fetch("/api/auth/admin/agent-debug-stream", {
+  const resp = await fetch(endpoint, {
     method: "POST",
     headers,
     body,
@@ -192,6 +210,30 @@ export async function streamAdminAgentDebug(adminToken, payload, handlers = {}) 
   if (tail) {
     handleSseEvent(tail, handlers);
   }
+}
+
+export async function uploadAdminVolcengineDebugFiles(
+  adminToken,
+  { agentId = "A", files = [] } = {},
+) {
+  const safeFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  const formData = new FormData();
+  formData.append("agentId", String(agentId || "A"));
+  safeFiles.forEach((file) => {
+    formData.append("files", file);
+  });
+
+  const resp = await fetch("/api/auth/admin/volcengine-files/upload", {
+    method: "POST",
+    headers: authHeader(adminToken),
+    body: formData,
+  });
+  const data = await readJson(resp);
+  if (!resp.ok) {
+    const message = data?.error || data?.message || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+  return data;
 }
 
 function parseSseEvent(block) {

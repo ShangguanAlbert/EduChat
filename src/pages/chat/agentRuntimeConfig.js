@@ -1,4 +1,7 @@
 export const AGENT_IDS = ["A", "B", "C", "D"];
+export const VOLCENGINE_FIXED_SAMPLING_MODEL_ID = "doubao-seed-2-0-pro-260215";
+export const VOLCENGINE_FIXED_TEMPERATURE = 1;
+export const VOLCENGINE_FIXED_TOP_P = 0.95;
 const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
 const RUNTIME_MAX_INPUT_TOKENS = 512000;
 const RUNTIME_MAX_OUTPUT_TOKENS = 1048576;
@@ -10,6 +13,45 @@ const DEFAULT_AGENT_MODEL_BY_AGENT = Object.freeze({
   D: "z-ai/glm-4.7-flash",
 });
 const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
+  {
+    id: "doubao-seed-2-0-pro-260215",
+    aliases: [
+      "doubao-seed-2-0-pro-260215",
+      "doubao-seed-2-0-pro",
+      "doubao-seed-2.0-pro-260215",
+      "doubao-seed-2.0-pro",
+    ],
+    contextWindowTokens: 256000,
+    maxInputTokens: 256000,
+    maxOutputTokens: 128000,
+    maxReasoningTokens: 128000,
+  },
+  {
+    id: "doubao-seed-2-0-lite-260215",
+    aliases: [
+      "doubao-seed-2-0-lite-260215",
+      "doubao-seed-2-0-lite",
+      "doubao-seed-2.0-lite-260215",
+      "doubao-seed-2.0-lite",
+    ],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
+  {
+    id: "doubao-seed-2-0-mini-260215",
+    aliases: [
+      "doubao-seed-2-0-mini-260215",
+      "doubao-seed-2-0-mini",
+      "doubao-seed-2.0-mini-260215",
+      "doubao-seed-2.0-mini",
+    ],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32000,
+    maxReasoningTokens: 32000,
+  },
   {
     id: "doubao-seed-1-8-251228",
     aliases: ["doubao-seed-1-8-251228", "doubao-seed-1-8"],
@@ -387,6 +429,11 @@ export function resolveRuntimeTokenProfileByModel(model) {
   };
 }
 
+export function isVolcengineFixedSamplingModel(model) {
+  const matched = resolveRuntimeTokenProfileByModel(model);
+  return matched?.matchedModelId === VOLCENGINE_FIXED_SAMPLING_MODEL_ID;
+}
+
 export const CREATIVITY_PRESET_OPTIONS = [
   { value: "precise", label: "精确模式" },
   { value: "balanced", label: "平衡模式" },
@@ -416,7 +463,7 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
   const preset = getPresetDefaults(creativityMode);
   const isCustom = creativityMode === "custom";
 
-  return {
+  const next = {
     provider: sanitizeProvider(source.provider),
     model,
     protocol,
@@ -532,6 +579,13 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
     ),
     openrouterPdfEngine: sanitizeOpenRouterPdfEngine(source.openrouterPdfEngine),
   };
+
+  if (isVolcengineFixedSamplingModel(modelForMatching)) {
+    next.temperature = VOLCENGINE_FIXED_TEMPERATURE;
+    next.topP = VOLCENGINE_FIXED_TOP_P;
+  }
+
+  return next;
 }
 
 export function sanitizeRuntimeConfigMap(raw) {
