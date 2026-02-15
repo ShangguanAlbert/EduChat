@@ -1,5 +1,5 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Plus, ArrowUp, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Plus, ArrowUp, X, Image as ImageIcon } from "lucide-react";
 
 const ACCEPT_UPLOAD_TYPES = [
   ".doc",
@@ -83,6 +83,7 @@ export default function MessageInput({
 }) {
   const [text, setText] = useState("");
   const [files, setFiles] = useState([]);
+  const [imagePreviewUrlsByIndex, setImagePreviewUrlsByIndex] = useState({});
   const [preparingFiles, setPreparingFiles] = useState(false);
   const [prepareError, setPrepareError] = useState("");
   const fileRef = useRef(null);
@@ -106,8 +107,8 @@ export default function MessageInput({
     if (fileRef.current) fileRef.current.value = "";
   }
 
-  async function onPickFiles(e) {
-    const picked = Array.from(e.target.files || []);
+  async function appendPickedFiles(pickedFiles) {
+    const picked = Array.isArray(pickedFiles) ? pickedFiles.filter(Boolean) : [];
     if (!picked.length) return;
     setPrepareError("");
 
@@ -131,6 +132,23 @@ export default function MessageInput({
     }
   }
 
+  async function onPickFiles(e) {
+    const picked = Array.from(e.target.files || []);
+    await appendPickedFiles(picked);
+  }
+
+  async function onComposerPaste(e) {
+    if (disabled || preparingFiles) return;
+    const items = Array.from(e.clipboardData?.items || []);
+    const imageFiles = items
+      .filter((item) => item && item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file) => file instanceof File && String(file.type || "").startsWith("image/"));
+    if (imageFiles.length === 0) return;
+    e.preventDefault();
+    await appendPickedFiles(imageFiles);
+  }
+
   function removeFile(idx) {
     setFiles((prev) => prev.filter((_, i) => i !== idx));
   }
@@ -148,6 +166,34 @@ export default function MessageInput({
     );
     textRef.current.style.height = `${next}px`;
   }, [text]);
+
+  useEffect(() => {
+    if (files.length === 0) {
+      setImagePreviewUrlsByIndex({});
+      return undefined;
+    }
+
+    const previews = [];
+    files.forEach((item, index) => {
+      const file = readAttachmentFile(item);
+      if (!(file instanceof File)) return;
+      const type = String(file.type || "").trim().toLowerCase();
+      if (!type.startsWith("image/")) return;
+      const url = URL.createObjectURL(file);
+      previews.push({ index, url });
+    });
+
+    setImagePreviewUrlsByIndex(
+      previews.reduce((map, item) => {
+        map[item.index] = item.url;
+        return map;
+      }, {}),
+    );
+
+    return () => {
+      previews.forEach((item) => URL.revokeObjectURL(item.url));
+    };
+  }, [files]);
 
   return (
     <div className={`composer${disabled ? " is-disabled" : ""}`}>
@@ -170,23 +216,52 @@ export default function MessageInput({
 
       {files.length > 0 && (
         <div className="attach-bar">
-          {files.map((f, idx) => (
-            <div className="attach-chip" key={`${readFileName(f)}-${idx}`}>
-              <span className="attach-name" title={readFileName(f)}>
-                {readFileName(f)}
-              </span>
-              <button
-                type="button"
-                className="attach-x"
-                onClick={() => removeFile(idx)}
-                aria-label="移除附件"
-                title="移除"
-                disabled={disabled || preparingFiles}
-              >
-                <X size={14} />
-              </button>
-            </div>
-          ))}
+          {files.map((f, idx) => {
+            const isImage = isImageAttachment(f);
+            const previewUrl = imagePreviewUrlsByIndex[idx] || "";
+
+            if (isImage) {
+              return (
+                <div className="attach-image-chip" key={`${readFileName(f)}-${idx}`}>
+                  {previewUrl ? (
+                    <img src={previewUrl} alt={readFileName(f)} className="attach-image-thumb" />
+                  ) : (
+                    <span className="attach-image-fallback" aria-hidden="true">
+                      <ImageIcon size={14} />
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="attach-image-remove"
+                    onClick={() => removeFile(idx)}
+                    aria-label="移除附件"
+                    title="移除"
+                    disabled={disabled || preparingFiles}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              );
+            }
+
+            return (
+              <div className="attach-chip" key={`${readFileName(f)}-${idx}`}>
+                <span className="attach-name" title={readFileName(f)}>
+                  {readFileName(f)}
+                </span>
+                <button
+                  type="button"
+                  className="attach-x"
+                  onClick={() => removeFile(idx)}
+                  aria-label="移除附件"
+                  title="移除"
+                  disabled={disabled || preparingFiles}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -222,11 +297,15 @@ export default function MessageInput({
           value={text}
           disabled={disabled}
           onChange={(e) => setText(e.target.value)}
+          onPaste={onComposerPaste}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
+            if (e.key !== "Enter" || e.shiftKey) return;
+            const composing =
+              Boolean(e.nativeEvent?.isComposing) ||
+              Number(e.nativeEvent?.keyCode) === 229;
+            if (composing) return;
+            e.preventDefault();
+            submit();
           }}
           rows={1}
         />
@@ -248,6 +327,24 @@ export default function MessageInput({
 
 function readFileName(fileLike) {
   return String(fileLike?.name || fileLike?.filename || "未命名文件");
+}
+
+function readAttachmentFile(item) {
+  if (item instanceof File) return item;
+  if (item?.file instanceof File) return item.file;
+  return null;
+}
+
+function readAttachmentMimeType(item) {
+  const localFile = readAttachmentFile(item);
+  if (localFile) return String(localFile.type || "").trim().toLowerCase();
+  return String(item?.mimeType || item?.type || "").trim().toLowerCase();
+}
+
+function isImageAttachment(item) {
+  const inputType = String(item?.inputType || "").trim().toLowerCase();
+  if (inputType === "input_image") return true;
+  return readAttachmentMimeType(item).startsWith("image/");
 }
 
 function buildFinalPrompt(text, quoteText) {

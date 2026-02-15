@@ -33,10 +33,13 @@ export function createPartySocketClient({
   onAuthed,
   onJoined,
   onMessageCreated,
+  onMessageDeleted,
   onMessageReactionsUpdated,
   onRoomUpdated,
   onRoomDissolved,
   onMemberJoined,
+  onMemberPresenceUpdated,
+  onRoomReadStateUpdated,
   onError,
   onStatus,
 } = {}) {
@@ -118,6 +121,11 @@ export function createPartySocketClient({
       return;
     }
 
+    if (type === "message_deleted") {
+      onMessageDeleted?.(payload);
+      return;
+    }
+
     if (type === "room_updated") {
       onRoomUpdated?.(payload);
       return;
@@ -130,6 +138,16 @@ export function createPartySocketClient({
 
     if (type === "member_joined") {
       onMemberJoined?.(payload);
+      return;
+    }
+
+    if (type === "member_presence_updated") {
+      onMemberPresenceUpdated?.(payload);
+      return;
+    }
+
+    if (type === "room_read_state_updated") {
+      onRoomReadStateUpdated?.(payload);
       return;
     }
 

@@ -34,6 +34,7 @@ dotenv.config();
 const app = express();
 const groupChatWsRoomSockets = new Map();
 const groupChatWsMetaBySocket = new Map();
+const groupChatWsOnlineCountsByRoom = new Map();
 const port = process.env.PORT || 8787;
 const mongoUri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/educhat";
 const authSecret = String(
@@ -65,7 +66,9 @@ const VOLCENGINE_FIXED_SAMPLING_MODEL_ID = "doubao-seed-2-0-pro-260215";
 const VOLCENGINE_FIXED_TEMPERATURE = 1;
 const VOLCENGINE_FIXED_TOP_P = 0.95;
 const UPLOADED_FILE_CONTEXT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const GENERATED_IMAGE_HISTORY_TTL_MS = 3 * 24 * 60 * 60 * 1000;
+const GENERATED_IMAGE_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const GENERATED_IMAGE_HISTORY_FETCH_TIMEOUT_MS = 15 * 1000;
 const GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER = 2;
 const GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER = 8;
 const GROUP_CHAT_MAX_MEMBERS_PER_ROOM = 5;
@@ -73,11 +76,14 @@ const GROUP_CHAT_MAX_ROOMS_PER_BOOTSTRAP = 16;
 const GROUP_CHAT_DEFAULT_MESSAGES_LIMIT = 80;
 const GROUP_CHAT_MAX_MESSAGES_LIMIT = 200;
 const GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES = 6 * 1024 * 1024;
+const GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+const GROUP_CHAT_FILE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const GROUP_CHAT_TEXT_MAX_LENGTH = 1800;
 const GROUP_CHAT_ROOM_NAME_MAX_LENGTH = 30;
 const GROUP_CHAT_REPLY_PREVIEW_MAX_LENGTH = 120;
 const GROUP_CHAT_MAX_REACTIONS_PER_MESSAGE = 32;
 const GROUP_CHAT_REACTION_EMOJI_MAX_SYMBOLS = 6;
+const GROUP_CHAT_MAX_READ_STATES_PER_ROOM = GROUP_CHAT_MAX_MEMBERS_PER_ROOM;
 const GROUP_CHAT_WS_PATH = "/ws/group-chat";
 const GROUP_CHAT_WS_AUTH_TIMEOUT_MS = 10000;
 const GROUP_CHAT_WS_MAX_PAYLOAD_BYTES = 128 * 1024;
@@ -603,6 +609,13 @@ const groupChatImageUpload = multer({
     fileSize: GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES,
   },
 });
+const groupChatFileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: 1,
+    fileSize: GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+  },
+});
 
 const authUserSchema = new mongoose.Schema(
   {
@@ -744,7 +757,11 @@ const generatedImageHistorySchema = new mongoose.Schema(
   {
     userId: { type: String, required: true, index: true },
     prompt: { type: String, default: "" },
-    imageUrl: { type: String, required: true },
+    imageUrl: { type: String, default: "" },
+    imageStorageType: { type: String, default: "remote" },
+    imageMimeType: { type: String, default: "" },
+    imageSize: { type: Number, default: 0 },
+    imageData: { type: Buffer, default: Buffer.alloc(0) },
     responseFormat: { type: String, default: "url" },
     size: { type: String, default: "" },
     model: { type: String, default: "" },
@@ -769,6 +786,16 @@ const GeneratedImageHistory =
   mongoose.models.GeneratedImageHistory ||
   mongoose.model("GeneratedImageHistory", generatedImageHistorySchema);
 
+const groupChatRoomReadStateSchema = new mongoose.Schema(
+  {
+    userId: { type: String, required: true },
+    lastReadMessageId: { type: String, default: "" },
+    lastReadAt: { type: Date, default: null },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 const groupChatRoomSchema = new mongoose.Schema(
   {
     roomCode: { type: String, required: true, unique: true, index: true },
@@ -779,6 +806,10 @@ const groupChatRoomSchema = new mongoose.Schema(
       default: () => [],
     },
     memberCount: { type: Number, default: 1, min: 1 },
+    readStates: {
+      type: [groupChatRoomReadStateSchema],
+      default: () => [],
+    },
   },
   {
     timestamps: true,
@@ -803,12 +834,42 @@ const groupChatMessageReactionSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const groupChatStoredFileSchema = new mongoose.Schema(
+  {
+    roomId: { type: String, required: true, index: true },
+    messageId: { type: String, default: "", index: true },
+    uploaderUserId: { type: String, required: true, index: true },
+    fileName: { type: String, default: "group-file.bin" },
+    mimeType: { type: String, default: "application/octet-stream" },
+    size: { type: Number, default: 0 },
+    data: { type: Buffer, default: Buffer.alloc(0) },
+    expiresAt: { type: Date, required: true },
+  },
+  {
+    timestamps: true,
+    collection: "group_chat_files",
+    autoIndex: false,
+  },
+);
+groupChatStoredFileSchema.index(
+  { roomId: 1, createdAt: -1 },
+  { name: "ix_group_chat_files_room_created_desc" },
+);
+groupChatStoredFileSchema.index(
+  { expiresAt: 1 },
+  { expireAfterSeconds: 0, name: "ttl_group_chat_files_expires_at" },
+);
+
+const GroupChatStoredFile =
+  mongoose.models.GroupChatStoredFile ||
+  mongoose.model("GroupChatStoredFile", groupChatStoredFileSchema);
+
 const groupChatMessageSchema = new mongoose.Schema(
   {
     roomId: { type: String, required: true, index: true },
     type: {
       type: String,
-      enum: ["text", "image", "system"],
+      enum: ["text", "image", "file", "system"],
       required: true,
     },
     senderUserId: { type: String, default: "" },
@@ -821,6 +882,19 @@ const groupChatMessageSchema = new mongoose.Schema(
           mimeType: { type: String, default: "" },
           fileName: { type: String, default: "" },
           size: { type: Number, default: 0 },
+        },
+        { _id: false },
+      ),
+      default: () => ({}),
+    },
+    file: {
+      type: new mongoose.Schema(
+        {
+          fileId: { type: String, default: "" },
+          fileName: { type: String, default: "" },
+          mimeType: { type: String, default: "" },
+          size: { type: Number, default: 0 },
+          expiresAt: { type: Date, default: null },
         },
         { _id: false },
       ),
@@ -1834,6 +1908,7 @@ app.get("/api/images/history", requireChatAuth, async (req, res) => {
       {
         prompt: 1,
         imageUrl: 1,
+        imageStorageType: 1,
         responseFormat: 1,
         size: 1,
         model: 1,
@@ -1854,6 +1929,75 @@ app.get("/api/images/history", requireChatAuth, async (req, res) => {
     ok: true,
     items: Array.isArray(docs) ? docs.map(toGeneratedImageHistoryItem) : [],
   });
+});
+
+app.get("/api/images/history/:imageId/content", async (req, res) => {
+  const userId = resolveImageHistoryAuthUserId(req);
+  const imageId = sanitizeId(req.params?.imageId, "");
+  if (!userId || !imageId) {
+    res.status(401).json({ error: "登录状态无效或已过期，请重新登录。" });
+    return;
+  }
+
+  try {
+    const doc = await GeneratedImageHistory.findOne(
+      {
+        _id: imageId,
+        userId,
+      },
+      {
+        imageUrl: 1,
+        imageData: 1,
+        imageMimeType: 1,
+        imageStorageType: 1,
+        expiresAt: 1,
+      },
+    ).lean();
+    if (!doc) {
+      res.status(404).json({ error: "图片不存在或已过期。" });
+      return;
+    }
+
+    const expiresAt = sanitizeIsoDate(doc?.expiresAt);
+    if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+      res.status(410).json({ error: "图片已过期。" });
+      return;
+    }
+
+    const imageBuffer = extractGeneratedImageDataBuffer(doc?.imageData);
+    const imageMimeType = normalizeGeneratedImageMimeType(doc?.imageMimeType);
+    if (imageBuffer.length > 0) {
+      res.setHeader("Content-Type", imageMimeType || "image/png");
+      res.setHeader("Content-Length", String(imageBuffer.length));
+      res.setHeader("Cache-Control", "private, no-store");
+      res.send(imageBuffer);
+      return;
+    }
+
+    const fallbackUrl = normalizeGeneratedImageStoreUrl(doc?.imageUrl || "");
+    if (/^https?:\/\//i.test(fallbackUrl)) {
+      res.redirect(fallbackUrl);
+      return;
+    }
+    const fallbackParsedDataUrl = parseGeneratedImageDataUrl(fallbackUrl);
+    if (fallbackParsedDataUrl) {
+      res.setHeader("Content-Type", fallbackParsedDataUrl.mimeType || "image/png");
+      res.setHeader("Content-Length", String(fallbackParsedDataUrl.data.length));
+      res.setHeader("Cache-Control", "private, no-store");
+      res.send(fallbackParsedDataUrl.data);
+      return;
+    }
+
+    res.status(404).json({ error: "图片不存在或已过期。" });
+  } catch (error) {
+    if (String(error?.name || "") === "CastError") {
+      res.status(400).json({ error: "无效图片 ID。" });
+      return;
+    }
+    res.status(500).json({
+      error: error?.message || "读取图片内容失败，请稍后重试。",
+    });
+  }
 });
 
 app.delete("/api/images/history", requireChatAuth, async (req, res) => {
@@ -1916,7 +2060,13 @@ app.get("/api/group-chat/bootstrap", requireChatAuth, async (req, res) => {
       .sort({ updatedAt: -1 })
       .limit(GROUP_CHAT_MAX_ROOMS_PER_BOOTSTRAP)
       .lean();
-    const roomItems = rooms.map((room) => normalizeGroupChatRoomDoc(room)).filter(Boolean);
+    const roomItems = rooms
+      .map((room) =>
+        normalizeGroupChatRoomDoc(room, {
+          viewerUserId: userId,
+        }),
+      )
+      .filter(Boolean);
     const memberUserIds = collectGroupChatMemberUserIds(roomItems);
     const memberUsers = await readGroupChatUsersByIds(memberUserIds);
 
@@ -1989,11 +2139,20 @@ app.post("/api/group-chat/rooms", requireChatAuth, async (req, res) => {
       roomId: sanitizeId(roomDoc?._id, ""),
       content: `${buildGroupChatDisplayName(req.authUser)} 创建了派`,
     });
+    if (systemMessageDoc?._id) {
+      await markGroupChatRoomReadByMessageId({
+        roomId: sanitizeId(roomDoc?._id, ""),
+        userId,
+        messageId: sanitizeId(systemMessageDoc?._id, ""),
+      });
+    }
     broadcastGroupChatMessageCreated(sanitizeId(roomDoc?._id, ""), systemMessageDoc);
 
     res.json({
       ok: true,
-      room: normalizeGroupChatRoomDoc(roomDoc),
+      room: normalizeGroupChatRoomDoc(roomDoc, {
+        viewerUserId: userId,
+      }),
     });
   } catch (error) {
     res.status(500).json({
@@ -2021,7 +2180,9 @@ app.post("/api/group-chat/rooms/join", requireChatAuth, async (req, res) => {
       return;
     }
 
-    const normalizedRoom = normalizeGroupChatRoomDoc(room);
+    const normalizedRoom = normalizeGroupChatRoomDoc(room, {
+      viewerUserId: userId,
+    });
     if (!normalizedRoom) {
       res.status(404).json({ error: "群聊不存在或已失效。" });
       return;
@@ -2061,7 +2222,9 @@ app.post("/api/group-chat/rooms/join", requireChatAuth, async (req, res) => {
 
     if (!updated) {
       const latest = await GroupChatRoom.findById(normalizedRoom.id).lean();
-      const latestRoom = normalizeGroupChatRoomDoc(latest);
+      const latestRoom = normalizeGroupChatRoomDoc(latest, {
+        viewerUserId: userId,
+      });
       if (!latestRoom) {
         res.status(404).json({ error: "群聊不存在或已失效。" });
         return;
@@ -2093,13 +2256,22 @@ app.post("/api/group-chat/rooms/join", requireChatAuth, async (req, res) => {
       roomId,
       content: `${buildGroupChatDisplayName(req.authUser)} 加入了派`,
     });
+    if (systemMessageDoc?._id) {
+      await markGroupChatRoomReadByMessageId({
+        roomId,
+        userId,
+        messageId: sanitizeId(systemMessageDoc?._id, ""),
+      });
+    }
     broadcastGroupChatMessageCreated(roomId, systemMessageDoc);
     broadcastGroupChatMemberJoined(roomId, joinedUser);
 
     res.json({
       ok: true,
       joined: true,
-      room: normalizeGroupChatRoomDoc(updated),
+      room: normalizeGroupChatRoomDoc(updated, {
+        viewerUserId: userId,
+      }),
     });
   } catch (error) {
     res.status(500).json({
@@ -2127,7 +2299,9 @@ app.patch("/api/group-chat/rooms/:roomId", requireChatAuth, async (req, res) => 
 
   try {
     const room = await GroupChatRoom.findById(roomId).lean();
-    const normalizedRoom = normalizeGroupChatRoomDoc(room);
+    const normalizedRoom = normalizeGroupChatRoomDoc(room, {
+      viewerUserId: userId,
+    });
     if (!normalizedRoom) {
       res.status(404).json({ error: "群聊不存在或已失效。" });
       return;
@@ -2156,7 +2330,9 @@ app.patch("/api/group-chat/rooms/:roomId", requireChatAuth, async (req, res) => 
       },
       { new: true },
     ).lean();
-    const updatedRoom = normalizeGroupChatRoomDoc(updated);
+    const updatedRoom = normalizeGroupChatRoomDoc(updated, {
+      viewerUserId: userId,
+    });
     if (!updatedRoom) {
       res.status(404).json({ error: "群聊不存在或已失效。" });
       return;
@@ -2195,7 +2371,9 @@ app.delete("/api/group-chat/rooms/:roomId", requireChatAuth, async (req, res) =>
 
   try {
     const room = await GroupChatRoom.findById(roomId).lean();
-    const normalizedRoom = normalizeGroupChatRoomDoc(room);
+    const normalizedRoom = normalizeGroupChatRoomDoc(room, {
+      viewerUserId: userId,
+    });
     if (!normalizedRoom) {
       res.status(404).json({ error: "群聊不存在或已失效。" });
       return;
@@ -2208,6 +2386,7 @@ app.delete("/api/group-chat/rooms/:roomId", requireChatAuth, async (req, res) =>
     await Promise.all([
       GroupChatRoom.deleteOne({ _id: roomId }),
       GroupChatMessage.deleteMany({ roomId }),
+      GroupChatStoredFile.deleteMany({ roomId }),
     ]);
 
     broadcastGroupChatRoomDissolved(roomId, {
@@ -2241,7 +2420,9 @@ app.get("/api/group-chat/rooms/:roomId/messages", requireChatAuth, async (req, r
 
   try {
     const room = await GroupChatRoom.findOne({ _id: roomId, memberUserIds: userId }).lean();
-    const normalizedRoom = normalizeGroupChatRoomDoc(room);
+    const normalizedRoom = normalizeGroupChatRoomDoc(room, {
+      viewerUserId: userId,
+    });
     if (!normalizedRoom) {
       res.status(403).json({ error: "你不在该群聊中，无法查看消息。" });
       return;
@@ -2280,6 +2461,47 @@ app.get("/api/group-chat/rooms/:roomId/messages", requireChatAuth, async (req, r
   } catch (error) {
     res.status(500).json({
       error: error?.message || "读取群聊消息失败，请稍后重试。",
+    });
+  }
+});
+
+app.post("/api/group-chat/rooms/:roomId/read", requireChatAuth, async (req, res) => {
+  const userId = sanitizeId(req.authUser?._id, "");
+  const roomId = sanitizeId(req.params?.roomId, "");
+  const messageId = sanitizeId(req.body?.messageId || req.body?.lastMessageId, "");
+  if (!userId || !roomId) {
+    res.status(400).json({ error: "无效参数。" });
+    return;
+  }
+  if (!isMongoObjectIdLike(roomId)) {
+    res.status(400).json({ error: "无效群聊 ID。" });
+    return;
+  }
+
+  try {
+    const room = await GroupChatRoom.findOne({ _id: roomId, memberUserIds: userId }).lean();
+    if (!room) {
+      res.status(403).json({ error: "你不在该群聊中，无法更新已读状态。" });
+      return;
+    }
+
+    const updatedRoom = await markGroupChatRoomReadByMessageId({
+      roomId,
+      userId,
+      messageId,
+    });
+    const nextRoomDoc = updatedRoom || room;
+    const normalizedRoom = normalizeGroupChatRoomDoc(nextRoomDoc, {
+      viewerUserId: userId,
+    });
+
+    res.json({
+      ok: true,
+      room: normalizedRoom,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error?.message || "更新已读状态失败，请稍后重试。",
     });
   }
 });
@@ -2329,6 +2551,11 @@ app.post("/api/group-chat/rooms/:roomId/messages/text", requireChatAuth, async (
     });
 
     await GroupChatRoom.findByIdAndUpdate(roomId, { $set: { updatedAt: new Date() } });
+    await markGroupChatRoomReadByMessageId({
+      roomId,
+      userId,
+      messageId: sanitizeId(messageDoc?._id, ""),
+    });
     const normalizedMessage = normalizeGroupChatMessageDoc(messageDoc);
     if (!normalizedMessage) {
       throw new Error("消息格式化失败");
@@ -2385,7 +2612,7 @@ app.post(
         rawReplyToMessageId: req.body?.replyToMessageId,
       });
       const senderName = buildGroupChatDisplayName(req.authUser);
-      const fileName = sanitizeGroupChatImageFileName(file.originalname);
+      const fileName = sanitizeGroupChatImageFileName(req.body?.fileName || file.originalname);
       const dataUrl = `data:${mimeType};base64,${file.buffer.toString("base64")}`;
 
       const messageDoc = await GroupChatMessage.create({
@@ -2407,6 +2634,11 @@ app.post(
       });
 
       await GroupChatRoom.findByIdAndUpdate(roomId, { $set: { updatedAt: new Date() } });
+      await markGroupChatRoomReadByMessageId({
+        roomId,
+        userId,
+        messageId: sanitizeId(messageDoc?._id, ""),
+      });
       const normalizedMessage = normalizeGroupChatMessageDoc(messageDoc);
       if (!normalizedMessage) {
         throw new Error("消息格式化失败");
@@ -2420,6 +2652,272 @@ app.post(
     } catch (error) {
       res.status(500).json({
         error: error?.message || "发送图片失败，请稍后重试。",
+      });
+    }
+  },
+);
+
+app.post(
+  "/api/group-chat/rooms/:roomId/messages/file",
+  requireChatAuth,
+  groupChatFileUpload.single("file"),
+  async (req, res) => {
+    const userId = sanitizeId(req.authUser?._id, "");
+    const roomId = sanitizeId(req.params?.roomId, "");
+    if (!userId || !roomId) {
+      res.status(400).json({ error: "无效参数。" });
+      return;
+    }
+    if (!isMongoObjectIdLike(roomId)) {
+      res.status(400).json({ error: "无效群聊 ID。" });
+      return;
+    }
+
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ error: "请选择文件后再发送。" });
+      return;
+    }
+    if (!Buffer.isBuffer(file.buffer) || file.buffer.length === 0) {
+      res.status(400).json({ error: "文件内容为空，无法发送。" });
+      return;
+    }
+
+    const fileName = sanitizeGroupChatFileName(req.body?.fileName || file.originalname);
+    const mimeType = sanitizeGroupChatFileMimeType(file.mimetype);
+    const fileSize = sanitizeRuntimeInteger(
+      file.size,
+      file.buffer.length,
+      1,
+      GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+    );
+    const expiresAt = buildGroupChatFileExpireAt();
+    let storedFileDoc = null;
+    let createdMessageId = "";
+
+    try {
+      const room = await GroupChatRoom.findOne({ _id: roomId, memberUserIds: userId }).lean();
+      if (!room) {
+        res.status(403).json({ error: "你不在该群聊中，无法发送文件。" });
+        return;
+      }
+
+      const replyMeta = await resolveGroupChatReplyMeta({
+        roomId,
+        rawReplyToMessageId: req.body?.replyToMessageId,
+      });
+      const senderName = buildGroupChatDisplayName(req.authUser);
+
+      storedFileDoc = await GroupChatStoredFile.create({
+        roomId,
+        messageId: "",
+        uploaderUserId: userId,
+        fileName,
+        mimeType,
+        size: fileSize,
+        data: file.buffer,
+        expiresAt,
+      });
+      const fileId = sanitizeId(storedFileDoc?._id, "");
+      if (!fileId) {
+        throw new Error("文件存储失败");
+      }
+
+      const messageDoc = await GroupChatMessage.create({
+        roomId,
+        type: "file",
+        senderUserId: userId,
+        senderName,
+        content: "",
+        file: {
+          fileId,
+          fileName,
+          mimeType,
+          size: fileSize,
+          expiresAt,
+        },
+        replyToMessageId: replyMeta.replyToMessageId,
+        replyPreviewText: replyMeta.replyPreviewText,
+        replySenderName: replyMeta.replySenderName,
+        replyType: replyMeta.replyType,
+      });
+      createdMessageId = sanitizeId(messageDoc?._id, "");
+
+      await Promise.all([
+        GroupChatStoredFile.findByIdAndUpdate(fileId, {
+          $set: {
+            messageId: createdMessageId,
+          },
+        }),
+        GroupChatRoom.findByIdAndUpdate(roomId, { $set: { updatedAt: new Date() } }),
+      ]);
+      await markGroupChatRoomReadByMessageId({
+        roomId,
+        userId,
+        messageId: createdMessageId,
+      });
+      const normalizedMessage = normalizeGroupChatMessageDoc(messageDoc);
+      if (!normalizedMessage) {
+        throw new Error("消息格式化失败");
+      }
+      broadcastGroupChatMessageCreated(roomId, normalizedMessage);
+
+      res.json({
+        ok: true,
+        message: normalizedMessage,
+      });
+    } catch (error) {
+      if (storedFileDoc?._id && !createdMessageId) {
+        await GroupChatStoredFile.deleteOne({ _id: storedFileDoc._id }).catch(() => {});
+      }
+      res.status(500).json({
+        error: error?.message || "发送文件失败，请稍后重试。",
+      });
+    }
+  },
+);
+
+app.get("/api/group-chat/rooms/:roomId/files/:fileId/download", requireChatAuth, async (req, res) => {
+  const userId = sanitizeId(req.authUser?._id, "");
+  const roomId = sanitizeId(req.params?.roomId, "");
+  const fileId = sanitizeId(req.params?.fileId, "");
+  if (!userId || !roomId || !fileId) {
+    res.status(400).json({ error: "无效参数。" });
+    return;
+  }
+  if (!isMongoObjectIdLike(roomId) || !isMongoObjectIdLike(fileId)) {
+    res.status(400).json({ error: "无效群聊或文件 ID。" });
+    return;
+  }
+
+  try {
+    const hasMembership = await GroupChatRoom.exists({ _id: roomId, memberUserIds: userId });
+    if (!hasMembership) {
+      res.status(403).json({ error: "你不在该群聊中，无法下载文件。" });
+      return;
+    }
+
+    const storedFileDoc = await GroupChatStoredFile.findOne({
+      _id: fileId,
+      roomId,
+    }).lean();
+    const now = Date.now();
+    if (!storedFileDoc) {
+      const messageDoc = await GroupChatMessage.findOne(
+        {
+          roomId,
+          type: "file",
+          "file.fileId": fileId,
+        },
+        {
+          file: 1,
+        },
+      ).lean();
+      const messageExpiredAt = sanitizeIsoDate(messageDoc?.file?.expiresAt);
+      if (messageExpiredAt && toGroupChatDateTimestamp(messageExpiredAt) <= now) {
+        res.status(410).json({ error: "文件已过期。" });
+        return;
+      }
+      res.status(404).json({ error: "文件不存在或已删除。" });
+      return;
+    }
+
+    const fileExpiredAt = sanitizeIsoDate(storedFileDoc?.expiresAt);
+    if (fileExpiredAt && toGroupChatDateTimestamp(fileExpiredAt) <= now) {
+      res.status(410).json({ error: "文件已过期。" });
+      return;
+    }
+
+    const dataBuffer = Buffer.isBuffer(storedFileDoc.data) ? storedFileDoc.data : Buffer.from([]);
+    if (dataBuffer.length === 0) {
+      res.status(404).json({ error: "文件不存在或已删除。" });
+      return;
+    }
+    const downloadName = sanitizeGroupChatFileName(storedFileDoc.fileName);
+    const encodedName = encodeURIComponent(downloadName);
+    const contentType = sanitizeGroupChatFileMimeType(storedFileDoc.mimeType);
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Length", String(dataBuffer.length));
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${downloadName}"; filename*=UTF-8''${encodedName}`,
+    );
+    res.send(dataBuffer);
+  } catch (error) {
+    res.status(500).json({
+      error: error?.message || "下载文件失败，请稍后重试。",
+    });
+  }
+});
+
+app.delete(
+  "/api/group-chat/rooms/:roomId/messages/:messageId/file",
+  requireChatAuth,
+  async (req, res) => {
+    const userId = sanitizeId(req.authUser?._id, "");
+    const roomId = sanitizeId(req.params?.roomId, "");
+    const messageId = sanitizeId(req.params?.messageId, "");
+    if (!userId || !roomId || !messageId) {
+      res.status(400).json({ error: "无效参数。" });
+      return;
+    }
+    if (!isMongoObjectIdLike(roomId) || !isMongoObjectIdLike(messageId)) {
+      res.status(400).json({ error: "无效群聊或消息 ID。" });
+      return;
+    }
+
+    try {
+      const [room, messageDoc] = await Promise.all([
+        GroupChatRoom.findOne(
+          { _id: roomId, memberUserIds: userId },
+          { ownerUserId: 1 },
+        ).lean(),
+        GroupChatMessage.findOne({ _id: messageId, roomId }).lean(),
+      ]);
+      if (!room) {
+        res.status(403).json({ error: "你不在该群聊中，无法删除文件。" });
+        return;
+      }
+      if (!messageDoc) {
+        res.status(404).json({ error: "消息不存在或已删除。" });
+        return;
+      }
+      const messageType = sanitizeText(messageDoc.type, "", 20).toLowerCase();
+      if (messageType !== "file") {
+        res.status(400).json({ error: "该消息不是文件消息。" });
+        return;
+      }
+
+      const ownerUserId = sanitizeId(room?.ownerUserId, "");
+      const senderUserId = sanitizeId(messageDoc?.senderUserId, "");
+      const canDelete = userId === senderUserId || (ownerUserId && ownerUserId === userId);
+      if (!canDelete) {
+        res.status(403).json({ error: "仅文件发送者或派主可删除该文件。" });
+        return;
+      }
+
+      const fileId = sanitizeId(messageDoc?.file?.fileId, "");
+      if (fileId && isMongoObjectIdLike(fileId)) {
+        await GroupChatStoredFile.deleteOne({ _id: fileId, roomId });
+      } else {
+        await GroupChatStoredFile.deleteMany({ roomId, messageId });
+      }
+      await Promise.all([
+        GroupChatMessage.deleteOne({ _id: messageId, roomId }),
+        GroupChatRoom.findByIdAndUpdate(roomId, { $set: { updatedAt: new Date() } }),
+      ]);
+
+      broadcastGroupChatMessageDeleted(roomId, messageId);
+      res.json({
+        ok: true,
+        roomId,
+        messageId,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "删除文件失败，请稍后重试。",
       });
     }
   },
@@ -4023,6 +4521,60 @@ function normalizeGeneratedImageStoreUrl(value) {
   return "";
 }
 
+function normalizeGeneratedImageStorageType(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "binary") return "binary";
+  return "remote";
+}
+
+function normalizeGeneratedImageMimeType(value) {
+  const type = normalizeSeedreamImageMimeType(String(value || "").split(";")[0]);
+  if (type) return type;
+  return "";
+}
+
+function extractGeneratedImageDataBuffer(value) {
+  if (Buffer.isBuffer(value)) return value;
+  if (value && typeof value === "object") {
+    if (Array.isArray(value?.data)) {
+      return Buffer.from(value.data);
+    }
+    if (Buffer.isBuffer(value?.buffer)) {
+      return Buffer.from(value.buffer);
+    }
+  }
+  return Buffer.from([]);
+}
+
+function parseGeneratedImageDataUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const match = text.match(/^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\s]+)$/i);
+  if (!match || !match[1] || !match[2]) return null;
+  const mimeType = normalizeGeneratedImageMimeType(match[1]);
+  if (!mimeType) return null;
+
+  try {
+    const data = Buffer.from(match[2].replace(/\s+/g, ""), "base64");
+    if (!data.length || data.length > GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES) return null;
+    return {
+      mimeType,
+      data,
+      size: data.length,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildGeneratedImageHistoryContentPath(imageId) {
+  const safeImageId = sanitizeId(imageId, "");
+  if (!safeImageId) return "";
+  return `/api/images/history/${encodeURIComponent(safeImageId)}/content`;
+}
+
 function resolveGeneratedImageOutputUrl({ url, b64Json }) {
   const direct = normalizeGeneratedImageStoreUrl(url);
   if (direct) return direct;
@@ -4032,6 +4584,59 @@ function resolveGeneratedImageOutputUrl({ url, b64Json }) {
     .replace(/\s+/g, "");
   if (!b64) return "";
   return normalizeGeneratedImageStoreUrl(`data:image/png;base64,${b64}`);
+}
+
+async function fetchGeneratedImageBinaryFromUrl(imageUrl) {
+  const safeUrl = normalizeGeneratedImageStoreUrl(imageUrl);
+  if (!/^https?:\/\//i.test(safeUrl)) return null;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, GENERATED_IMAGE_HISTORY_FETCH_TIMEOUT_MS);
+
+  let response = null;
+  try {
+    response = await fetch(safeUrl, {
+      method: "GET",
+      headers: {
+        Accept: "image/*",
+      },
+      signal: controller.signal,
+    });
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+  if (!response?.ok) return null;
+
+  const mimeType = normalizeGeneratedImageMimeType(response.headers.get("content-type"));
+  if (!mimeType) return null;
+
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES) {
+    return null;
+  }
+
+  try {
+    const arrayBuffer = await response.arrayBuffer();
+    const data = Buffer.from(arrayBuffer || new ArrayBuffer(0));
+    if (!data.length || data.length > GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES) return null;
+    return {
+      mimeType,
+      data,
+      size: data.length,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function buildGeneratedImageBinaryPayload(imageUrl) {
+  const parsedDataUrl = parseGeneratedImageDataUrl(imageUrl);
+  if (parsedDataUrl) return parsedDataUrl;
+  return fetchGeneratedImageBinaryFromUrl(imageUrl);
 }
 
 async function saveGeneratedImageHistory({
@@ -4050,24 +4655,32 @@ async function saveGeneratedImageHistory({
   const sourceImages = Array.isArray(images) ? images : [];
   if (sourceImages.length === 0) return;
 
-  const docs = sourceImages
-    .slice(0, 20)
-    .map((item) => {
-      const imageUrl = normalizeGeneratedImageStoreUrl(
-        item?.imageUrl || item?.url || "",
-      );
-      if (!imageUrl) return null;
-      return {
-        userId: safeUserId,
-        prompt: safePrompt,
-        imageUrl,
-        responseFormat: safeResponseFormat,
-        size: sanitizeText(item?.size, "", 80),
-        model: sanitizeText(item?.model, safeModel, 160),
-        expiresAt: buildGeneratedImageHistoryExpireAt(),
-      };
-    })
-    .filter(Boolean);
+  const docs = (
+    await Promise.all(
+      sourceImages.slice(0, 20).map(async (item) => {
+        const imageUrl = normalizeGeneratedImageStoreUrl(
+          item?.imageUrl || item?.url || "",
+        );
+        if (!imageUrl) return null;
+
+        const binaryPayload = await buildGeneratedImageBinaryPayload(imageUrl);
+        const hasBinary = !!binaryPayload?.size && Buffer.isBuffer(binaryPayload?.data);
+        return {
+          userId: safeUserId,
+          prompt: safePrompt,
+          imageUrl,
+          imageStorageType: hasBinary ? "binary" : "remote",
+          imageMimeType: hasBinary ? binaryPayload.mimeType : "",
+          imageSize: hasBinary ? binaryPayload.size : 0,
+          imageData: hasBinary ? binaryPayload.data : Buffer.alloc(0),
+          responseFormat: safeResponseFormat,
+          size: sanitizeText(item?.size, "", 80),
+          model: sanitizeText(item?.model, safeModel, 160),
+          expiresAt: buildGeneratedImageHistoryExpireAt(),
+        };
+      }),
+    )
+  ).filter(Boolean);
   if (docs.length === 0) return;
 
   try {
@@ -4081,10 +4694,13 @@ async function saveGeneratedImageHistory({
 }
 
 function toGeneratedImageHistoryItem(doc) {
+  const id = sanitizeId(doc?._id, "");
+  const storageType = normalizeGeneratedImageStorageType(doc?.imageStorageType);
+  const storedContentPath = storageType === "binary" ? buildGeneratedImageHistoryContentPath(id) : "";
   return {
-    id: sanitizeId(doc?._id, ""),
+    id,
     prompt: sanitizeText(doc?.prompt, "", 2000),
-    url: normalizeGeneratedImageStoreUrl(doc?.imageUrl || ""),
+    url: storedContentPath || normalizeGeneratedImageStoreUrl(doc?.imageUrl || ""),
     responseFormat: normalizeGeneratedImageHistoryResponseFormat(doc?.responseFormat),
     size: sanitizeText(doc?.size, "", 80),
     model: sanitizeText(doc?.model, "", 160),
@@ -6714,6 +7330,15 @@ function requireChatAuth(req, res, next) {
     });
 }
 
+function resolveImageHistoryAuthUserId(req) {
+  const bearerToken = readBearerToken(req);
+  const queryToken = String(req.query?.token || "").trim();
+  const token = bearerToken || queryToken;
+  const payload = verifyToken(token);
+  if (!payload || payload.scope !== "chat" || !payload.uid) return "";
+  return sanitizeId(payload.uid, "");
+}
+
 async function requireAdminAuth(req, res, next) {
   try {
     const admin = await authenticateAdminRequest(req, res);
@@ -7215,21 +7840,67 @@ function sanitizeGroupChatMemberUserIds(value) {
   ).slice(0, GROUP_CHAT_MAX_MEMBERS_PER_ROOM);
 }
 
-function normalizeGroupChatRoomDoc(doc) {
+function normalizeGroupChatReadStates(value, roomMemberUserIds = []) {
+  const memberSet = new Set(sanitizeGroupChatMemberUserIds(roomMemberUserIds));
+  if (!Array.isArray(value)) return [];
+  const deduped = new Map();
+  value.forEach((item) => {
+    const userId = sanitizeId(item?.userId, "");
+    if (!userId || !memberSet.has(userId)) return;
+    const lastReadMessageId = sanitizeId(item?.lastReadMessageId, "");
+    const lastReadAt = sanitizeIsoDate(item?.lastReadAt);
+    const updatedAt = sanitizeIsoDate(item?.updatedAt) || new Date().toISOString();
+    deduped.set(userId, {
+      userId,
+      lastReadMessageId,
+      lastReadAt,
+      updatedAt,
+    });
+  });
+  return Array.from(deduped.values())
+    .sort((a, b) => toGroupChatDateTimestamp(a.updatedAt) - toGroupChatDateTimestamp(b.updatedAt))
+    .slice(-GROUP_CHAT_MAX_READ_STATES_PER_ROOM);
+}
+
+function getGroupChatOnlineUserIdsByRoom(roomId) {
+  const safeRoomId = sanitizeId(roomId, "");
+  if (!safeRoomId) return [];
+  const roomCounter = groupChatWsOnlineCountsByRoom.get(safeRoomId);
+  if (!roomCounter) return [];
+  return Array.from(roomCounter.entries())
+    .filter(([, count]) => Number(count) > 0)
+    .map(([userId]) => sanitizeId(userId, ""))
+    .filter(Boolean);
+}
+
+function normalizeGroupChatRoomDoc(doc, options = {}) {
   if (!doc) return null;
+  const viewerUserId = sanitizeId(options?.viewerUserId, "");
   const id = sanitizeId(doc?._id, "");
   if (!id) return null;
   const memberUserIds = sanitizeGroupChatMemberUserIds(doc.memberUserIds);
-  return {
+  const ownerUserId = sanitizeId(doc.ownerUserId, "");
+  const onlineMemberUserIds = Array.from(
+    new Set(getGroupChatOnlineUserIdsByRoom(id).filter((userId) => memberUserIds.includes(userId))),
+  );
+
+  const normalized = {
     id,
     roomCode: sanitizeGroupChatCode(doc.roomCode),
     name: sanitizeGroupChatRoomName(doc.name),
-    ownerUserId: sanitizeId(doc.ownerUserId, ""),
+    ownerUserId,
     memberUserIds,
     memberCount: Math.max(memberUserIds.length, sanitizeRuntimeInteger(doc.memberCount, 1, 1, 999)),
     createdAt: sanitizeIsoDate(doc.createdAt),
     updatedAt: sanitizeIsoDate(doc.updatedAt),
+    onlineMemberUserIds,
   };
+
+  if (viewerUserId && viewerUserId === ownerUserId) {
+    normalized.readStates = normalizeGroupChatReadStates(doc.readStates, memberUserIds);
+  }
+
+  return normalized;
 }
 
 function normalizeGroupChatMessageDoc(doc) {
@@ -7240,7 +7911,7 @@ function normalizeGroupChatMessageDoc(doc) {
   const type = String(doc?.type || "")
     .trim()
     .toLowerCase();
-  if (type !== "text" && type !== "image" && type !== "system") return null;
+  if (type !== "text" && type !== "image" && type !== "file" && type !== "system") return null;
 
   const normalized = {
     id,
@@ -7281,11 +7952,24 @@ function normalizeGroupChatMessageDoc(doc) {
     normalized.image = null;
   }
 
+  if (type === "file") {
+    const file = doc?.file && typeof doc.file === "object" ? doc.file : {};
+    normalized.file = {
+      fileId: sanitizeId(file.fileId, ""),
+      fileName: sanitizeGroupChatFileName(file.fileName),
+      mimeType: sanitizeGroupChatFileMimeType(file.mimeType),
+      size: sanitizeRuntimeInteger(file.size, 0, 0, GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES),
+      expiresAt: sanitizeIsoDate(file.expiresAt),
+    };
+  } else {
+    normalized.file = null;
+  }
+
   return normalized;
 }
 
 function sanitizeGroupChatImageFileName(value) {
-  const text = String(value || "")
+  const text = normalizeGroupChatUploadedFileName(value)
     .trim()
     .replace(/\s+/g, " ");
   if (!text) return "group-image.png";
@@ -7299,6 +7983,146 @@ function sanitizeGroupChatImageFileName(value) {
     })
     .join("");
   return cleaned.slice(0, 80);
+}
+
+function sanitizeGroupChatFileName(value) {
+  const text = normalizeGroupChatUploadedFileName(value)
+    .trim()
+    .replace(/\s+/g, " ");
+  if (!text) return "group-file.bin";
+  const cleaned = text
+    .split("")
+    .map((char) => {
+      const code = char.charCodeAt(0);
+      if (code < 32) return "_";
+      if (`<>:"/\\|?*`.includes(char)) return "_";
+      return char;
+    })
+    .join("");
+  return cleaned.slice(0, 120);
+}
+
+function sanitizeGroupChatFileMimeType(value) {
+  const mimeType = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!mimeType) return "application/octet-stream";
+  if (mimeType.length > 120) return "application/octet-stream";
+  return mimeType;
+}
+
+function normalizeGroupChatUploadedFileName(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  const candidates = new Set([raw]);
+  const uriDecoded = decodeGroupChatMaybeUriComponent(raw);
+  if (uriDecoded) {
+    candidates.add(uriDecoded);
+  }
+
+  const rfc2047Decoded = decodeGroupChatMaybeRfc2047(raw);
+  if (rfc2047Decoded) {
+    candidates.add(rfc2047Decoded);
+    const rfcUriDecoded = decodeGroupChatMaybeUriComponent(rfc2047Decoded);
+    if (rfcUriDecoded) {
+      candidates.add(rfcUriDecoded);
+    }
+  }
+
+  // Recover common UTF-8 -> latin1 mojibake; some clients may encode twice.
+  Array.from(candidates).forEach((item) => {
+    let current = item;
+    for (let round = 0; round < 2; round += 1) {
+      if (!looksLikeGroupChatMojibake(current)) break;
+      const recovered = decodeGroupChatLatin1ToUtf8(current);
+      if (!recovered || recovered === current) break;
+      candidates.add(recovered);
+      current = recovered;
+    }
+  });
+
+  let best = raw;
+  let bestScore = scoreGroupChatFileNameCandidate(raw);
+  candidates.forEach((item) => {
+    const candidate = String(item || "").trim();
+    if (!candidate) return;
+    const score = scoreGroupChatFileNameCandidate(candidate);
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  });
+
+  return best;
+}
+
+function decodeGroupChatMaybeUriComponent(value) {
+  const text = String(value || "").trim();
+  if (!text || !/%[0-9a-f]{2}/i.test(text)) return "";
+  try {
+    return decodeURIComponent(text).trim();
+  } catch {
+    return "";
+  }
+}
+
+function decodeGroupChatMaybeRfc2047(value) {
+  const text = String(value || "").trim();
+  const match = text.match(/^=\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=$/i);
+  if (!match || !match[1]) return "";
+  try {
+    return Buffer.from(match[1], "base64").toString("utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function decodeGroupChatLatin1ToUtf8(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    return Buffer.from(text, "latin1").toString("utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function looksLikeGroupChatMojibake(value) {
+  const text = String(value || "");
+  if (!text) return false;
+  if (text.includes("�")) return true;
+  return /(?:Ã.|Â.|â.|æ.|å.|è.|ä.|ç.|ð.|ï.)/.test(text);
+}
+
+function scoreGroupChatFileNameCandidate(value) {
+  const text = String(value || "").trim();
+  if (!text) return -1000;
+  const cjkCount = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  const replacementCount = (text.match(/�/g) || []).length;
+  const controlCount = Array.from(text).reduce((count, char) => {
+    const code = char.charCodeAt(0);
+    return code < 32 ? count + 1 : count;
+  }, 0);
+
+  let score = 0;
+  score += Math.min(cjkCount * 8, 160);
+  if (/^[\x20-\x7e]+$/.test(text)) {
+    score += 8;
+  }
+  if (/\.[A-Za-z0-9]{1,8}$/.test(text)) {
+    score += 3;
+  }
+  score -= replacementCount * 20;
+  score -= controlCount * 5;
+  if (looksLikeGroupChatMojibake(text) && cjkCount === 0) {
+    score -= 14;
+  }
+  return score;
+}
+
+function buildGroupChatFileExpireAt() {
+  return new Date(Date.now() + GROUP_CHAT_FILE_TTL_MS);
 }
 
 function sanitizeGroupChatReactionEmoji(value) {
@@ -7423,6 +8247,8 @@ async function resolveGroupChatReplyMeta({ roomId, rawReplyToMessageId }) {
   const replyPreviewText =
     replyType === "image"
       ? "[图片]"
+      : replyType === "file"
+        ? "[文件]"
       : sanitizeText(replyDoc?.content, "", GROUP_CHAT_REPLY_PREVIEW_MAX_LENGTH);
 
   return {
@@ -7431,6 +8257,123 @@ async function resolveGroupChatReplyMeta({ roomId, rawReplyToMessageId }) {
     replySenderName: sanitizeText(replyDoc?.senderName, "用户", 30),
     replyType,
   };
+}
+
+function buildGroupChatReadStateMap(readStates = [], roomMemberUserIds = []) {
+  const memberSet = new Set(sanitizeGroupChatMemberUserIds(roomMemberUserIds));
+  const map = new Map();
+  normalizeGroupChatReadStates(readStates, roomMemberUserIds).forEach((item) => {
+    if (!memberSet.has(item.userId)) return;
+    map.set(item.userId, item);
+  });
+  return map;
+}
+
+function buildGroupChatRoomReadStatesFromMap(map) {
+  if (!(map instanceof Map) || map.size === 0) return [];
+  return Array.from(map.values())
+    .filter(Boolean)
+    .map((item) => ({
+      userId: sanitizeId(item.userId, ""),
+      lastReadMessageId: sanitizeId(item.lastReadMessageId, ""),
+      lastReadAt: item.lastReadAt ? new Date(item.lastReadAt) : null,
+      updatedAt: item.updatedAt ? new Date(item.updatedAt) : new Date(),
+    }))
+    .filter((item) => !!item.userId)
+    .slice(-GROUP_CHAT_MAX_READ_STATES_PER_ROOM);
+}
+
+async function updateGroupChatRoomReadState({
+  roomId,
+  userId,
+  lastReadMessageId = "",
+  lastReadAt = null,
+}) {
+  const safeRoomId = sanitizeId(roomId, "");
+  const safeUserId = sanitizeId(userId, "");
+  const safeMessageId = sanitizeId(lastReadMessageId, "");
+  const safeReadAtIso = sanitizeIsoDate(lastReadAt);
+  if (!safeRoomId || !safeUserId || !safeReadAtIso) return null;
+
+  const room = await GroupChatRoom.findById(safeRoomId).lean();
+  const normalizedRoom = normalizeGroupChatRoomDoc(room);
+  if (!normalizedRoom) return null;
+  if (!normalizedRoom.memberUserIds.includes(safeUserId)) return room;
+
+  const readStateMap = buildGroupChatReadStateMap(room?.readStates, normalizedRoom.memberUserIds);
+  const current = readStateMap.get(safeUserId);
+  const currentTs = toGroupChatDateTimestamp(current?.lastReadAt);
+  const nextTs = toGroupChatDateTimestamp(safeReadAtIso);
+  if (nextTs < currentTs) {
+    return room;
+  }
+  if (
+    nextTs === currentTs &&
+    sanitizeId(current?.lastReadMessageId, "") === safeMessageId
+  ) {
+    return room;
+  }
+
+  readStateMap.set(safeUserId, {
+    userId: safeUserId,
+    lastReadMessageId: safeMessageId,
+    lastReadAt: safeReadAtIso,
+    updatedAt: new Date().toISOString(),
+  });
+
+  const nextReadStates = buildGroupChatRoomReadStatesFromMap(readStateMap);
+  return GroupChatRoom.findByIdAndUpdate(
+    safeRoomId,
+    {
+      $set: {
+        readStates: nextReadStates,
+      },
+    },
+    { new: true },
+  ).lean();
+}
+
+async function markGroupChatRoomReadByMessageId({ roomId, userId, messageId = "" }) {
+  const safeRoomId = sanitizeId(roomId, "");
+  const safeUserId = sanitizeId(userId, "");
+  const safeMessageId = sanitizeId(messageId, "");
+  if (!safeRoomId || !safeUserId) return null;
+
+  let targetMessage = null;
+  if (safeMessageId && isMongoObjectIdLike(safeMessageId)) {
+    targetMessage = await GroupChatMessage.findOne(
+      { _id: safeMessageId, roomId: safeRoomId },
+      { _id: 1, createdAt: 1 },
+    ).lean();
+  } else {
+    targetMessage = await GroupChatMessage.findOne(
+      { roomId: safeRoomId },
+      { _id: 1, createdAt: 1 },
+    )
+      .sort({ createdAt: -1 })
+      .lean();
+  }
+
+  if (!targetMessage) return null;
+  const safeReadAt = sanitizeIsoDate(targetMessage.createdAt);
+  if (!safeReadAt) return null;
+
+  const updatedRoomDoc = await updateGroupChatRoomReadState({
+    roomId: safeRoomId,
+    userId: safeUserId,
+    lastReadMessageId: sanitizeId(targetMessage?._id, safeMessageId),
+    lastReadAt: safeReadAt,
+  });
+  if (!updatedRoomDoc) return null;
+
+  const roomMemberUserIds = sanitizeGroupChatMemberUserIds(updatedRoomDoc?.memberUserIds);
+  const readState = normalizeGroupChatReadStates(updatedRoomDoc?.readStates, roomMemberUserIds).find((item) => {
+    return item.userId === safeUserId;
+  });
+  if (readState) {
+    await broadcastGroupChatRoomReadStateUpdated(safeRoomId, readState);
+  }
+  return updatedRoomDoc;
 }
 
 function isMongoObjectIdLike(value) {
@@ -7582,6 +8525,11 @@ async function handleGroupChatWsJoinRoom(socket, payload) {
     type: "joined",
     roomId,
   });
+  sendGroupChatWsPayload(socket, {
+    type: "member_presence_updated",
+    roomId,
+    onlineUserIds: getGroupChatOnlineUserIdsByRoom(roomId),
+  });
 }
 
 function handleGroupChatWsLeaveRoom(socket, payload) {
@@ -7650,6 +8598,7 @@ function attachSocketToGroupChatRoom(socket, roomId) {
   if (!safeRoomId) return;
   const meta = groupChatWsMetaBySocket.get(socket);
   if (!meta) return;
+  if (meta.joinedRooms.has(safeRoomId)) return;
 
   let sockets = groupChatWsRoomSockets.get(safeRoomId);
   if (!sockets) {
@@ -7658,11 +8607,26 @@ function attachSocketToGroupChatRoom(socket, roomId) {
   }
   sockets.add(socket);
   meta.joinedRooms.add(safeRoomId);
+
+  if (meta.userId) {
+    let roomOnlineCounter = groupChatWsOnlineCountsByRoom.get(safeRoomId);
+    if (!roomOnlineCounter) {
+      roomOnlineCounter = new Map();
+      groupChatWsOnlineCountsByRoom.set(safeRoomId, roomOnlineCounter);
+    }
+    const previousCount = sanitizeRuntimeInteger(roomOnlineCounter.get(meta.userId), 0, 0, 9999);
+    roomOnlineCounter.set(meta.userId, previousCount + 1);
+    if (previousCount === 0) {
+      broadcastGroupChatMemberPresenceUpdated(safeRoomId);
+    }
+  }
 }
 
 function detachSocketFromGroupChatRoom(socket, roomId) {
   const safeRoomId = sanitizeId(roomId, "");
   if (!safeRoomId) return;
+  const meta = groupChatWsMetaBySocket.get(socket);
+  if (!meta?.joinedRooms?.has(safeRoomId)) return;
 
   const sockets = groupChatWsRoomSockets.get(safeRoomId);
   if (sockets) {
@@ -7672,10 +8636,22 @@ function detachSocketFromGroupChatRoom(socket, roomId) {
     }
   }
 
-  const meta = groupChatWsMetaBySocket.get(socket);
-  if (meta) {
-    meta.joinedRooms.delete(safeRoomId);
+  meta.joinedRooms.delete(safeRoomId);
+  if (!meta.userId) return;
+
+  const roomOnlineCounter = groupChatWsOnlineCountsByRoom.get(safeRoomId);
+  if (!roomOnlineCounter) return;
+  const previousCount = sanitizeRuntimeInteger(roomOnlineCounter.get(meta.userId), 0, 0, 9999);
+  const nextCount = Math.max(0, previousCount - 1);
+  if (nextCount <= 0) {
+    roomOnlineCounter.delete(meta.userId);
+    if (roomOnlineCounter.size === 0) {
+      groupChatWsOnlineCountsByRoom.delete(safeRoomId);
+    }
+    broadcastGroupChatMemberPresenceUpdated(safeRoomId);
+    return;
   }
+  roomOnlineCounter.set(meta.userId, nextCount);
 }
 
 function detachSocketFromAllGroupChatRooms(socket) {
@@ -7706,6 +8682,7 @@ function clearGroupChatRoomSockets(roomId) {
     }
   });
   groupChatWsRoomSockets.delete(safeRoomId);
+  groupChatWsOnlineCountsByRoom.delete(safeRoomId);
 }
 
 function broadcastGroupChatWsPayload(roomId, payload) {
@@ -7726,6 +8703,54 @@ function broadcastGroupChatWsPayload(roomId, payload) {
     } catch {
       detachSocketFromGroupChatRoom(socket, safeRoomId);
     }
+  });
+}
+
+function sendGroupChatWsPayloadToUserInRoom(roomId, userId, payload) {
+  const safeRoomId = sanitizeId(roomId, "");
+  const safeUserId = sanitizeId(userId, "");
+  if (!safeRoomId || !safeUserId) return;
+  const sockets = groupChatWsRoomSockets.get(safeRoomId);
+  if (!sockets || sockets.size === 0) return;
+  const data = JSON.stringify(payload || {});
+  Array.from(sockets).forEach((socket) => {
+    if (!socket || socket.readyState !== 1) {
+      detachSocketFromGroupChatRoom(socket, safeRoomId);
+      return;
+    }
+    const meta = groupChatWsMetaBySocket.get(socket);
+    if (!meta?.authed || meta.userId !== safeUserId) return;
+    try {
+      socket.send(data);
+    } catch {
+      detachSocketFromGroupChatRoom(socket, safeRoomId);
+    }
+  });
+}
+
+function broadcastGroupChatMemberPresenceUpdated(roomId) {
+  const safeRoomId = sanitizeId(roomId, "");
+  if (!safeRoomId) return;
+  broadcastGroupChatWsPayload(safeRoomId, {
+    type: "member_presence_updated",
+    roomId: safeRoomId,
+    onlineUserIds: getGroupChatOnlineUserIdsByRoom(safeRoomId),
+  });
+}
+
+async function broadcastGroupChatRoomReadStateUpdated(roomId, readState) {
+  const safeRoomId = sanitizeId(roomId, "");
+  if (!safeRoomId) return;
+  const normalizedReadStates = normalizeGroupChatReadStates([readState], [sanitizeId(readState?.userId, "")]);
+  const normalizedReadState = normalizedReadStates[0];
+  if (!normalizedReadState) return;
+  const room = await GroupChatRoom.findById(safeRoomId, { ownerUserId: 1 }).lean();
+  const ownerUserId = sanitizeId(room?.ownerUserId, "");
+  if (!ownerUserId) return;
+  sendGroupChatWsPayloadToUserInRoom(safeRoomId, ownerUserId, {
+    type: "room_read_state_updated",
+    roomId: safeRoomId,
+    readState: normalizedReadState,
   });
 }
 
@@ -7755,6 +8780,17 @@ function broadcastGroupChatMessageReactionsUpdated(roomId, message) {
     roomId: sanitizeId(roomId, normalizedMessage.roomId),
     messageId: normalizedMessage.id,
     reactions: normalizedMessage.reactions,
+  });
+}
+
+function broadcastGroupChatMessageDeleted(roomId, messageId) {
+  const safeRoomId = sanitizeId(roomId, "");
+  const safeMessageId = sanitizeId(messageId, "");
+  if (!safeRoomId || !safeMessageId) return;
+  broadcastGroupChatWsPayload(safeRoomId, {
+    type: "message_deleted",
+    roomId: safeRoomId,
+    messageId: safeMessageId,
   });
 }
 
@@ -7811,6 +8847,12 @@ async function startServer() {
       error?.message || error,
     );
   });
+  await ensureGroupChatStoredFileIndexes().catch((error) => {
+    console.warn(
+      "Failed to ensure group chat file indexes:",
+      error?.message || error,
+    );
+  });
 
   const server = http.createServer(app);
   initGroupChatWebSocketServer(server);
@@ -7859,6 +8901,24 @@ async function ensureGeneratedImageHistoryIndexes() {
   }
 
   await ensureGeneratedImageHistoryTtlIndex(collection, existingIndexes);
+}
+
+async function ensureGroupChatStoredFileIndexes() {
+  const collection = GroupChatStoredFile.collection;
+  let existingIndexes = await readCollectionIndexesSafe(collection);
+
+  const needRoomCreatedAtIndex = !hasEquivalentMongoIndex(existingIndexes, {
+    key: { roomId: 1, createdAt: -1 },
+  });
+  if (needRoomCreatedAtIndex) {
+    await collection.createIndex(
+      { roomId: 1, createdAt: -1 },
+      { name: "ix_group_chat_files_room_created_desc" },
+    );
+    existingIndexes = await readCollectionIndexesSafe(collection);
+  }
+
+  await ensureGroupChatStoredFileTtlIndex(collection, existingIndexes);
 }
 
 function hasEquivalentMongoIndex(existingIndexes, { key, unique, expireAfterSeconds }) {
@@ -7976,6 +9036,39 @@ async function ensureGeneratedImageHistoryTtlIndex(collection, existingIndexes) 
     {
       expireAfterSeconds: 0,
       name: "ttl_generated_image_histories_expires_at",
+    },
+  );
+}
+
+async function ensureGroupChatStoredFileTtlIndex(collection, existingIndexes) {
+  const ttlSpec = { key: { expiresAt: 1 }, expireAfterSeconds: 0 };
+  if (hasEquivalentMongoIndex(existingIndexes, ttlSpec)) {
+    return;
+  }
+
+  const sameKeyIndex = findMongoIndexByKey(existingIndexes, ttlSpec.key);
+  if (sameKeyIndex?.name) {
+    try {
+      await collection.db.command({
+        collMod: collection.collectionName,
+        index: {
+          name: sameKeyIndex.name,
+          expireAfterSeconds: 0,
+        },
+      });
+      return;
+    } catch (error) {
+      if (String(sameKeyIndex.name) !== "_id_") {
+        await collection.dropIndex(sameKeyIndex.name);
+      }
+    }
+  }
+
+  await collection.createIndex(
+    { expiresAt: 1 },
+    {
+      expireAfterSeconds: 0,
+      name: "ttl_group_chat_files_expires_at",
     },
   );
 }

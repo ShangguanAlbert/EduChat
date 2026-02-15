@@ -85,6 +85,16 @@ export function fetchPartyMessages(roomId, { after = "", limit = 80 } = {}) {
   );
 }
 
+export function markPartyRoomRead(roomId, { messageId = "" } = {}) {
+  const safeRoomId = String(roomId || "").trim();
+  return request(`/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/read`, {
+    method: "POST",
+    body: JSON.stringify({
+      messageId: String(messageId || "").trim(),
+    }),
+  });
+}
+
 export function sendPartyTextMessage(roomId, { content = "", replyToMessageId = "" } = {}) {
   const safeRoomId = String(roomId || "").trim();
   return request(`/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/messages/text`, {
@@ -101,6 +111,7 @@ export async function sendPartyImageMessage(roomId, { file, replyToMessageId = "
   const formData = new FormData();
   if (file) {
     formData.append("image", file);
+    formData.append("fileName", String(file?.name || ""));
   }
   if (replyToMessageId) {
     formData.append("replyToMessageId", String(replyToMessageId).trim());
@@ -119,6 +130,68 @@ export async function sendPartyImageMessage(roomId, { file, replyToMessageId = "
   return data;
 }
 
+export async function sendPartyFileMessage(roomId, { file, replyToMessageId = "" } = {}) {
+  const safeRoomId = String(roomId || "").trim();
+  const formData = new FormData();
+  if (file) {
+    formData.append("file", file);
+    formData.append("fileName", String(file?.name || ""));
+  }
+  if (replyToMessageId) {
+    formData.append("replyToMessageId", String(replyToMessageId).trim());
+  }
+
+  const resp = await fetch(`/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/messages/file`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: formData,
+  });
+  const data = await readJson(resp);
+  if (!resp.ok) {
+    const message = data?.error || data?.message || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+  return data;
+}
+
+export async function downloadPartyFile(roomId, fileId) {
+  const safeRoomId = String(roomId || "").trim();
+  const safeFileId = String(fileId || "").trim();
+  const resp = await fetch(
+    `/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/files/${encodeURIComponent(safeFileId)}/download`,
+    {
+      method: "GET",
+      headers: authHeaders(),
+    },
+  );
+
+  if (!resp.ok) {
+    const data = await readJson(resp);
+    const message = data?.error || data?.message || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+
+  const blob = await resp.blob();
+  return {
+    blob,
+    fileName: parseFileNameFromContentDisposition(resp.headers.get("content-disposition")),
+    mimeType: String(resp.headers.get("content-type") || ""),
+  };
+}
+
+export function deletePartyFileMessage(roomId, messageId) {
+  const safeRoomId = String(roomId || "").trim();
+  const safeMessageId = String(messageId || "").trim();
+  return request(
+    `/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/messages/${encodeURIComponent(
+      safeMessageId,
+    )}/file`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
 export function togglePartyMessageReaction(roomId, messageId, emoji) {
   const safeRoomId = String(roomId || "").trim();
   const safeMessageId = String(messageId || "").trim();
@@ -133,4 +206,22 @@ export function togglePartyMessageReaction(roomId, messageId, emoji) {
       }),
     },
   );
+}
+
+function parseFileNameFromContentDisposition(disposition) {
+  const text = String(disposition || "");
+  if (!text) return "";
+
+  const utf8Match = text.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match && utf8Match[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+
+  const plainMatch = text.match(/filename="([^"]+)"/i) || text.match(/filename=([^;]+)/i);
+  if (!plainMatch || !plainMatch[1]) return "";
+  return String(plainMatch[1]).trim();
 }

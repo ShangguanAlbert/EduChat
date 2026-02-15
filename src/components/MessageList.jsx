@@ -75,18 +75,25 @@ const MessageList = forwardRef(function MessageList({
     scrollAnimFrameRef.current = 0;
   }, []);
 
+  const setLatestState = useCallback(
+    (next) => {
+      const value = !!next;
+      if (value === isAtLatestRef.current) return;
+      isAtLatestRef.current = value;
+      onLatestChange?.(value);
+    },
+    [onLatestChange],
+  );
+
   const checkIsAtLatest = useCallback(() => {
     const root = rootRef.current;
     if (!root) return true;
 
     const remain = root.scrollHeight - (root.scrollTop + root.clientHeight);
     const next = remain <= 40;
-    if (next !== isAtLatestRef.current) {
-      isAtLatestRef.current = next;
-      onLatestChange?.(next);
-    }
+    setLatestState(next);
     return next;
-  }, [onLatestChange]);
+  }, [setLatestState]);
 
   const animateMessagesScroll = useCallback(
     (targetScrollTop, duration = 620) => {
@@ -97,6 +104,7 @@ const MessageList = forwardRef(function MessageList({
       const delta = targetScrollTop - start;
       if (Math.abs(delta) < 1) {
         root.scrollTop = targetScrollTop;
+        checkIsAtLatest();
         return;
       }
 
@@ -112,13 +120,22 @@ const MessageList = forwardRef(function MessageList({
           scrollAnimFrameRef.current = requestAnimationFrame(step);
         } else {
           scrollAnimFrameRef.current = 0;
+          checkIsAtLatest();
         }
       };
 
       scrollAnimFrameRef.current = requestAnimationFrame(step);
     },
-    [cancelScrollAnimation],
+    [cancelScrollAnimation, checkIsAtLatest],
   );
+
+  const jumpToLatest = useCallback(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    cancelScrollAnimation();
+    root.scrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
+    checkIsAtLatest();
+  }, [cancelScrollAnimation, checkIsAtLatest]);
 
   const scrollMessageToAnchor = useCallback(
     (messageId, duration = 620) => {
@@ -135,9 +152,10 @@ const MessageList = forwardRef(function MessageList({
         0,
         Math.min(targetNode.offsetTop - anchorOffset, maxScrollTop),
       );
+      setLatestState(false);
       animateMessagesScroll(targetTop, duration);
     },
-    [animateMessagesScroll],
+    [animateMessagesScroll, setLatestState],
   );
 
   const scrollToLatest = useCallback(
@@ -176,8 +194,25 @@ const MessageList = forwardRef(function MessageList({
   useEffect(() => () => cancelScrollAnimation(), [cancelScrollAnimation]);
 
   useEffect(() => {
-    checkIsAtLatest();
-  }, [activeSessionId, displayedMessages, checkIsAtLatest]);
+    setLatestState(true);
+    requestAnimationFrame(() => {
+      jumpToLatest();
+    });
+  }, [activeSessionId, jumpToLatest, setLatestState]);
+
+  useEffect(() => {
+    if (!displayedMessages.length) {
+      checkIsAtLatest();
+      return;
+    }
+    if (!isAtLatestRef.current) {
+      checkIsAtLatest();
+      return;
+    }
+    requestAnimationFrame(() => {
+      jumpToLatest();
+    });
+  }, [displayedMessages, jumpToLatest, checkIsAtLatest]);
 
   const closeAskPopover = useCallback(() => {
     setAskPopover((prev) => {
