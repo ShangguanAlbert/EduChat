@@ -1620,13 +1620,8 @@ app.get("/api/auth/admin/export/chats-zip", async (req, res) => {
 
   const suffix = formatFileStamp(exportedAt);
   const fileName = `educhat-chats-by-user-${suffix}.zip`;
-  const encodedName = encodeURIComponent(fileName);
-
   res.setHeader("Content-Type", "application/zip");
-  res.setHeader(
-    "Content-Disposition",
-    `attachment; filename="${fileName}"; filename*=UTF-8''${encodedName}`,
-  );
+  res.setHeader("Content-Disposition", buildAttachmentContentDisposition(fileName));
   res.send(zipBuffer);
 });
 
@@ -2797,10 +2792,16 @@ app.get("/api/group-chat/rooms/:roomId/files/:fileId/download", requireChatAuth,
       return;
     }
 
-    const storedFileDoc = await GroupChatStoredFile.findOne({
+    let storedFileDoc = await GroupChatStoredFile.findOne({
       _id: fileId,
       roomId,
     }).lean();
+    if (!storedFileDoc) {
+      const legacyStoredFileDoc = await GroupChatStoredFile.findById(fileId).lean();
+      if (sanitizeId(legacyStoredFileDoc?.roomId, "") === roomId) {
+        storedFileDoc = legacyStoredFileDoc;
+      }
+    }
     const now = Date.now();
     if (!storedFileDoc) {
       const messageDoc = await GroupChatMessage.findOne(
@@ -2828,22 +2829,18 @@ app.get("/api/group-chat/rooms/:roomId/files/:fileId/download", requireChatAuth,
       return;
     }
 
-    const dataBuffer = Buffer.isBuffer(storedFileDoc.data) ? storedFileDoc.data : Buffer.from([]);
+    const dataBuffer = extractGeneratedImageDataBuffer(storedFileDoc?.data);
     if (dataBuffer.length === 0) {
       res.status(404).json({ error: "文件不存在或已删除。" });
       return;
     }
     const downloadName = sanitizeGroupChatFileName(storedFileDoc.fileName);
-    const encodedName = encodeURIComponent(downloadName);
     const contentType = sanitizeGroupChatFileMimeType(storedFileDoc.mimeType);
 
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Length", String(dataBuffer.length));
     res.setHeader("Cache-Control", "private, no-store");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${downloadName}"; filename*=UTF-8''${encodedName}`,
-    );
+    res.setHeader("Content-Disposition", buildAttachmentContentDisposition(downloadName));
     res.send(dataBuffer);
   } catch (error) {
     res.status(500).json({
@@ -2900,7 +2897,13 @@ app.delete(
 
       const fileId = sanitizeId(messageDoc?.file?.fileId, "");
       if (fileId && isMongoObjectIdLike(fileId)) {
-        await GroupChatStoredFile.deleteOne({ _id: fileId, roomId });
+        const deletedResult = await GroupChatStoredFile.deleteOne({ _id: fileId, roomId });
+        if (!Number(deletedResult?.deletedCount || 0)) {
+          const legacyStoredFileDoc = await GroupChatStoredFile.findById(fileId, { roomId: 1 }).lean();
+          if (sanitizeId(legacyStoredFileDoc?.roomId, "") === roomId) {
+            await GroupChatStoredFile.deleteOne({ _id: fileId });
+          }
+        }
       } else {
         await GroupChatStoredFile.deleteMany({ roomId, messageId });
       }
@@ -4537,11 +4540,48 @@ function normalizeGeneratedImageMimeType(value) {
 
 function extractGeneratedImageDataBuffer(value) {
   if (Buffer.isBuffer(value)) return value;
+  if (ArrayBuffer.isView(value)) {
+    return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (value instanceof ArrayBuffer) {
+    return Buffer.from(value);
+  }
   if (value && typeof value === "object") {
+    if (typeof value.value === "function") {
+      try {
+        const binaryValue = value.value(true);
+        if (Buffer.isBuffer(binaryValue)) {
+          return Buffer.from(binaryValue);
+        }
+        if (ArrayBuffer.isView(binaryValue)) {
+          return Buffer.from(binaryValue.buffer, binaryValue.byteOffset, binaryValue.byteLength);
+        }
+        if (binaryValue instanceof ArrayBuffer) {
+          return Buffer.from(binaryValue);
+        }
+      } catch {
+        // ignore binary conversion failures and fallback to other extraction strategies.
+      }
+    }
     if (Array.isArray(value?.data)) {
       return Buffer.from(value.data);
     }
     if (Buffer.isBuffer(value?.buffer)) {
+      return Buffer.from(value.buffer);
+    }
+    if (ArrayBuffer.isView(value?.buffer)) {
+      const nestedBuffer = Buffer.from(
+        value.buffer.buffer,
+        value.buffer.byteOffset,
+        value.buffer.byteLength,
+      );
+      const position = Number(value?.position);
+      if (Number.isFinite(position) && position > 0 && position < nestedBuffer.length) {
+        return nestedBuffer.subarray(0, position);
+      }
+      return nestedBuffer;
+    }
+    if (value?.buffer instanceof ArrayBuffer) {
       return Buffer.from(value.buffer);
     }
   }
@@ -8000,6 +8040,34 @@ function sanitizeGroupChatFileName(value) {
     })
     .join("");
   return cleaned.slice(0, 120);
+}
+
+function buildAttachmentContentDisposition(fileName) {
+  const safeName = sanitizeGroupChatFileName(fileName);
+  const fallbackAsciiName = toAsciiHeaderFileName(safeName);
+  const encodedName = encodeRfc5987ValueChars(safeName);
+  return `attachment; filename="${fallbackAsciiName}"; filename*=UTF-8''${encodedName}`;
+}
+
+function toAsciiHeaderFileName(fileName) {
+  const text = String(fileName || "").trim();
+  if (!text) return "download.bin";
+
+  const ascii = text
+    .replace(/[\u0000-\u001f\u007f]/g, "_")
+    .replace(/[^\x20-\x7e]/g, "_")
+    .replace(/["\\]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  if (!ascii) return "download.bin";
+  if (ascii === "." || ascii === "..") return "download.bin";
+  return ascii;
+}
+
+function encodeRfc5987ValueChars(value) {
+  return encodeURIComponent(String(value || "download.bin"))
+    .replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
 function sanitizeGroupChatFileMimeType(value) {
