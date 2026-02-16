@@ -59,7 +59,7 @@ export default function LoginPage() {
   const loginHint = useMemo(() => {
     if (authStatusLoading) return "正在读取账号状态…";
     if (bootstrapMode) return "首次运行请先注册管理员账号（admin）。";
-    return "请输入数据库中已注册的账号与密码。";
+    return "";
   }, [authStatusLoading, bootstrapMode]);
 
   async function refreshAuthStatus() {
@@ -267,13 +267,12 @@ export default function LoginPage() {
           <div className="login-logo">E</div>
           <div>
             <div className="login-title">EduChat</div>
-            <div className="login-subtitle">教育实验对话平台</div>
           </div>
         </div>
 
         <form onSubmit={onSubmit} className="login-card">
           <h2 className="login-h2">登录</h2>
-          <p className="login-hint">{loginHint}</p>
+          {loginHint ? <p className="login-hint">{loginHint}</p> : null}
 
           <div className="login-field">
             <label className="login-label">用户名</label>

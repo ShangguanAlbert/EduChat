@@ -175,6 +175,18 @@
   background: #f8fbff;
 }
 
+.image-setting-terms-block {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  border: 1px solid #d6dfec;
+  border-radius: 12px;
+  background: #ffffff;
+  padding: 8px 10px;
+}
+
 .image-custom-select {
   position: relative;
   display: inline-flex;

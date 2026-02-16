@@ -74,6 +74,7 @@ export default function PartyChatDesktopPage({
   const isAtLatestRef = useRef(true);
   const forceScrollToLatestRef = useRef(true);
   const readSyncTimerRef = useRef(0);
+  const copyImageToastTimerRef = useRef(0);
   const sideMenuRef = useRef(null);
   const messageMenuRef = useRef(null);
   const composerToolbarRef = useRef(null);
@@ -121,6 +122,7 @@ export default function PartyChatDesktopPage({
   const [replyTarget, setReplyTarget] = useState(null);
   const [previewImage, setPreviewImage] = useState(null);
   const [isAtLatest, setIsAtLatest] = useState(true);
+  const [showCopyImageToast, setShowCopyImageToast] = useState(false);
   const [readReceiptModal, setReadReceiptModal] = useState({
     open: false,
     messageId: "",
@@ -232,6 +234,21 @@ export default function PartyChatDesktopPage({
     }
     syncLatestState();
   }, [scrollToLatestMessages, syncLatestState]);
+
+  const handleBackToChat = useCallback(() => {
+    if (readSyncTimerRef.current) {
+      clearTimeout(readSyncTimerRef.current);
+      readSyncTimerRef.current = 0;
+    }
+    if (copyImageToastTimerRef.current) {
+      clearTimeout(copyImageToastTimerRef.current);
+      copyImageToastTimerRef.current = 0;
+    }
+    joinedRoomIdsRef.current = new Set();
+    socketRef.current?.close();
+    socketRef.current = null;
+    navigate("/chat", { replace: true });
+  }, [navigate]);
 
   const mergeMessages = useCallback((roomId, incoming, { replace = false } = {}) => {
     const safeRoomId = String(roomId || "").trim();
@@ -565,8 +582,6 @@ export default function PartyChatDesktopPage({
     socketRef.current = socketClient;
 
     return () => {
-      const joinedRoomIds = Array.from(joinedRoomIdsRef.current);
-      joinedRoomIds.forEach((roomId) => socketClient.leaveRoom(roomId));
       joinedRoomIdsRef.current = new Set();
       socketClient.close();
       socketRef.current = null;
@@ -773,6 +788,10 @@ export default function PartyChatDesktopPage({
       if (readSyncTimerRef.current) {
         clearTimeout(readSyncTimerRef.current);
         readSyncTimerRef.current = 0;
+      }
+      if (copyImageToastTimerRef.current) {
+        clearTimeout(copyImageToastTimerRef.current);
+        copyImageToastTimerRef.current = 0;
       }
     },
     [],
@@ -1249,6 +1268,46 @@ export default function PartyChatDesktopPage({
     }
   }
 
+  function showImageCopiedNotice() {
+    setShowCopyImageToast(true);
+    if (copyImageToastTimerRef.current) {
+      clearTimeout(copyImageToastTimerRef.current);
+    }
+    copyImageToastTimerRef.current = window.setTimeout(() => {
+      setShowCopyImageToast(false);
+      copyImageToastTimerRef.current = 0;
+    }, 2000);
+  }
+
+  async function copyImageMessage(message) {
+    const dataUrl = String(message?.image?.dataUrl || "").trim();
+    if (!dataUrl) {
+      setActionError("图片复制失败，请稍后重试。");
+      return;
+    }
+
+    const ClipboardItemCtor = typeof window !== "undefined" ? window.ClipboardItem : undefined;
+    if (!navigator.clipboard?.write || !ClipboardItemCtor) {
+      setActionError("当前浏览器不支持复制图片。");
+      return;
+    }
+
+    try {
+      const response = await fetch(dataUrl);
+      const blob = await response.blob();
+      const mimeType = String(blob?.type || "").startsWith("image/") ? blob.type : "image/png";
+      await navigator.clipboard.write([
+        new ClipboardItemCtor({
+          [mimeType]: blob,
+        }),
+      ]);
+      setActionError("");
+      showImageCopiedNotice();
+    } catch (error) {
+      setActionError(error?.message || "图片复制失败，请稍后重试。");
+    }
+  }
+
   function closeMessageMenu() {
     setMessageMenuState({ messageId: "", showReactions: false });
   }
@@ -1285,6 +1344,11 @@ export default function PartyChatDesktopPage({
 
   async function handleCopyMessage(message) {
     await copyMessage(message);
+    closeMessageMenu();
+  }
+
+  async function handleCopyImageMessage(message) {
+    await copyImageMessage(message);
     closeMessageMenu();
   }
 
@@ -1329,7 +1393,7 @@ export default function PartyChatDesktopPage({
     const others = memberUserIds.filter((userId) => userId && userId !== senderUserId);
     if (others.length === 0) {
       return {
-        label: "0人未读",
+        label: "全部已读",
         unreadUserIds: [],
         readUserIds: [],
       };
@@ -1348,8 +1412,15 @@ export default function PartyChatDesktopPage({
       }
     });
 
+    const label =
+      unreadUserIds.length === 0
+        ? "全部已读"
+        : readUserIds.length === 0
+          ? "全部未读"
+          : `${unreadUserIds.length}人未读`;
+
     return {
-      label: unreadUserIds.length === 0 ? "全部未读" : `${unreadUserIds.length}人未读`,
+      label,
       unreadUserIds,
       readUserIds,
     };
@@ -1447,7 +1518,7 @@ export default function PartyChatDesktopPage({
     <div className="party-page">
       <header className="party-header">
         <div className="party-header-left">
-          <button type="button" className="party-back-btn" onClick={() => navigate("/chat")}>
+          <button type="button" className="party-back-btn" onClick={handleBackToChat}>
             <ArrowLeft size={16} />
             返回
           </button>
@@ -1478,12 +1549,6 @@ export default function PartyChatDesktopPage({
               {showSidebar ? "隐藏侧栏" : "显示侧栏"}
             </button>
           )}
-          <span className="party-limit-chip">
-            已建 {counts.createdRooms}/{limits.maxCreatedRoomsPerUser}
-          </span>
-          <span className="party-limit-chip">
-            已加 {counts.joinedRooms}/{limits.maxJoinedRoomsPerUser}
-          </span>
         </div>
       </header>
 
@@ -1524,7 +1589,17 @@ export default function PartyChatDesktopPage({
           </div>
 
           <section className="party-card party-room-list-card">
-            <h2 className="party-card-title">我的派</h2>
+            <div className="party-room-list-head">
+              <h2 className="party-card-title">我的派</h2>
+              <div className="party-room-list-chip-group">
+                <span className="party-limit-chip">
+                  已建 {counts.createdRooms}/{limits.maxCreatedRoomsPerUser}
+                </span>
+                <span className="party-limit-chip">
+                  已加 {counts.joinedRooms}/{limits.maxJoinedRoomsPerUser}
+                </span>
+              </div>
+            </div>
             {bootstrapLoading ? (
               <p className="party-tip">加载中...</p>
             ) : rooms.length === 0 ? (
@@ -1767,6 +1842,17 @@ export default function PartyChatDesktopPage({
                                           </button>
                                         ) : null}
 
+                                        {message.type === "image" ? (
+                                          <button
+                                            type="button"
+                                            className="party-msg-menu-item"
+                                            onClick={() => void handleCopyImageMessage(message)}
+                                          >
+                                            <Copy size={15} />
+                                            复制图片
+                                          </button>
+                                        ) : null}
+
                                         <button
                                           type="button"
                                           className="party-msg-menu-item"
@@ -1818,7 +1904,7 @@ export default function PartyChatDesktopPage({
                                 {readReceipt ? (
                                   <button
                                     type="button"
-                                    className="party-read-receipt-btn"
+                                    className={`party-read-receipt-btn${isMine ? " mine" : " other"}`}
                                     onClick={() => openReadReceiptModal(message)}
                                   >
                                     {readReceipt.label}
@@ -1845,6 +1931,11 @@ export default function PartyChatDesktopPage({
                     >
                       跳转到最新消息
                     </button>
+                  </div>
+                ) : null}
+                {showCopyImageToast ? (
+                  <div className="party-copy-image-toast" role="status" aria-live="polite">
+                    图片已复制
                   </div>
                 ) : null}
               </div>
@@ -2672,18 +2763,177 @@ function createReplyTarget(message) {
 }
 
 function renderTextWithMentions(text) {
-  const parts = String(text || "").split(/(@[\u4e00-\u9fa5A-Za-z0-9_-]{1,20})/g);
+  const rawText = String(text || "");
+  if (!rawText) return null;
+
+  const nodes = [];
+  let cursor = 0;
+  let keyIndex = 0;
+  let matched;
+  const linkRegex =
+    /(?:https?:\/\/[^\s<>"'`]+|www\.[^\s<>"'`]+|(?:\d{1,3}\.){3}\d{1,3}(?::\d{2,5})?(?:\/[^\s<>"'`]*)?|(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d{2,5})?(?:\/[^\s<>"'`]*)?)/gi;
+
+  while ((matched = linkRegex.exec(rawText)) !== null) {
+    const matchedText = String(matched[0] || "");
+    const start = matched.index;
+    const end = start + matchedText.length;
+    if (start > cursor) {
+      nodes.push(...renderMentionSegment(rawText.slice(cursor, start), `seg-${keyIndex}`));
+      keyIndex += 1;
+    }
+
+    const { urlText, trailing } = splitLinkAndTrailingPunctuation(matchedText);
+    if (shouldLinkifyToken(urlText, rawText, start)) {
+      const href = normalizeUrlHref(urlText);
+      nodes.push(
+        <a
+          key={`link-${keyIndex}`}
+          className="party-message-link"
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {urlText}
+        </a>,
+      );
+      keyIndex += 1;
+    } else {
+      nodes.push(...renderMentionSegment(matchedText, `seg-${keyIndex}`));
+      keyIndex += 1;
+      cursor = end;
+      continue;
+    }
+    if (trailing) {
+      nodes.push(<span key={`trail-${keyIndex}`}>{trailing}</span>);
+      keyIndex += 1;
+    }
+
+    cursor = end;
+  }
+
+  if (cursor < rawText.length) {
+    nodes.push(...renderMentionSegment(rawText.slice(cursor), `seg-${keyIndex}`));
+  }
+
+  return nodes;
+}
+
+function renderMentionSegment(segment, keyPrefix) {
+  const parts = String(segment || "").split(/(@[\u4e00-\u9fa5A-Za-z0-9_-]{1,20})/g);
   return parts.map((part, index) => {
     if (!part) return null;
     if (/^@[\u4e00-\u9fa5A-Za-z0-9_-]{1,20}$/.test(part)) {
       return (
-        <mark key={`m-${index}`} className="party-mention">
+        <mark key={`${keyPrefix}-m-${index}`} className="party-mention">
           {part}
         </mark>
       );
     }
-    return <span key={`t-${index}`}>{part}</span>;
+    return <span key={`${keyPrefix}-t-${index}`}>{part}</span>;
   });
+}
+
+function splitLinkAndTrailingPunctuation(text) {
+  const value = String(text || "");
+  if (!value) {
+    return { urlText: "", trailing: "" };
+  }
+  const match = value.match(/[),.!?:;'"`，。！？；：、）】》]+$/u);
+  if (!match) {
+    return { urlText: value, trailing: "" };
+  }
+  const trailing = match[0];
+  const urlText = value.slice(0, value.length - trailing.length);
+  if (!urlText) {
+    return { urlText: value, trailing: "" };
+  }
+  return { urlText, trailing };
+}
+
+function shouldLinkifyToken(token, sourceText, startIndex) {
+  const value = String(token || "").trim();
+  if (!value) return false;
+
+  const host = extractHostFromLinkToken(value);
+  if (!host) return false;
+
+  const withProtocol = /^https?:\/\//i.test(value);
+  const startsWithWww = /^www\./i.test(value);
+  const hostIsIPv4 = isValidIPv4Host(host);
+  const hostIsDomain = isValidDomainHost(host);
+  if (!hostIsIPv4 && !hostIsDomain) return false;
+
+  if (!withProtocol && !startsWithWww) {
+    const prevChar = startIndex > 0 ? sourceText.charAt(startIndex - 1) : "";
+    if (prevChar === "@") {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function extractHostFromLinkToken(token) {
+  let value = String(token || "").trim();
+  if (!value) return "";
+
+  value = value.replace(/^[a-z]+:\/\//i, "");
+  const pathIndex = value.search(/[/?#]/);
+  if (pathIndex >= 0) {
+    value = value.slice(0, pathIndex);
+  }
+  const atIndex = value.lastIndexOf("@");
+  if (atIndex >= 0) {
+    value = value.slice(atIndex + 1);
+  }
+  if (!value) return "";
+
+  const colonIndex = value.lastIndexOf(":");
+  if (colonIndex > 0 && value.indexOf(":") === colonIndex) {
+    const portText = value.slice(colonIndex + 1);
+    if (/^\d{2,5}$/.test(portText)) {
+      value = value.slice(0, colonIndex);
+    }
+  }
+  return value.toLowerCase();
+}
+
+function isValidDomainHost(host) {
+  const value = String(host || "").trim().toLowerCase();
+  if (!value || !value.includes(".") || value.length > 253) return false;
+
+  const labels = value.split(".");
+  if (labels.some((label) => !label || label.length > 63)) {
+    return false;
+  }
+  const tld = labels[labels.length - 1];
+  if (!/^[a-z]{2,63}$/.test(tld)) {
+    return false;
+  }
+  return labels.every(
+    (label) => /^[a-z0-9-]+$/i.test(label) && !label.startsWith("-") && !label.endsWith("-"),
+  );
+}
+
+function isValidIPv4Host(host) {
+  const parts = String(host || "").split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false;
+    const value = Number(part);
+    return value >= 0 && value <= 255;
+  });
+}
+
+function normalizeUrlHref(text) {
+  const value = String(text || "").trim();
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+  const host = extractHostFromLinkToken(value);
+  if (isValidIPv4Host(host)) {
+    return `http://${value}`;
+  }
+  return `https://${value}`;
 }
 
 function toTimestamp(value) {

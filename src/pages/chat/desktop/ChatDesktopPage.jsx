@@ -1840,7 +1840,7 @@ export default function ChatDesktopPage() {
               <button
                 type="button"
                 className="chat-scroll-latest-btn"
-                onClick={scrollToLatestRound}
+                onClick={() => scrollToLatestRound()}
                 aria-label="跳转到最新消息"
                 title="跳转到最新消息"
               >

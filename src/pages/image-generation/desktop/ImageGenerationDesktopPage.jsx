@@ -280,6 +280,10 @@ export default function ImageGenerationDesktopPage({
   const termsContent = IMAGE_TERMS_CONTENT;
   const termsHash = IMAGE_TERMS_HASH;
   const termsLocked = !termsAgreed;
+  const showTermsInHeader = !isMobileSettingsDrawer;
+  const termsLockTipText = showTermsInHeader
+    ? "请先在右上角勾选并同意《图片生成功能服务条款》，再使用图片生成能力。"
+    : "请先在下方“设置”里勾选并同意《图片生成功能服务条款》，再使用图片生成能力。";
 
   const imageUrls = useMemo(() => {
     const deduped = new Set();
@@ -608,29 +612,31 @@ export default function ImageGenerationDesktopPage({
           </button>
           <h1 className="image-page-title">图片生成</h1>
         </div>
-        <div className="image-page-header-right">
-          <label className="image-terms-consent-label" htmlFor="image-terms-agree-checkbox">
-            <input
-              id="image-terms-agree-checkbox"
-              className="image-terms-consent-checkbox"
-              type="checkbox"
-              checked={termsAgreed}
-              onChange={(event) => handleTermsAgreedChange(event.target.checked)}
-            />
-            <span>我已阅读并同意</span>
-          </label>
-          <button
-            type="button"
-            className="image-terms-link-btn"
-            onClick={() => setShowTermsModal(true)}
-          >
-            《图片生成功能服务条款》
-          </button>
-        </div>
+        {showTermsInHeader ? (
+          <div className="image-page-header-right">
+            <label className="image-terms-consent-label" htmlFor="image-terms-agree-checkbox">
+              <input
+                id="image-terms-agree-checkbox"
+                className="image-terms-consent-checkbox"
+                type="checkbox"
+                checked={termsAgreed}
+                onChange={(event) => handleTermsAgreedChange(event.target.checked)}
+              />
+              <span>我已阅读并同意</span>
+            </label>
+            <button
+              type="button"
+              className="image-terms-link-btn"
+              onClick={() => setShowTermsModal(true)}
+            >
+              《图片生成功能服务条款》
+            </button>
+          </div>
+        ) : null}
       </header>
 
       <div className={`image-terms-lock-tip${termsLocked ? "" : " is-hidden"}`} aria-hidden={!termsLocked}>
-        请先在右上角勾选并同意《图片生成功能服务条款》，再使用图片生成能力。
+        {termsLockTipText}
       </div>
 
       <form className={`image-workspace${termsLocked ? " is-locked" : ""}`} onSubmit={handleGenerate}>
@@ -651,6 +657,27 @@ export default function ImageGenerationDesktopPage({
                   onClick={() => onToggleSettingsDrawer?.(false)}
                 >
                   收起
+                </button>
+              </div>
+            ) : null}
+            {isMobileSettingsDrawer ? (
+              <div className="image-setting-terms-block">
+                <label className="image-terms-consent-label" htmlFor="image-terms-agree-checkbox-mobile">
+                  <input
+                    id="image-terms-agree-checkbox-mobile"
+                    className="image-terms-consent-checkbox"
+                    type="checkbox"
+                    checked={termsAgreed}
+                    onChange={(event) => handleTermsAgreedChange(event.target.checked)}
+                  />
+                  <span>我已阅读并同意</span>
+                </label>
+                <button
+                  type="button"
+                  className="image-terms-link-btn"
+                  onClick={() => setShowTermsModal(true)}
+                >
+                  《图片生成功能服务条款》
                 </button>
               </div>
             ) : null}

@@ -20,11 +20,21 @@
   padding: calc(env(safe-area-inset-top) + 10px) 12px 10px;
   min-height: auto;
   flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: nowrap;
 }
 
 .party-mobile-shell .party-header-right {
-  width: 100%;
-  justify-content: space-between;
+  width: auto;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.party-mobile-shell .party-header-left {
+  min-width: 0;
+  flex: 1;
 }
 
 .party-mobile-shell .party-workspace {

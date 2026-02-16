@@ -99,6 +99,7 @@ const MessageList = forwardRef(function MessageList({
     (targetScrollTop, duration = 620) => {
       const root = rootRef.current;
       if (!root) return;
+      const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 620;
 
       const start = root.scrollTop;
       const delta = targetScrollTop - start;
@@ -114,7 +115,7 @@ const MessageList = forwardRef(function MessageList({
         t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
       const step = (now) => {
-        const progress = Math.min(1, (now - startAt) / duration);
+        const progress = Math.min(1, (now - startAt) / safeDuration);
         root.scrollTop = start + delta * easeInOutCubic(progress);
         if (progress < 1) {
           scrollAnimFrameRef.current = requestAnimationFrame(step);

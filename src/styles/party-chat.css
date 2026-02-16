@@ -245,6 +245,27 @@
   font-size: 13px;
 }
 
+.party-room-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.party-room-list-chip-group {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.party-room-list-chip-group .party-limit-chip {
+  white-space: nowrap;
+}
+
 .party-member-list-head {
   display: flex;
   align-items: center;
@@ -608,6 +629,24 @@
   pointer-events: none;
 }
 
+.party-copy-image-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  border: 1px solid #cde4d4;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #15713a;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 8px 12px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.14);
+  pointer-events: none;
+  z-index: 10;
+}
+
 .party-message {
   display: flex;
   flex-direction: column;
@@ -729,7 +768,16 @@
   color: #5f7188;
   font-size: 12px;
   padding: 0;
+}
+
+.party-read-receipt-btn.mine {
   align-self: flex-end;
+  text-align: right;
+}
+
+.party-read-receipt-btn.other {
+  align-self: flex-start;
+  text-align: left;
 }
 
 .party-read-receipt-btn:hover {
@@ -768,6 +816,22 @@
   word-break: break-word;
   line-height: 1.5;
   font-size: 14px;
+}
+
+.party-page .party-message-text,
+.party-page .party-message-text * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.party-message-link {
+  color: #135bdb;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.party-message-link:hover {
+  color: #0f48ad;
 }
 
 .party-mention {
@@ -1592,6 +1656,12 @@
     min-height: 32px;
     padding: 0 12px;
     font-size: 12px;
+  }
+
+  .party-copy-image-toast {
+    bottom: 10px;
+    font-size: 12px;
+    padding: 7px 11px;
   }
 
   .party-read-receipt-modal {

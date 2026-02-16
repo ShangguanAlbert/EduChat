@@ -42,6 +42,16 @@
   justify-content: flex-start;
 }
 
+.image-mobile-shell .image-setting-terms-block .image-terms-consent-label {
+  width: auto;
+  font-size: 13px;
+}
+
+.image-mobile-shell .image-setting-terms-block .image-terms-link-btn {
+  font-size: 13px;
+  padding-left: 0;
+}
+
 .image-mobile-shell .image-terms-lock-tip {
   margin: 8px 10px 0;
 }
@@ -95,6 +105,7 @@
 }
 
 .image-mobile-shell .image-setting-drawer-head {
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -110,6 +121,7 @@
 }
 
 .image-mobile-shell .image-setting-drawer-close {
+  margin-left: auto;
   border: 1px solid #d8e3f5;
   border-radius: 9px;
   background: #f5f9ff;
