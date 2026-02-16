@@ -1115,20 +1115,28 @@ export default function PartyChatDesktopPage({
     const fileId = String(message?.file?.fileId || "").trim();
     if (!roomId || !fileId || !messageId) return;
 
-    const expiresAt = String(message?.file?.expiresAt || "").trim();
-    if (isFileExpired(expiresAt)) {
-      setActionError("文件已过期。");
-      return;
-    }
-
     setDownloadingFileMessageId(messageId);
     try {
       const result = await downloadPartyFile(roomId, fileId);
+      const fileName = String(result?.fileName || message?.file?.fileName || "group-file.bin");
+      const downloadUrl = String(result?.downloadUrl || "").trim();
+      if (downloadUrl) {
+        const anchor = document.createElement("a");
+        anchor.href = downloadUrl;
+        anchor.download = fileName;
+        anchor.target = "_blank";
+        anchor.rel = "noopener noreferrer";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setActionError("");
+        return;
+      }
+
       const blob = result?.blob;
       if (!blob) {
         throw new Error("文件下载失败");
       }
-      const fileName = String(result?.fileName || message?.file?.fileName || "group-file.bin");
       const blobUrl = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = blobUrl;
@@ -1775,9 +1783,7 @@ export default function PartyChatDesktopPage({
                                             {message?.file?.fileName || "文件"}
                                           </span>
                                           <span className="party-file-msg-meta">
-                                            {isFileExpired(message?.file?.expiresAt)
-                                              ? "文件已过期"
-                                              : `${formatFileSize(message?.file?.size)} · 点击下载`}
+                                            {`${formatFileSize(message?.file?.size)} · 点击下载`}
                                           </span>
                                         </div>
                                         <Download size={14} />
@@ -2738,14 +2744,6 @@ function formatFileSize(bytes) {
   if (mb < 1024) return `${mb.toFixed(mb >= 100 ? 0 : 1)} MB`;
   const gb = mb / 1024;
   return `${gb.toFixed(gb >= 100 ? 0 : 1)} GB`;
-}
-
-function isFileExpired(expiresAt) {
-  const text = String(expiresAt || "").trim();
-  if (!text) return false;
-  const timestamp = new Date(text).getTime();
-  if (!Number.isFinite(timestamp)) return false;
-  return timestamp <= Date.now();
 }
 
 function createReplyTarget(message) {

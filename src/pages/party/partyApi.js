@@ -164,11 +164,24 @@ export async function downloadPartyFile(roomId, fileId) {
       headers: authHeaders(),
     },
   );
+  const contentType = String(resp.headers.get("content-type") || "").toLowerCase();
 
   if (!resp.ok) {
-    const data = await readJson(resp);
+    const data = contentType.includes("application/json") ? await readJson(resp) : null;
     const message = data?.error || data?.message || `请求失败（${resp.status}）`;
     throw new Error(message);
+  }
+
+  if (contentType.includes("application/json")) {
+    const data = await readJson(resp);
+    const downloadUrl = String(data?.downloadUrl || "").trim();
+    if (downloadUrl) {
+      return {
+        downloadUrl,
+        fileName: String(data?.fileName || "").trim(),
+        mimeType: String(data?.mimeType || ""),
+      };
+    }
   }
 
   const blob = await resp.blob();

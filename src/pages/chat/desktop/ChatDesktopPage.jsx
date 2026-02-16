@@ -283,8 +283,10 @@ export default function ChatDesktopPage() {
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [bootstrapError, setBootstrapError] = useState("");
   const [dismissedRoundWarningBySession, setDismissedRoundWarningBySession] = useState({});
+  const [messageBottomInset, setMessageBottomInset] = useState(0);
 
   const messageListRef = useRef(null);
+  const chatInputWrapRef = useRef(null);
   const exportWrapRef = useRef(null);
   const streamTargetRef = useRef({ sessionId: "", assistantId: "", mode: "draft" });
   const streamBufferRef = useRef({
@@ -355,6 +357,54 @@ export default function ChatDesktopPage() {
         runtime?.enableThinking ?? DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
     });
   };
+
+  useEffect(() => {
+    const inputWrap = chatInputWrapRef.current;
+    if (!inputWrap) return undefined;
+
+    let frameId = 0;
+    const parsePx = (value) => {
+      const n = Number.parseFloat(value);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const updateInset = () => {
+      frameId = 0;
+      const wrapHeight = inputWrap.getBoundingClientRect().height;
+      const latestRow = inputWrap.querySelector(".chat-scroll-latest-row");
+      let latestRowHeight = 0;
+
+      if (latestRow && latestRow instanceof HTMLElement) {
+        const rowRect = latestRow.getBoundingClientRect();
+        const styles = window.getComputedStyle(latestRow);
+        latestRowHeight =
+          rowRect.height + parsePx(styles.marginTop) + parsePx(styles.marginBottom);
+      }
+
+      const next = Math.max(0, Math.ceil(wrapHeight - latestRowHeight));
+      setMessageBottomInset((prev) => (Math.abs(prev - next) <= 1 ? prev : next));
+    };
+
+    const scheduleUpdate = () => {
+      if (frameId) cancelAnimationFrame(frameId);
+      frameId = requestAnimationFrame(updateInset);
+    };
+
+    scheduleUpdate();
+
+    let resizeObserver = null;
+    if (typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(scheduleUpdate);
+      resizeObserver.observe(inputWrap);
+    }
+    window.addEventListener("resize", scheduleUpdate);
+
+    return () => {
+      if (resizeObserver) resizeObserver.disconnect();
+      window.removeEventListener("resize", scheduleUpdate);
+      if (frameId) cancelAnimationFrame(frameId);
+    };
+  }, []);
 
   function patchAssistantMessage(sessionId, assistantId, updater, onPatched) {
     if (typeof updater !== "function") return;
@@ -1813,13 +1863,14 @@ export default function ChatDesktopPage() {
           messages={messages}
           isStreaming={isStreaming}
           focusMessageId={focusUserMessageId}
+          bottomInset={messageBottomInset}
           onAssistantFeedback={onAssistantFeedback}
           onAssistantRegenerate={onAssistantRegenerate}
           onAskSelection={onAskSelection}
           onLatestChange={setIsAtLatest}
         />
 
-        <div className="chat-input-wrap">
+        <div className="chat-input-wrap" ref={chatInputWrapRef}>
           {roundCount >= CHAT_ROUND_WARNING_THRESHOLD && !roundWarningDismissed && (
             <div className="chat-round-warning" role="status">
               <span>继续当前对话可能导致页面卡顿，请新建一个对话。</span>

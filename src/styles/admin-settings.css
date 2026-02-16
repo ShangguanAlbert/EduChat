@@ -839,7 +839,11 @@
 
 .admin-preview-chat .messages-inner {
   max-width: 100%;
-  gap: 12px;
+  padding: 0;
+}
+
+.admin-preview-chat .messages-virtuoso-item {
+  padding-bottom: 12px;
 }
 
 .admin-preview-chat .selection-ask-btn {

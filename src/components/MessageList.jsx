@@ -17,6 +17,7 @@ import {
   useState,
 } from "react";
 import ReactMarkdown from "react-markdown";
+import { Virtuoso } from "react-virtuoso";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { useSessionStreamDraft } from "../pages/chat/streamDraftStore.js";
@@ -28,11 +29,32 @@ const MARKDOWN_COMPONENTS = {
   },
 };
 
+const VIRTUOSO_COMPONENTS = {
+  List: forwardRef(function MessageVirtuosoList({ style, children, ...props }, ref) {
+    return (
+      <div {...props} ref={ref} className="messages-inner" style={style}>
+        {children}
+      </div>
+    );
+  }),
+  Item: function MessageVirtuosoItem({ style, children, ...props }) {
+    return (
+      <div {...props} className="messages-virtuoso-item" style={style}>
+        {children}
+      </div>
+    );
+  },
+  Footer: function MessageVirtuosoFooter() {
+    return <div className="messages-bottom-spacer" aria-hidden="true" />;
+  },
+};
+
 const MessageList = forwardRef(function MessageList({
   activeSessionId = "",
   messages,
   isStreaming = false,
   focusMessageId = "",
+  bottomInset = 0,
   onAssistantFeedback,
   onAssistantRegenerate,
   onAskSelection,
@@ -40,15 +62,23 @@ const MessageList = forwardRef(function MessageList({
   showAssistantActions = true,
 }, ref) {
   const streamDraft = useSessionStreamDraft(activeSessionId);
+  const virtuosoRef = useRef(null);
   const rootRef = useRef(null);
-  const messageRefMap = useRef(new Map());
-  const scrollAnimFrameRef = useRef(0);
   const prevStreamingRef = useRef(isStreaming);
   const isAtLatestRef = useRef(true);
   const displayedMessages = useMemo(() => {
     if (!streamDraft) return messages;
     return [...messages, streamDraft];
   }, [messages, streamDraft]);
+  const messageIndexMap = useMemo(() => {
+    const map = new Map();
+    displayedMessages.forEach((message, index) => {
+      if (message?.id) {
+        map.set(message.id, index);
+      }
+    });
+    return map;
+  }, [displayedMessages]);
   const promptMap = useMemo(
     () => buildNearestPromptMap(displayedMessages),
     [displayedMessages],
@@ -59,20 +89,22 @@ const MessageList = forwardRef(function MessageList({
     x: 0,
     y: 0,
   });
+  const virtuosoStyle = useMemo(() => {
+    const safeInset = Number.isFinite(bottomInset) ? Math.max(0, Math.round(bottomInset)) : 0;
+    return {
+      "--messages-bottom-spacer": `${safeInset}px`,
+    };
+  }, [bottomInset]);
 
-  const setMessageRef = useCallback((id, node) => {
-    if (!id) return;
-    if (node) {
-      messageRefMap.current.set(id, node);
-    } else {
-      messageRefMap.current.delete(id);
+  const setScrollerRef = useCallback((node) => {
+    if (
+      typeof window !== "undefined" &&
+      node instanceof window.HTMLElement
+    ) {
+      rootRef.current = node;
+      return;
     }
-  }, []);
-
-  const cancelScrollAnimation = useCallback(() => {
-    if (!scrollAnimFrameRef.current) return;
-    cancelAnimationFrame(scrollAnimFrameRef.current);
-    scrollAnimFrameRef.current = 0;
+    rootRef.current = null;
   }, []);
 
   const setLatestState = useCallback(
@@ -95,78 +127,79 @@ const MessageList = forwardRef(function MessageList({
     return next;
   }, [setLatestState]);
 
-  const animateMessagesScroll = useCallback(
-    (targetScrollTop, duration = 620) => {
-      const root = rootRef.current;
-      if (!root) return;
-      const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 620;
-
-      const start = root.scrollTop;
-      const delta = targetScrollTop - start;
-      if (Math.abs(delta) < 1) {
-        root.scrollTop = targetScrollTop;
-        checkIsAtLatest();
-        return;
-      }
-
-      cancelScrollAnimation();
-      const startAt = performance.now();
-      const easeInOutCubic = (t) =>
-        t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
-      const step = (now) => {
-        const progress = Math.min(1, (now - startAt) / safeDuration);
-        root.scrollTop = start + delta * easeInOutCubic(progress);
-        if (progress < 1) {
-          scrollAnimFrameRef.current = requestAnimationFrame(step);
-        } else {
-          scrollAnimFrameRef.current = 0;
-          checkIsAtLatest();
-        }
-      };
-
-      scrollAnimFrameRef.current = requestAnimationFrame(step);
-    },
-    [cancelScrollAnimation, checkIsAtLatest],
-  );
-
   const jumpToLatest = useCallback(() => {
-    const root = rootRef.current;
-    if (!root) return;
-    cancelScrollAnimation();
-    root.scrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-    checkIsAtLatest();
-  }, [cancelScrollAnimation, checkIsAtLatest]);
+    if (!displayedMessages.length) {
+      checkIsAtLatest();
+      return;
+    }
+    virtuosoRef.current?.scrollToIndex?.({
+      index: "LAST",
+      align: "end",
+      behavior: "auto",
+    });
+    requestAnimationFrame(() => {
+      checkIsAtLatest();
+    });
+  }, [displayedMessages.length, checkIsAtLatest]);
 
   const scrollMessageToAnchor = useCallback(
     (messageId, duration = 620) => {
       if (!messageId) return;
-      const root = rootRef.current;
-      if (!root) return;
-
-      const targetNode = messageRefMap.current.get(messageId);
-      if (!targetNode) return;
-
-      const anchorOffset = 16;
-      const maxScrollTop = Math.max(0, root.scrollHeight - root.clientHeight);
-      const targetTop = Math.max(
-        0,
-        Math.min(targetNode.offsetTop - anchorOffset, maxScrollTop),
-      );
+      const targetIndex = messageIndexMap.get(messageId);
+      if (typeof targetIndex !== "number") return;
       setLatestState(false);
-      animateMessagesScroll(targetTop, duration);
+      virtuosoRef.current?.scrollToIndex?.({
+        index: targetIndex,
+        align: "start",
+        behavior: duration > 0 ? "smooth" : "auto",
+      });
+      requestAnimationFrame(() => {
+        checkIsAtLatest();
+      });
     },
-    [animateMessagesScroll, setLatestState],
+    [messageIndexMap, setLatestState, checkIsAtLatest],
   );
 
   const scrollToLatest = useCallback(
     (duration = 420) => {
-      const root = rootRef.current;
-      if (!root) return;
-      const target = Math.max(0, root.scrollHeight - root.clientHeight);
-      animateMessagesScroll(target, duration);
+      if (!displayedMessages.length) return;
+      virtuosoRef.current?.scrollToIndex?.({
+        index: "LAST",
+        align: "end",
+        behavior: duration > 0 ? "smooth" : "auto",
+      });
     },
-    [animateMessagesScroll],
+    [displayedMessages.length],
+  );
+
+  const onAtBottomStateChange = useCallback(
+    (atBottom) => {
+      setLatestState(atBottom);
+    },
+    [setLatestState],
+  );
+
+  const renderMessageItem = useCallback(
+    (index, m) => {
+      void index;
+      return (
+        <MessageItem
+          m={m}
+          isStreaming={isStreaming}
+          onAssistantFeedback={onAssistantFeedback}
+          onAssistantRegenerate={onAssistantRegenerate}
+          promptMessageId={promptMap.get(m.id) || ""}
+          showAssistantActions={showAssistantActions}
+        />
+      );
+    },
+    [
+      isStreaming,
+      onAssistantFeedback,
+      onAssistantRegenerate,
+      promptMap,
+      showAssistantActions,
+    ],
   );
 
   useImperativeHandle(
@@ -191,8 +224,6 @@ const MessageList = forwardRef(function MessageList({
     }
     prevStreamingRef.current = isStreaming;
   }, [isStreaming, focusMessageId, scrollMessageToAnchor]);
-
-  useEffect(() => () => cancelScrollAnimation(), [cancelScrollAnimation]);
 
   useEffect(() => {
     setLatestState(true);
@@ -317,36 +348,22 @@ const MessageList = forwardRef(function MessageList({
     closeAskPopover();
   }
 
-  function onMessagesScroll() {
-    checkIsAtLatest();
-  }
-
   return (
-    <div
-      className="messages"
-      ref={rootRef}
-      onScroll={onMessagesScroll}
-      onMouseUp={onMessageAreaMouseUp}
-      onKeyUp={onMessageAreaMouseUp}
-      onWheelCapture={cancelScrollAnimation}
-      onTouchStart={cancelScrollAnimation}
-    >
-      <div className="messages-inner">
-        {displayedMessages.map((m) => (
-          <MessageItem
-            key={m.id}
-            messageId={m.id}
-            setMessageRef={setMessageRef}
-            m={m}
-            isStreaming={isStreaming}
-            onAssistantFeedback={onAssistantFeedback}
-            onAssistantRegenerate={onAssistantRegenerate}
-            promptMessageId={promptMap.get(m.id) || ""}
-            showAssistantActions={showAssistantActions}
-          />
-        ))}
-      </div>
-
+    <>
+      <Virtuoso
+        ref={virtuosoRef}
+        className="messages"
+        style={virtuosoStyle}
+        data={displayedMessages}
+        computeItemKey={(index, item) => item?.id || index}
+        components={VIRTUOSO_COMPONENTS}
+        scrollerRef={setScrollerRef}
+        atBottomThreshold={40}
+        atBottomStateChange={onAtBottomStateChange}
+        onMouseUp={onMessageAreaMouseUp}
+        onKeyUp={onMessageAreaMouseUp}
+        itemContent={renderMessageItem}
+      />
       {askPopover.open && typeof onAskSelection === "function" && (
         <button
           type="button"
@@ -361,15 +378,13 @@ const MessageList = forwardRef(function MessageList({
           询问
         </button>
       )}
-    </div>
+    </>
   );
 });
 
 export default MessageList;
 
 const MessageItem = memo(function MessageItem({
-  messageId,
-  setMessageRef,
   m,
   isStreaming,
   onAssistantFeedback,
@@ -378,12 +393,6 @@ const MessageItem = memo(function MessageItem({
   showAssistantActions,
 }) {
   const [copied, setCopied] = useState(false);
-  const rowRef = useCallback(
-    (node) => {
-      setMessageRef(messageId, node);
-    },
-    [setMessageRef, messageId],
-  );
 
   async function copyContent() {
     const text = m.content?.trim() || "";
@@ -399,7 +408,7 @@ const MessageItem = memo(function MessageItem({
   }
 
   return (
-    <div className={`msg ${m.role}`} ref={rowRef}>
+    <div className={`msg ${m.role}`}>
       <div className={`msg-bubble ${m.role}`}>
         {m.reasoning?.trim() && (
           <details className="reasoning-panel">

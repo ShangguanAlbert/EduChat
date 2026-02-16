@@ -11,6 +11,7 @@ import mammoth from "mammoth";
 import XLSX from "xlsx";
 import { PDFParse } from "pdf-parse";
 import mongoose from "mongoose";
+import OSS from "ali-oss";
 import { WebSocketServer } from "ws";
 import { SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT } from "./prompts/leakProtectionPrompt.js";
 import { PROMPT_LEAK_PROBE_KEYWORDS } from "./prompts/leakProtectionKeywords.js";
@@ -35,6 +36,8 @@ const app = express();
 const groupChatWsRoomSockets = new Map();
 const groupChatWsMetaBySocket = new Map();
 const groupChatWsOnlineCountsByRoom = new Map();
+let groupChatExpiredFileCleanupTimer = null;
+let generatedImageExpiredCleanupTimer = null;
 const port = process.env.PORT || 8787;
 const mongoUri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/educhat";
 const authSecret = String(
@@ -78,6 +81,19 @@ const GROUP_CHAT_MAX_MESSAGES_LIMIT = 200;
 const GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES = 6 * 1024 * 1024;
 const GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 const GROUP_CHAT_FILE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const GROUP_CHAT_OSS_DEFAULT_REGION = "oss-cn-hangzhou";
+const GROUP_CHAT_OSS_DEFAULT_PREFIX = "chat-files";
+const GROUP_CHAT_OSS_SIGNED_URL_TTL_SECONDS_DEFAULT = 300;
+const GROUP_CHAT_OSS_SIGNED_URL_TTL_SECONDS_MAX = 3600;
+const GROUP_CHAT_OSS_STARTUP_CHECK_TIMEOUT_MS_DEFAULT = 8000;
+const GROUP_CHAT_OSS_STARTUP_CHECK_TIMEOUT_MS_MAX = 60000;
+const GROUP_CHAT_OSS_EXPIRED_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const GROUP_CHAT_OSS_EXPIRED_CLEANUP_BATCH_SIZE = 120;
+const GENERATED_IMAGE_OSS_EXPIRED_CLEANUP_INTERVAL_MS = 60 * 1000;
+const GENERATED_IMAGE_OSS_EXPIRED_CLEANUP_BATCH_SIZE = 80;
+const CHAT_ATTACHMENT_OSS_SCOPE = "chat-attachments";
+const IMAGE_GENERATION_INPUT_OSS_SCOPE = "image-generation-inputs";
+const IMAGE_GENERATION_OUTPUT_OSS_SCOPE = "image-generation-outputs";
 const GROUP_CHAT_TEXT_MAX_LENGTH = 1800;
 const GROUP_CHAT_ROOM_NAME_MAX_LENGTH = 30;
 const GROUP_CHAT_REPLY_PREVIEW_MAX_LENGTH = 120;
@@ -87,6 +103,29 @@ const GROUP_CHAT_MAX_READ_STATES_PER_ROOM = GROUP_CHAT_MAX_MEMBERS_PER_ROOM;
 const GROUP_CHAT_WS_PATH = "/ws/group-chat";
 const GROUP_CHAT_WS_AUTH_TIMEOUT_MS = 10000;
 const GROUP_CHAT_WS_MAX_PAYLOAD_BYTES = 128 * 1024;
+const groupChatOssConfig = buildGroupChatOssConfig();
+const groupChatOssClients = createGroupChatOssClients(groupChatOssConfig);
+const groupChatOssClient = groupChatOssClients.primary;
+const groupChatOssFallbackClient = groupChatOssClients.fallback;
+if (!groupChatOssClient) {
+  console.warn(
+    "[group-chat-file-storage] OSS 未启用，群聊文件将继续写入 MongoDB（Buffer）。",
+  );
+} else if (groupChatOssConfig?.networkMode === "internal_prefer" && groupChatOssFallbackClient) {
+  const fallbackHost =
+    groupChatOssFallbackClient?.options?.endpoint?.host ||
+    groupChatOssFallbackClient?.options?.endpoint?.hostname ||
+    "";
+  console.log(
+    `[group-chat-file-storage] OSS 已启用：优先走内网；若连接超时将自动回退公网重试（fallback=${fallbackHost || "public-endpoint"}）。`,
+  );
+} else if (groupChatOssConfig?.networkMode === "internal_prefer") {
+  console.log("[group-chat-file-storage] OSS 已启用：优先走内网（公网回退未启用）。");
+} else if (groupChatOssConfig?.networkMode === "internal_only") {
+  console.log("[group-chat-file-storage] OSS 已启用：仅走内网（不回退公网）。");
+} else {
+  console.log("[group-chat-file-storage] OSS 已启用：仅走公网。");
+}
 const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   provider: "inherit",
   model: "",
@@ -732,6 +771,24 @@ const uploadedFileContextSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: "",
     },
+    ossFiles: {
+      type: [
+        new mongoose.Schema(
+          {
+            fileName: { type: String, default: "" },
+            mimeType: { type: String, default: "application/octet-stream" },
+            size: { type: Number, default: 0 },
+            source: { type: String, default: "" },
+            ossKey: { type: String, default: "" },
+            ossBucket: { type: String, default: "" },
+            ossRegion: { type: String, default: "" },
+            fileUrl: { type: String, default: "" },
+          },
+          { _id: false },
+        ),
+      ],
+      default: () => [],
+    },
     expiresAt: { type: Date, required: true },
   },
   {
@@ -759,13 +816,16 @@ const generatedImageHistorySchema = new mongoose.Schema(
     prompt: { type: String, default: "" },
     imageUrl: { type: String, default: "" },
     imageStorageType: { type: String, default: "remote" },
+    ossKey: { type: String, default: "" },
+    ossBucket: { type: String, default: "" },
+    ossRegion: { type: String, default: "" },
     imageMimeType: { type: String, default: "" },
     imageSize: { type: Number, default: 0 },
     imageData: { type: Buffer, default: Buffer.alloc(0) },
     responseFormat: { type: String, default: "url" },
     size: { type: String, default: "" },
     model: { type: String, default: "" },
-    expiresAt: { type: Date, required: true },
+    expiresAt: { type: Date, default: null },
   },
   {
     timestamps: true,
@@ -842,8 +902,17 @@ const groupChatStoredFileSchema = new mongoose.Schema(
     fileName: { type: String, default: "group-file.bin" },
     mimeType: { type: String, default: "application/octet-stream" },
     size: { type: Number, default: 0 },
+    storageType: {
+      type: String,
+      enum: ["mongo", "oss"],
+      default: "mongo",
+    },
+    ossKey: { type: String, default: "" },
+    ossBucket: { type: String, default: "" },
+    ossRegion: { type: String, default: "" },
+    fileUrl: { type: String, default: "" },
     data: { type: Buffer, default: Buffer.alloc(0) },
-    expiresAt: { type: Date, required: true },
+    expiresAt: { type: Date, default: null },
   },
   {
     timestamps: true,
@@ -1628,6 +1697,21 @@ app.get("/api/auth/admin/export/chats-zip", async (req, res) => {
 app.delete("/api/auth/admin/chats", async (req, res) => {
   if (!(await authenticateAdminRequest(req, res))) return;
 
+  const imageHistoryDocs = await GeneratedImageHistory.find(
+    {},
+    { _id: 1, ossKey: 1 },
+  ).lean();
+  let deleteImageHistoryOssSummary = { deletedCount: 0, failedKeys: [] };
+  try {
+    deleteImageHistoryOssSummary = await deleteGeneratedImageHistoryOssObjects(
+      imageHistoryDocs,
+    );
+  } catch (error) {
+    console.warn(
+      "Failed to delete image history OSS objects on admin clear:",
+      error?.message || error,
+    );
+  }
   const [chatStateResult, uploadedContextResult, imageHistoryResult] = await Promise.all([
     ChatState.deleteMany({}),
     UploadedFileContext.deleteMany({}),
@@ -1638,6 +1722,10 @@ app.delete("/api/auth/admin/chats", async (req, res) => {
     deletedCount: Number(chatStateResult?.deletedCount || 0),
     deletedUploadedFileContextCount: Number(uploadedContextResult?.deletedCount || 0),
     deletedImageHistoryCount: Number(imageHistoryResult?.deletedCount || 0),
+    deletedImageHistoryOssObjectCount: Number(deleteImageHistoryOssSummary?.deletedCount || 0),
+    failedImageHistoryOssKeys: Array.isArray(deleteImageHistoryOssSummary?.failedKeys)
+      ? deleteImageHistoryOssSummary.failedKeys
+      : [],
   });
 });
 
@@ -1723,17 +1811,23 @@ app.post(
 
     try {
       const model = getModelByAgent(agentId, runtimeConfig);
-      const { uploadedRefs } = await uploadVolcengineMultipartFilesAsRefs({
+      const uploadedBundle = await uploadVolcengineMultipartFilesAsRefs({
         files,
         model,
         filesEndpoint: providerConfig.filesEndpoint,
         apiKey: providerConfig.apiKey,
         strictSupportedTypes: true,
       });
+      backupChatAttachmentsToOssInBackground({
+        files: uploadedBundle.uploadedFiles,
+        userId: "admin",
+        sessionId: "",
+        source: "admin-volcengine-files-api",
+      });
 
       res.json({
         ok: true,
-        files: uploadedRefs,
+        files: uploadedBundle.uploadedRefs,
       });
     } catch (error) {
       const message = error?.message || "火山文件上传失败，请稍后重试。";
@@ -1753,6 +1847,7 @@ app.post(
   upload.array("files", MAX_FILES),
   async (req, res) => {
     const agentId = sanitizeAgent(req.body?.agentId || "A");
+    const userId = sanitizeId(req.authUser?._id, "");
     const files = Array.isArray(req.files) ? req.files.filter(Boolean) : [];
     if (files.length === 0) {
       res.json({ ok: true, files: [] });
@@ -1779,17 +1874,23 @@ app.post(
 
     try {
       const model = getModelByAgent(agentId, runtimeConfig);
-      const { uploadedRefs } = await uploadVolcengineMultipartFilesAsRefs({
+      const uploadedBundle = await uploadVolcengineMultipartFilesAsRefs({
         files,
         model,
         filesEndpoint: providerConfig.filesEndpoint,
         apiKey: providerConfig.apiKey,
         strictSupportedTypes: true,
       });
+      backupChatAttachmentsToOssInBackground({
+        files: uploadedBundle.uploadedFiles,
+        userId,
+        sessionId: "",
+        source: "chat-volcengine-files-api",
+      });
 
       res.json({
         ok: true,
-        files: uploadedRefs,
+        files: uploadedBundle.uploadedRefs,
       });
     } catch (error) {
       const message = error?.message || "火山文件上传失败，请稍后重试。";
@@ -1898,7 +1999,11 @@ app.get("/api/images/history", requireChatAuth, async (req, res) => {
     docs = await GeneratedImageHistory.find(
       {
         userId,
-        expiresAt: { $gt: new Date() },
+        $or: [
+          { expiresAt: { $exists: false } },
+          { expiresAt: null },
+          { expiresAt: { $gt: new Date() } },
+        ],
       },
       {
         prompt: 1,
@@ -1942,6 +2047,7 @@ app.get("/api/images/history/:imageId/content", async (req, res) => {
       },
       {
         imageUrl: 1,
+        ossKey: 1,
         imageData: 1,
         imageMimeType: 1,
         imageStorageType: 1,
@@ -1954,9 +2060,20 @@ app.get("/api/images/history/:imageId/content", async (req, res) => {
     }
 
     const expiresAt = sanitizeIsoDate(doc?.expiresAt);
-    if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+    const imageStorageType = normalizeGeneratedImageStorageType(doc?.imageStorageType);
+    if (imageStorageType !== "oss" && expiresAt && Date.parse(expiresAt) <= Date.now()) {
       res.status(410).json({ error: "图片已过期。" });
       return;
+    }
+
+    const ossKey = sanitizeGroupChatOssObjectKey(doc?.ossKey);
+    if (ossKey) {
+      const ossUrl =
+        sanitizeGroupChatHttpUrl(doc?.imageUrl) || buildGroupChatOssObjectUrl(ossKey);
+      if (/^https?:\/\//i.test(ossUrl)) {
+        res.redirect(ossUrl);
+        return;
+      }
     }
 
     const imageBuffer = extractGeneratedImageDataBuffer(doc?.imageData);
@@ -2003,10 +2120,19 @@ app.delete("/api/images/history", requireChatAuth, async (req, res) => {
   }
 
   try {
+    const historyDocs = await GeneratedImageHistory.find(
+      { userId },
+      { _id: 1, ossKey: 1 },
+    ).lean();
+    const deleteOssSummary = await deleteGeneratedImageHistoryOssObjects(historyDocs);
     const result = await GeneratedImageHistory.deleteMany({ userId });
     res.json({
       ok: true,
       deletedCount: Number(result?.deletedCount || 0),
+      deletedOssObjectCount: Number(deleteOssSummary?.deletedCount || 0),
+      failedOssKeys: Array.isArray(deleteOssSummary?.failedKeys)
+        ? deleteOssSummary.failedKeys
+        : [],
     });
   } catch (error) {
     res.status(500).json({
@@ -2027,10 +2153,22 @@ app.delete("/api/images/history/:imageId", requireChatAuth, async (req, res) => 
     const deleted = await GeneratedImageHistory.findOneAndDelete({
       _id: imageId,
       userId,
+    }, {
+      projection: {
+        _id: 1,
+        ossKey: 1,
+      },
     });
+    const deleteOssSummary = await deleteGeneratedImageHistoryOssObjects(
+      deleted ? [deleted] : [],
+    );
     res.json({
       ok: true,
       deleted: !!deleted,
+      deletedOssObjectCount: Number(deleteOssSummary?.deletedCount || 0),
+      failedOssKeys: Array.isArray(deleteOssSummary?.failedKeys)
+        ? deleteOssSummary.failedKeys
+        : [],
     });
   } catch (error) {
     if (String(error?.name || "") === "CastError") {
@@ -2378,7 +2516,12 @@ app.delete("/api/group-chat/rooms/:roomId", requireChatAuth, async (req, res) =>
       return;
     }
 
+    const storedFileDocs = await GroupChatStoredFile.find(
+      { roomId },
+      { _id: 1, ossKey: 1 },
+    ).lean();
     await Promise.all([
+      deleteGroupChatStoredFileObjects(storedFileDocs),
       GroupChatRoom.deleteOne({ _id: roomId }),
       GroupChatMessage.deleteMany({ roomId }),
       GroupChatStoredFile.deleteMany({ roomId }),
@@ -2689,6 +2832,7 @@ app.post(
     const expiresAt = buildGroupChatFileExpireAt();
     let storedFileDoc = null;
     let createdMessageId = "";
+    let uploadedOssKey = "";
 
     try {
       const room = await GroupChatRoom.findOne({ _id: roomId, memberUserIds: userId }).lean();
@@ -2702,6 +2846,13 @@ app.post(
         rawReplyToMessageId: req.body?.replyToMessageId,
       });
       const senderName = buildGroupChatDisplayName(req.authUser);
+      const storagePayload = await buildGroupChatStoredFileStoragePayload({
+        roomId,
+        fileName,
+        mimeType,
+        fileBuffer: file.buffer,
+      });
+      uploadedOssKey = sanitizeGroupChatOssObjectKey(storagePayload?.ossKey);
 
       storedFileDoc = await GroupChatStoredFile.create({
         roomId,
@@ -2710,7 +2861,15 @@ app.post(
         fileName,
         mimeType,
         size: fileSize,
-        data: file.buffer,
+        storageType: sanitizeGroupChatFileStorageType(storagePayload?.storageType),
+        ossKey: uploadedOssKey,
+        ossBucket: sanitizeAliyunOssBucket(storagePayload?.ossBucket),
+        ossRegion: sanitizeAliyunOssRegion(storagePayload?.ossRegion),
+        fileUrl: sanitizeGroupChatHttpUrl(storagePayload?.fileUrl),
+        data:
+          sanitizeGroupChatFileStorageType(storagePayload?.storageType) === "oss"
+            ? Buffer.alloc(0)
+            : file.buffer,
         expiresAt,
       });
       const fileId = sanitizeId(storedFileDoc?._id, "");
@@ -2765,6 +2924,9 @@ app.post(
       if (storedFileDoc?._id && !createdMessageId) {
         await GroupChatStoredFile.deleteOne({ _id: storedFileDoc._id }).catch(() => {});
       }
+      if (!createdMessageId && uploadedOssKey) {
+        await deleteGroupChatOssObject(uploadedOssKey).catch(() => {});
+      }
       res.status(500).json({
         error: error?.message || "发送文件失败，请稍后重试。",
       });
@@ -2792,40 +2954,65 @@ app.get("/api/group-chat/rooms/:roomId/files/:fileId/download", requireChatAuth,
       return;
     }
 
-    let storedFileDoc = await GroupChatStoredFile.findOne({
-      _id: fileId,
-      roomId,
-    }).lean();
-    if (!storedFileDoc) {
-      const legacyStoredFileDoc = await GroupChatStoredFile.findById(fileId).lean();
-      if (sanitizeId(legacyStoredFileDoc?.roomId, "") === roomId) {
-        storedFileDoc = legacyStoredFileDoc;
-      }
-    }
+    const storedFileDoc = await findGroupChatStoredFileByRoomAndId({ roomId, fileId });
     const now = Date.now();
     if (!storedFileDoc) {
-      const messageDoc = await GroupChatMessage.findOne(
-        {
-          roomId,
-          type: "file",
-          "file.fileId": fileId,
-        },
-        {
-          file: 1,
-        },
-      ).lean();
-      const messageExpiredAt = sanitizeIsoDate(messageDoc?.file?.expiresAt);
-      if (messageExpiredAt && toGroupChatDateTimestamp(messageExpiredAt) <= now) {
-        res.status(410).json({ error: "文件已过期。" });
-        return;
-      }
       res.status(404).json({ error: "文件不存在或已删除。" });
       return;
     }
 
+    const fileStorageType = sanitizeGroupChatFileStorageType(storedFileDoc?.storageType);
     const fileExpiredAt = sanitizeIsoDate(storedFileDoc?.expiresAt);
-    if (fileExpiredAt && toGroupChatDateTimestamp(fileExpiredAt) <= now) {
+    if (
+      fileStorageType !== "oss" &&
+      fileExpiredAt &&
+      toGroupChatDateTimestamp(fileExpiredAt) <= now
+    ) {
       res.status(410).json({ error: "文件已过期。" });
+      return;
+    }
+
+    const downloadName = sanitizeGroupChatFileName(storedFileDoc.fileName);
+    const contentType = sanitizeGroupChatFileMimeType(storedFileDoc.mimeType);
+    const ossKey = sanitizeGroupChatOssObjectKey(storedFileDoc?.ossKey);
+    if (ossKey) {
+      const directUrl =
+        sanitizeGroupChatHttpUrl(storedFileDoc?.fileUrl) || buildGroupChatOssObjectUrl(ossKey);
+      if ((groupChatOssConfig?.publicRead || !groupChatOssClient) && directUrl) {
+        res.json({
+          ok: true,
+          downloadUrl: directUrl,
+          fileName: downloadName,
+          mimeType: contentType,
+        });
+        return;
+      }
+
+      const signedUrl = await buildGroupChatFileSignedDownloadUrl({
+        ossKey,
+        fileName: downloadName,
+      });
+      if (!signedUrl) {
+        res.status(500).json({ error: "文件下载地址生成失败，请稍后重试。" });
+        return;
+      }
+      res.json({
+        ok: true,
+        downloadUrl: signedUrl,
+        fileName: downloadName,
+        mimeType: contentType,
+      });
+      return;
+    }
+
+    const directUrl = sanitizeGroupChatHttpUrl(storedFileDoc?.fileUrl);
+    if (directUrl) {
+      res.json({
+        ok: true,
+        downloadUrl: directUrl,
+        fileName: downloadName,
+        mimeType: contentType,
+      });
       return;
     }
 
@@ -2834,8 +3021,6 @@ app.get("/api/group-chat/rooms/:roomId/files/:fileId/download", requireChatAuth,
       res.status(404).json({ error: "文件不存在或已删除。" });
       return;
     }
-    const downloadName = sanitizeGroupChatFileName(storedFileDoc.fileName);
-    const contentType = sanitizeGroupChatFileMimeType(storedFileDoc.mimeType);
 
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Length", String(dataBuffer.length));
@@ -2897,15 +3082,26 @@ app.delete(
 
       const fileId = sanitizeId(messageDoc?.file?.fileId, "");
       if (fileId && isMongoObjectIdLike(fileId)) {
-        const deletedResult = await GroupChatStoredFile.deleteOne({ _id: fileId, roomId });
-        if (!Number(deletedResult?.deletedCount || 0)) {
-          const legacyStoredFileDoc = await GroupChatStoredFile.findById(fileId, { roomId: 1 }).lean();
-          if (sanitizeId(legacyStoredFileDoc?.roomId, "") === roomId) {
-            await GroupChatStoredFile.deleteOne({ _id: fileId });
-          }
+        const storedFileDoc = await findGroupChatStoredFileByRoomAndId({
+          roomId,
+          fileId,
+          projection: { _id: 1, ossKey: 1 },
+        });
+        if (storedFileDoc?._id) {
+          await Promise.all([
+            deleteGroupChatStoredFileObjects([storedFileDoc]),
+            GroupChatStoredFile.deleteOne({ _id: storedFileDoc._id }),
+          ]);
         }
       } else {
-        await GroupChatStoredFile.deleteMany({ roomId, messageId });
+        const storedFileDocs = await GroupChatStoredFile.find(
+          { roomId, messageId },
+          { _id: 1, ossKey: 1 },
+        ).lean();
+        await Promise.all([
+          deleteGroupChatStoredFileObjects(storedFileDocs),
+          GroupChatStoredFile.deleteMany({ roomId, messageId }),
+        ]);
       }
       await Promise.all([
         GroupChatMessage.deleteOne({ _id: messageId, roomId }),
@@ -3191,7 +3387,38 @@ function buildUploadedFileContextExpireAt() {
   return new Date(Date.now() + UPLOADED_FILE_CONTEXT_CACHE_TTL_MS);
 }
 
-async function saveUploadedFileContext({ userId, sessionId, messageId, content }) {
+function sanitizeUploadedFileContextOssSource(value) {
+  const text = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!text) return "unknown";
+  return text.slice(0, 60);
+}
+
+function normalizeUploadedFileContextOssFiles(value) {
+  const safeList = Array.isArray(value) ? value : [];
+  return safeList
+    .slice(0, 40)
+    .map((item) => ({
+      fileName: sanitizeGroupChatFileName(item?.fileName),
+      mimeType: sanitizeGroupChatFileMimeType(item?.mimeType),
+      size: sanitizeRuntimeInteger(item?.size, 0, 0, GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES),
+      source: sanitizeUploadedFileContextOssSource(item?.source),
+      ossKey: sanitizeGroupChatOssObjectKey(item?.ossKey),
+      ossBucket: sanitizeAliyunOssBucket(item?.ossBucket),
+      ossRegion: sanitizeAliyunOssRegion(item?.ossRegion),
+      fileUrl: sanitizeGroupChatHttpUrl(item?.fileUrl),
+    }))
+    .filter((item) => !!item.ossKey || !!item.fileUrl);
+}
+
+async function saveUploadedFileContext({
+  userId,
+  sessionId,
+  messageId,
+  content,
+  ossFiles = [],
+}) {
   const identity = resolveUploadedFileContextIdentity({
     userId,
     sessionId,
@@ -3212,6 +3439,7 @@ async function saveUploadedFileContext({ userId, sessionId, messageId, content }
       {
         $set: {
           content: clonedContent,
+          ossFiles: normalizeUploadedFileContextOssFiles(ossFiles),
           expiresAt: buildUploadedFileContextExpireAt(),
         },
         $setOnInsert: {
@@ -3852,6 +4080,12 @@ async function streamAgentResponse({
         strictSupportedTypes: false,
       });
       filesForLocalAttach = uploadedBundle.fallbackFiles;
+      backupChatAttachmentsToOssInBackground({
+        files: uploadedBundle.uploadedFiles,
+        userId: chatUserId,
+        sessionId,
+        source: "stream-volcengine-files-api",
+      });
       effectiveVolcengineFileRefs = sanitizeVolcengineFileRefsPayload([
         ...effectiveVolcengineFileRefs,
         ...uploadedBundle.uploadedRefs,
@@ -3859,6 +4093,24 @@ async function streamAgentResponse({
     } catch (error) {
       res.status(500).json({
         error: error?.message || "火山文件上传失败，请稍后重试。",
+      });
+      return;
+    }
+  }
+
+  let uploadedContextOssFiles = [];
+  if (attachUploadedFiles && filesForLocalAttach.length > 0 && groupChatOssClient) {
+    try {
+      uploadedContextOssFiles = await uploadChatAttachmentsToOss({
+        files: filesForLocalAttach,
+        userId: chatUserId,
+        sessionId,
+        source: `${provider}-${protocol}-local`,
+        stopOnError: true,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "附件上传到 OSS 失败，请稍后重试。",
       });
       return;
     }
@@ -3877,6 +4129,7 @@ async function streamAgentResponse({
         sessionId,
         messageId: uploadedFileContextRecord.messageId,
         content: uploadedFileContextRecord.content,
+        ossFiles: uploadedContextOssFiles,
       });
     }
   }
@@ -4051,6 +4304,7 @@ async function streamSeedreamImageGeneration({ res, body, files = [], chatUserId
       body,
       files,
       model: imageConfig.model,
+      chatUserId,
     });
   } catch (error) {
     res.status(400).json({ error: error?.message || "图片输入参数不合法。" });
@@ -4162,7 +4416,7 @@ async function streamSeedreamImageGeneration({ res, body, files = [], chatUserId
   }
 }
 
-async function buildSeedreamImageGenerationRequest({ body, files, model }) {
+async function buildSeedreamImageGenerationRequest({ body, files, model, chatUserId = "" }) {
   const prompt = sanitizeText(body?.prompt, "", 2000);
   const size = normalizeSeedreamSize(body?.size);
   const sequentialImageGeneration = normalizeSeedreamSequentialMode(
@@ -4172,7 +4426,10 @@ async function buildSeedreamImageGenerationRequest({ body, files, model }) {
   const watermark = sanitizeRuntimeBoolean(body?.watermark, false);
   const responseFormat = normalizeSeedreamResponseFormat(body?.responseFormat);
   const imageUrls = parseSeedreamImageInputs(body?.imageUrls);
-  const fileInputs = buildSeedreamFileImageInputs(files);
+  const fileInputs = await buildSeedreamFileImageInputs({
+    files,
+    chatUserId,
+  });
   const inputImages = [...imageUrls, ...fileInputs];
   if (inputImages.length > MAX_IMAGE_GENERATION_INPUT_FILES) {
     throw new Error(
@@ -4285,19 +4542,52 @@ function isSeedreamImageInputUrl(value) {
   return /^https?:\/\//i.test(text) || /^data:image\//i.test(text);
 }
 
-function buildSeedreamFileImageInputs(files) {
+async function buildSeedreamFileImageInputs({ files, chatUserId = "" }) {
   const safeFiles = Array.isArray(files) ? files : [];
   const list = [];
-  safeFiles.forEach((file) => {
-    if (!file?.buffer) return;
+  for (let idx = 0; idx < safeFiles.length; idx += 1) {
+    const file = safeFiles[idx];
+    if (!file?.buffer) continue;
     const mime = normalizeSeedreamImageMimeType(file.mimetype);
     if (!mime) {
       throw new Error(
         `不支持的图片格式：${file.originalname || "未命名文件"}。仅支持 jpeg、png、webp、bmp、tiff、gif。`,
       );
     }
-    list.push(`data:${mime};base64,${file.buffer.toString("base64")}`);
-  });
+    const safeBuffer = extractGeneratedImageDataBuffer(file.buffer);
+    if (!safeBuffer.length) continue;
+
+    const fallbackDataUrl = `data:${mime};base64,${safeBuffer.toString("base64")}`;
+    if (!groupChatOssClient || !groupChatOssConfig) {
+      list.push(fallbackDataUrl);
+      continue;
+    }
+
+    const ext = resolveFileExtensionByMimeType(mime, "png");
+    const fallbackName = `seedream-input-${idx + 1}.${ext}`;
+    const safeFileName = sanitizeGroupChatFileName(file?.originalname || fallbackName);
+    try {
+      const uploaded = await uploadBufferToGroupChatOss({
+        scope: IMAGE_GENERATION_INPUT_OSS_SCOPE,
+        userId: chatUserId,
+        sessionId: "",
+        fileName: safeFileName,
+        mimeType: mime,
+        dataBuffer: safeBuffer,
+        cacheControl: "private, no-store",
+      });
+      const inputUrl = sanitizeGroupChatHttpUrl(uploaded?.fileUrl);
+      if (inputUrl) {
+        list.push(inputUrl);
+      } else {
+        list.push(fallbackDataUrl);
+      }
+    } catch (error) {
+      throw new Error(
+        `上传参考图到 OSS 失败（${safeFileName}）：${error?.message || "unknown error"}`,
+      );
+    }
+  }
   return list;
 }
 
@@ -4500,6 +4790,7 @@ function emitSeedreamImageGenerationNonStreamEvents(result, res, handlers = {}) 
 }
 
 function buildGeneratedImageHistoryExpireAt() {
+  if (groupChatOssClient) return null;
   return new Date(Date.now() + GENERATED_IMAGE_HISTORY_TTL_MS);
 }
 
@@ -4528,6 +4819,7 @@ function normalizeGeneratedImageStorageType(value) {
   const key = String(value || "")
     .trim()
     .toLowerCase();
+  if (key === "oss") return "oss";
   if (key === "binary") return "binary";
   return "remote";
 }
@@ -4705,14 +4997,39 @@ async function saveGeneratedImageHistory({
 
         const binaryPayload = await buildGeneratedImageBinaryPayload(imageUrl);
         const hasBinary = !!binaryPayload?.size && Buffer.isBuffer(binaryPayload?.data);
+        let uploadedToOss = null;
+        if (hasBinary && groupChatOssClient && groupChatOssConfig) {
+          const ext = resolveFileExtensionByMimeType(binaryPayload?.mimeType, "png");
+          const imageIndex = sanitizeRuntimeInteger(item?.imageIndex, 0, 0, 9999);
+          const outputFileName = `seedream-output-${imageIndex + 1}.${ext}`;
+          try {
+            uploadedToOss = await uploadBufferToGroupChatOss({
+              scope: IMAGE_GENERATION_OUTPUT_OSS_SCOPE,
+              userId: safeUserId,
+              sessionId: "",
+              fileName: outputFileName,
+              mimeType: binaryPayload.mimeType || "image/png",
+              dataBuffer: binaryPayload.data,
+              cacheControl: "private, no-store",
+            });
+          } catch (error) {
+            console.warn(
+              `[image-generation] 生成图片上传 OSS 失败（user=${safeUserId}, file=${outputFileName}）：`,
+              error?.message || error,
+            );
+          }
+        }
         return {
           userId: safeUserId,
           prompt: safePrompt,
-          imageUrl,
-          imageStorageType: hasBinary ? "binary" : "remote",
+          imageUrl: sanitizeGroupChatHttpUrl(uploadedToOss?.fileUrl) || imageUrl,
+          imageStorageType: uploadedToOss ? "oss" : hasBinary ? "binary" : "remote",
+          ossKey: sanitizeGroupChatOssObjectKey(uploadedToOss?.ossKey),
+          ossBucket: sanitizeAliyunOssBucket(uploadedToOss?.ossBucket),
+          ossRegion: sanitizeAliyunOssRegion(uploadedToOss?.ossRegion),
           imageMimeType: hasBinary ? binaryPayload.mimeType : "",
           imageSize: hasBinary ? binaryPayload.size : 0,
-          imageData: hasBinary ? binaryPayload.data : Buffer.alloc(0),
+          imageData: uploadedToOss ? Buffer.alloc(0) : hasBinary ? binaryPayload.data : Buffer.alloc(0),
           responseFormat: safeResponseFormat,
           size: sanitizeText(item?.size, "", 80),
           model: sanitizeText(item?.model, safeModel, 160),
@@ -4736,7 +5053,10 @@ async function saveGeneratedImageHistory({
 function toGeneratedImageHistoryItem(doc) {
   const id = sanitizeId(doc?._id, "");
   const storageType = normalizeGeneratedImageStorageType(doc?.imageStorageType);
-  const storedContentPath = storageType === "binary" ? buildGeneratedImageHistoryContentPath(id) : "";
+  const storedContentPath =
+    storageType === "binary" || storageType === "oss"
+      ? buildGeneratedImageHistoryContentPath(id)
+      : "";
   return {
     id,
     prompt: sanitizeText(doc?.prompt, "", 2000),
@@ -5697,6 +6017,7 @@ async function uploadVolcengineMultipartFilesAsRefs({
   const sourceFiles = Array.isArray(files) ? files : [];
   const uploadedRefs = [];
   const fallbackFiles = [];
+  const uploadedFiles = [];
 
   for (const file of sourceFiles) {
     const normalizedFile = normalizeMultipartUploadFile(file);
@@ -5727,11 +6048,13 @@ async function uploadVolcengineMultipartFilesAsRefs({
       mimeType: String(normalizedFile.mimetype || ""),
       size: Number(normalizedFile.size || 0),
     });
+    uploadedFiles.push(normalizedFile);
   }
 
   return {
     uploadedRefs,
     fallbackFiles,
+    uploadedFiles,
   };
 }
 
@@ -8190,7 +8513,1035 @@ function scoreGroupChatFileNameCandidate(value) {
 }
 
 function buildGroupChatFileExpireAt() {
+  if (groupChatOssClient) return null;
   return new Date(Date.now() + GROUP_CHAT_FILE_TTL_MS);
+}
+
+function sanitizeAliyunOssNetworkMode(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!key) return "";
+  if (
+    key === "public" ||
+    key === "public_only" ||
+    key === "external" ||
+    key === "external_only" ||
+    key === "internet"
+  ) {
+    return "public";
+  }
+  if (
+    key === "internal_prefer" ||
+    key === "prefer_internal" ||
+    key === "internal" ||
+    key === "intranet"
+  ) {
+    return "internal_prefer";
+  }
+  if (
+    key === "internal_only" ||
+    key === "strict_internal" ||
+    key === "intranet_only"
+  ) {
+    return "internal_only";
+  }
+  return "";
+}
+
+function resolveAliyunOssNetworkMode() {
+  const explicitMode = sanitizeAliyunOssNetworkMode(process.env.ALIYUN_OSS_NETWORK_MODE);
+  if (explicitMode) return explicitMode;
+  const legacyInternal = sanitizeRuntimeBoolean(process.env.ALIYUN_OSS_INTERNAL, false);
+  return legacyInternal ? "internal_prefer" : "public";
+}
+
+function buildGroupChatOssConfig() {
+  const networkMode = resolveAliyunOssNetworkMode();
+  const internal = networkMode !== "public";
+  const enableTimeoutFallback = networkMode === "internal_prefer";
+  const bucket = sanitizeAliyunOssBucket(process.env.ALIYUN_OSS_BUCKET);
+  const accessKeyId = String(process.env.ALIYUN_ACCESS_KEY_ID || "").trim();
+  const accessKeySecret = String(process.env.ALIYUN_ACCESS_KEY_SECRET || "").trim();
+  const region = sanitizeAliyunOssRegion(
+    process.env.ALIYUN_OSS_REGION || GROUP_CHAT_OSS_DEFAULT_REGION,
+  );
+  const endpointRaw = sanitizeAliyunOssEndpoint(process.env.ALIYUN_OSS_ENDPOINT);
+  const endpoint =
+    networkMode === "public"
+      ? normalizeGroupChatOssPublicEndpoint(endpointRaw) || endpointRaw
+      : endpointRaw;
+  const objectPrefix = sanitizeAliyunOssObjectPrefix(
+    process.env.ALIYUN_OSS_OBJECT_PREFIX || GROUP_CHAT_OSS_DEFAULT_PREFIX,
+  );
+  const secure = sanitizeRuntimeBoolean(process.env.ALIYUN_OSS_SECURE, true);
+  const publicRead = sanitizeRuntimeBoolean(process.env.ALIYUN_OSS_PUBLIC_READ, false);
+  const signedUrlTtlSeconds = sanitizeRuntimeInteger(
+    process.env.ALIYUN_OSS_SIGNED_URL_TTL_SECONDS,
+    GROUP_CHAT_OSS_SIGNED_URL_TTL_SECONDS_DEFAULT,
+    60,
+    GROUP_CHAT_OSS_SIGNED_URL_TTL_SECONDS_MAX,
+  );
+
+  const hasAnyOssEnv =
+    !!bucket ||
+    !!accessKeyId ||
+    !!accessKeySecret ||
+    !!String(process.env.ALIYUN_OSS_REGION || "").trim() ||
+    !!String(process.env.ALIYUN_OSS_ENDPOINT || "").trim();
+  if (!bucket || !accessKeyId || !accessKeySecret) {
+    if (hasAnyOssEnv) {
+      console.warn(
+        "[group-chat-file-storage] OSS 配置不完整，请检查 ALIYUN_OSS_BUCKET / ALIYUN_ACCESS_KEY_ID / ALIYUN_ACCESS_KEY_SECRET。",
+      );
+    }
+    return null;
+  }
+
+  return {
+    bucket,
+    region,
+    endpoint,
+    accessKeyId,
+    accessKeySecret,
+    objectPrefix,
+    internal,
+    networkMode,
+    enableTimeoutFallback,
+    secure,
+    publicRead,
+    signedUrlTtlSeconds,
+  };
+}
+
+function createGroupChatOssClient(config) {
+  if (!config) return null;
+  try {
+    const options = {
+      region: config.region,
+      bucket: config.bucket,
+      accessKeyId: config.accessKeyId,
+      accessKeySecret: config.accessKeySecret,
+      internal: !!config.internal,
+      secure: !!config.secure,
+    };
+    if (config.endpoint) {
+      options.endpoint = config.endpoint;
+    }
+    return new OSS(options);
+  } catch (error) {
+    console.warn(
+      "[group-chat-file-storage] OSS 客户端初始化失败：",
+      error?.message || error,
+    );
+    return null;
+  }
+}
+
+function createGroupChatOssClients(config) {
+  const primary = createGroupChatOssClient(config);
+  if (!primary) {
+    return { primary: null, fallback: null };
+  }
+  if (!config?.internal || !config?.enableTimeoutFallback) {
+    return { primary, fallback: null };
+  }
+
+  const fallbackEndpoint = normalizeGroupChatOssPublicEndpoint(config.endpoint);
+  const fallback = createGroupChatOssClient({
+    ...config,
+    internal: false,
+    endpoint: fallbackEndpoint || "",
+  });
+  return {
+    primary,
+    fallback: fallback || null,
+  };
+}
+
+function isGroupChatOssConnectionTimeoutError(error) {
+  const code = String(error?.code || "").trim().toLowerCase();
+  if (code === "connectiontimeouterror" || code === "timeout") return true;
+  const message = String(error?.message || "")
+    .trim()
+    .toLowerCase();
+  return message.includes("timeout");
+}
+
+function isGroupChatOssAccessDeniedError(error) {
+  const code = String(error?.code || "").trim().toLowerCase();
+  if (code === "accessdenied" || code === "forbidden") return true;
+  const status = Number(error?.status);
+  if (status === 403) return true;
+  const message = String(error?.message || "")
+    .trim()
+    .toLowerCase();
+  return message.includes("access denied") || message.includes("does not belong to you");
+}
+
+async function callGroupChatOssWithTimeoutFallback(operationName, primaryCall, fallbackCall) {
+  if (!groupChatOssClient) {
+    throw new Error("OSS 客户端未初始化");
+  }
+  try {
+    return await primaryCall(groupChatOssClient);
+  } catch (error) {
+    if (!groupChatOssFallbackClient || !isGroupChatOssConnectionTimeoutError(error)) {
+      throw error;
+    }
+    console.warn(
+      `[group-chat-file-storage] OSS ${operationName} 内网连接超时，回退公网重试。`,
+    );
+    try {
+      return await fallbackCall(groupChatOssFallbackClient);
+    } catch (fallbackError) {
+      console.warn(
+        `[group-chat-file-storage] OSS ${operationName} 公网回退仍失败：${formatGroupChatOssError(fallbackError)}`,
+      );
+      throw fallbackError;
+    }
+  }
+}
+
+function sanitizeAliyunOssBucket(value) {
+  const bucket = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!bucket) return "";
+  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket)) return "";
+  return bucket;
+}
+
+function sanitizeAliyunOssRegion(value) {
+  const region = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!region) return GROUP_CHAT_OSS_DEFAULT_REGION;
+  if (!/^oss-[a-z0-9-]+$/.test(region)) return GROUP_CHAT_OSS_DEFAULT_REGION;
+  return region;
+}
+
+function sanitizeAliyunOssEndpoint(value) {
+  const raw = String(value || "")
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+  if (!raw) return "";
+  const host = raw.split("/")[0] || "";
+  if (!host) return "";
+  if (/[\s]/.test(host)) return "";
+  return host;
+}
+
+function sanitizeAliyunOssObjectPrefix(value) {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .map((segment) =>
+      String(segment || "")
+        .trim()
+        .replace(/\s+/g, "-")
+        .replace(/[^a-zA-Z0-9._-]/g, "-"),
+    )
+    .filter(Boolean)
+    .join("/");
+  return cleaned || GROUP_CHAT_OSS_DEFAULT_PREFIX;
+}
+
+function sanitizeGroupChatFileStorageType(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "oss") return "oss";
+  return "mongo";
+}
+
+function sanitizeGroupChatOssObjectKey(value) {
+  const raw = String(value || "")
+    .trim()
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+  if (!raw) return "";
+  if (raw.length > 900) return "";
+  const normalized = raw
+    .split("/")
+    .map((segment) => String(segment || "").trim())
+    .filter((segment) => segment && segment !== "." && segment !== "..")
+    .join("/");
+  return normalized;
+}
+
+function sanitizeGroupChatHttpUrl(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    const parsed = new URL(text);
+    const protocol = String(parsed.protocol || "").toLowerCase();
+    if (protocol !== "http:" && protocol !== "https:") return "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+function resolveGroupChatOssBucketHost(config) {
+  const bucket = sanitizeAliyunOssBucket(config?.bucket);
+  if (!bucket) return "";
+  const endpoint = sanitizeAliyunOssEndpoint(config?.endpoint);
+  if (endpoint) {
+    const normalizedEndpoint = normalizeGroupChatOssPublicEndpoint(endpoint);
+    if (normalizedEndpoint.startsWith(`${bucket}.`)) return normalizedEndpoint;
+    return `${bucket}.${normalizedEndpoint}`;
+  }
+  const region = sanitizeAliyunOssRegion(config?.region);
+  return `${bucket}.${region}.aliyuncs.com`;
+}
+
+function normalizeGroupChatOssPublicEndpoint(endpoint) {
+  const host = sanitizeAliyunOssEndpoint(endpoint);
+  if (!host) return "";
+  return host.replace(/-internal\.aliyuncs\.com$/i, ".aliyuncs.com");
+}
+
+function encodeGroupChatOssObjectKeyPath(key) {
+  const safe = sanitizeGroupChatOssObjectKey(key);
+  if (!safe) return "";
+  return safe
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+function buildGroupChatOssObjectKey({ roomId, fileName }) {
+  const safeRoomId = sanitizeId(roomId, "") || "unknown-room";
+  const safeFileName = sanitizeGroupChatFileName(fileName).replace(/\s+/g, "_");
+  const randomPart = crypto.randomBytes(8).toString("hex");
+  const timestamp = Date.now();
+  const objectPrefix = sanitizeAliyunOssObjectPrefix(groupChatOssConfig?.objectPrefix);
+  return `${objectPrefix}/${safeRoomId}/${timestamp}-${randomPart}-${safeFileName}`;
+}
+
+function sanitizeGroupChatOssScopeSegment(value, fallback = "misc") {
+  const cleaned = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!cleaned) return fallback;
+  return cleaned.slice(0, 80);
+}
+
+function resolveFileExtensionByMimeType(mimeType, fallback = "bin") {
+  const mime = sanitizeGroupChatFileMimeType(mimeType);
+  const map = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+    "image/tiff": "tiff",
+    "image/gif": "gif",
+    "application/pdf": "pdf",
+    "text/plain": "txt",
+    "application/json": "json",
+  };
+  const mapped = map[mime];
+  if (mapped) return mapped;
+  return sanitizeGroupChatOssScopeSegment(fallback || "bin", "bin");
+}
+
+function buildRuntimeOssObjectKey({ scope, userId = "", sessionId = "", fileName = "" }) {
+  const objectPrefix = sanitizeAliyunOssObjectPrefix(groupChatOssConfig?.objectPrefix);
+  const safeScope = sanitizeGroupChatOssScopeSegment(scope, "misc");
+  const safeUserSegment =
+    sanitizeId(userId, "") || sanitizeGroupChatOssScopeSegment(userId, "anonymous");
+  const safeSessionSegment =
+    sanitizeId(sessionId, "") || sanitizeGroupChatOssScopeSegment(sessionId, "");
+  const randomPart = crypto.randomBytes(8).toString("hex");
+  const timestamp = Date.now();
+  const safeFileName = sanitizeGroupChatFileName(fileName)
+    .replace(/\s+/g, "_")
+    .slice(0, 120);
+  const segments = [objectPrefix, safeScope, safeUserSegment];
+  if (safeSessionSegment) {
+    segments.push(safeSessionSegment);
+  }
+  return `${segments.join("/")}/${timestamp}-${randomPart}-${safeFileName}`;
+}
+
+async function uploadBufferToGroupChatOss({
+  scope,
+  userId = "",
+  sessionId = "",
+  fileName = "",
+  mimeType = "application/octet-stream",
+  dataBuffer,
+  cacheControl = "private, no-store",
+}) {
+  if (!groupChatOssClient || !groupChatOssConfig) return null;
+  const safeBuffer = extractGeneratedImageDataBuffer(dataBuffer);
+  if (!safeBuffer.length) {
+    throw new Error("文件内容为空，无法上传到 OSS。");
+  }
+  const safeMimeType = sanitizeGroupChatFileMimeType(mimeType);
+  const safeFileName = sanitizeGroupChatFileName(fileName);
+  const ossKey = buildRuntimeOssObjectKey({
+    scope,
+    userId,
+    sessionId,
+    fileName: safeFileName,
+  });
+  await callGroupChatOssWithTimeoutFallback(
+    `put(${ossKey})`,
+    async (client) =>
+      client.put(ossKey, safeBuffer, {
+        headers: {
+          "Content-Type": safeMimeType,
+          "Content-Disposition": buildAttachmentContentDisposition(safeFileName),
+          "Cache-Control": cacheControl || "private, no-store",
+        },
+      }),
+    async (client) =>
+      client.put(ossKey, safeBuffer, {
+        headers: {
+          "Content-Type": safeMimeType,
+          "Content-Disposition": buildAttachmentContentDisposition(safeFileName),
+          "Cache-Control": cacheControl || "private, no-store",
+        },
+      }),
+  );
+
+  return {
+    fileName: safeFileName,
+    mimeType: safeMimeType,
+    size: safeBuffer.length,
+    storageType: "oss",
+    ossKey,
+    ossBucket: groupChatOssConfig.bucket,
+    ossRegion: groupChatOssConfig.region,
+    fileUrl: buildGroupChatOssObjectUrl(ossKey),
+  };
+}
+
+function sanitizeChatAttachmentOssSource(value) {
+  const text = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!text) return "unknown";
+  return text.slice(0, 80);
+}
+
+async function uploadChatAttachmentsToOss({
+  files = [],
+  userId = "",
+  sessionId = "",
+  source = "",
+  stopOnError = true,
+}) {
+  if (!groupChatOssClient || !groupChatOssConfig) return [];
+  const sourceTag = sanitizeChatAttachmentOssSource(source);
+  const uploadedList = [];
+  const sourceFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  for (let idx = 0; idx < sourceFiles.length; idx += 1) {
+    const file = sourceFiles[idx];
+    const originalName = sanitizeGroupChatFileName(
+      file?.originalname || `chat-attachment-${idx + 1}.bin`,
+    );
+    const mimeType = sanitizeGroupChatFileMimeType(file?.mimetype);
+    const safeBuffer = extractGeneratedImageDataBuffer(file?.buffer);
+    if (!safeBuffer.length) continue;
+    try {
+      const uploaded = await uploadBufferToGroupChatOss({
+        scope: CHAT_ATTACHMENT_OSS_SCOPE,
+        userId,
+        sessionId,
+        fileName: originalName,
+        mimeType,
+        dataBuffer: safeBuffer,
+        cacheControl: "private, no-store",
+      });
+      if (uploaded) {
+        uploadedList.push({
+          fileName: uploaded.fileName,
+          mimeType: uploaded.mimeType,
+          size: uploaded.size,
+          source: sourceTag,
+          ossKey: uploaded.ossKey,
+          ossBucket: uploaded.ossBucket,
+          ossRegion: uploaded.ossRegion,
+          fileUrl: uploaded.fileUrl,
+        });
+      }
+    } catch (error) {
+      if (stopOnError) {
+        throw new Error(
+          `上传附件到 OSS 失败（${originalName}）：${error?.message || "unknown error"}`,
+        );
+      }
+      console.warn(
+        `[chat-file-storage] 附件备份到 OSS 失败（source=${sourceTag}, file=${originalName}）：`,
+        error?.message || error,
+      );
+    }
+  }
+  return uploadedList;
+}
+
+function backupChatAttachmentsToOssInBackground({
+  files = [],
+  userId = "",
+  sessionId = "",
+  source = "",
+}) {
+  if (!groupChatOssClient || !groupChatOssConfig) return;
+  const sourceTag = sanitizeChatAttachmentOssSource(source);
+  void uploadChatAttachmentsToOss({
+    files,
+    userId,
+    sessionId,
+    source: sourceTag,
+    stopOnError: false,
+  })
+    .then((uploadedList) => {
+      if (uploadedList.length > 0) {
+        console.log(
+          `[chat-file-storage] 已完成附件 OSS 后台备份：source=${sourceTag}, count=${uploadedList.length}`,
+        );
+      }
+    })
+    .catch((error) => {
+      console.warn(
+        `[chat-file-storage] 附件 OSS 后台备份任务异常（source=${sourceTag}）：`,
+        error?.message || error,
+      );
+    });
+}
+
+function buildGroupChatOssObjectUrl(ossKey) {
+  if (!groupChatOssConfig) return "";
+  const safeKey = sanitizeGroupChatOssObjectKey(ossKey);
+  if (!safeKey) return "";
+  const protocol = groupChatOssConfig.secure ? "https" : "http";
+  const host = resolveGroupChatOssBucketHost(groupChatOssConfig);
+  const publicBaseUrl = host ? `${protocol}://${host}` : "";
+
+  if (groupChatOssClient) {
+    try {
+      const generated = publicBaseUrl
+        ? groupChatOssClient.generateObjectUrl(safeKey, publicBaseUrl)
+        : groupChatOssClient.generateObjectUrl(safeKey);
+      return sanitizeGroupChatHttpUrl(generated);
+    } catch (error) {
+      console.warn(
+        `[group-chat-file-storage] OSS 对象直链生成失败（${safeKey}）：`,
+        error?.message || error,
+      );
+    }
+  }
+
+  const encodedKey = encodeGroupChatOssObjectKeyPath(safeKey);
+  if (!host || !encodedKey) return "";
+  return `${protocol}://${host}/${encodedKey}`;
+}
+
+async function buildGroupChatFileSignedDownloadUrl({ ossKey, fileName }) {
+  if (!groupChatOssClient || !groupChatOssConfig) return "";
+  const safeKey = sanitizeGroupChatOssObjectKey(ossKey);
+  if (!safeKey) return "";
+  const safeFileName = sanitizeGroupChatFileName(fileName);
+
+  try {
+    return await groupChatOssClient.asyncSignatureUrl(safeKey, {
+      method: "GET",
+      expires: groupChatOssConfig.signedUrlTtlSeconds,
+      response: {
+        "content-disposition": buildAttachmentContentDisposition(safeFileName),
+      },
+    });
+  } catch (error) {
+    console.warn(
+      `[group-chat-file-storage] OSS 签名下载地址生成失败（${safeKey}）：`,
+      error?.message || error,
+    );
+    return "";
+  }
+}
+
+async function buildGroupChatStoredFileStoragePayload({
+  roomId,
+  fileName,
+  mimeType,
+  fileBuffer,
+}) {
+  const safeBuffer = extractGeneratedImageDataBuffer(fileBuffer);
+  if (!groupChatOssClient || !groupChatOssConfig) {
+    return {
+      storageType: "mongo",
+      ossKey: "",
+      ossBucket: "",
+      ossRegion: "",
+      fileUrl: "",
+      data: safeBuffer,
+    };
+  }
+  if (!safeBuffer.length) {
+    throw new Error("文件内容为空，无法上传到 OSS。");
+  }
+
+  const safeFileName = sanitizeGroupChatFileName(fileName);
+  const safeMimeType = sanitizeGroupChatFileMimeType(mimeType);
+  const ossKey = buildGroupChatOssObjectKey({ roomId, fileName: safeFileName });
+
+  try {
+    await callGroupChatOssWithTimeoutFallback(
+      `put(${ossKey})`,
+      async (client) =>
+        client.put(ossKey, safeBuffer, {
+          headers: {
+            "Content-Type": safeMimeType,
+            "Content-Disposition": buildAttachmentContentDisposition(safeFileName),
+            "Cache-Control": "private, no-store",
+          },
+        }),
+      async (client) =>
+        client.put(ossKey, safeBuffer, {
+          headers: {
+            "Content-Type": safeMimeType,
+            "Content-Disposition": buildAttachmentContentDisposition(safeFileName),
+            "Cache-Control": "private, no-store",
+          },
+        }),
+    );
+  } catch (error) {
+    throw new Error(`上传文件到 OSS 失败：${error?.message || "unknown error"}`);
+  }
+
+  return {
+    storageType: "oss",
+    ossKey,
+    ossBucket: groupChatOssConfig.bucket,
+    ossRegion: groupChatOssConfig.region,
+    fileUrl: buildGroupChatOssObjectUrl(ossKey),
+    data: Buffer.alloc(0),
+  };
+}
+
+async function deleteGroupChatOssObject(ossKey) {
+  const safeKey = sanitizeGroupChatOssObjectKey(ossKey);
+  if (!safeKey || !groupChatOssClient) return false;
+  try {
+    await callGroupChatOssWithTimeoutFallback(
+      `delete(${safeKey})`,
+      async (client) => client.delete(safeKey),
+      async (client) => client.delete(safeKey),
+    );
+    return true;
+  } catch (error) {
+    if (isGroupChatOssNotFoundError(error)) return false;
+    throw error;
+  }
+}
+
+function readGroupChatOssStartupCheckConfig() {
+  return {
+    enabled: sanitizeRuntimeBoolean(process.env.ALIYUN_OSS_STARTUP_CHECK_ENABLED, true),
+    writeProbe: sanitizeRuntimeBoolean(process.env.ALIYUN_OSS_STARTUP_WRITE_PROBE, true),
+    timeoutMs: sanitizeRuntimeInteger(
+      process.env.ALIYUN_OSS_STARTUP_CHECK_TIMEOUT_MS,
+      GROUP_CHAT_OSS_STARTUP_CHECK_TIMEOUT_MS_DEFAULT,
+      1000,
+      GROUP_CHAT_OSS_STARTUP_CHECK_TIMEOUT_MS_MAX,
+    ),
+  };
+}
+
+function buildGroupChatOssStartupProbeObjectKey() {
+  const objectPrefix = sanitizeAliyunOssObjectPrefix(groupChatOssConfig?.objectPrefix);
+  const randomPart = crypto.randomBytes(6).toString("hex");
+  return `${objectPrefix}/_healthchecks/startup-${Date.now()}-${randomPart}.txt`;
+}
+
+function formatGroupChatOssError(error) {
+  const message = String(error?.message || "unknown error").trim();
+  const code = String(error?.code || "").trim();
+  const status = Number(error?.status);
+  const requestId = String(
+    error?.requestId || error?.res?.headers?.["x-oss-request-id"] || "",
+  ).trim();
+  const details = [message];
+  if (code) details.push(`code=${code}`);
+  if (Number.isFinite(status) && status > 0) details.push(`status=${status}`);
+  if (requestId) details.push(`requestId=${requestId}`);
+  return details.join(" | ");
+}
+
+async function runGroupChatOssStartupHealthCheck() {
+  if (!groupChatOssClient || !groupChatOssConfig) return;
+
+  const checkConfig = readGroupChatOssStartupCheckConfig();
+  let bucketLocationAccessDenied = false;
+  if (!checkConfig.enabled) {
+    console.log(
+      "[group-chat-file-storage] OSS 启动检查已禁用（ALIYUN_OSS_STARTUP_CHECK_ENABLED=false）。",
+    );
+    return;
+  }
+
+  console.log(
+    `[group-chat-file-storage] OSS 启动检查开始：bucket=${groupChatOssConfig.bucket}, region=${groupChatOssConfig.region}, networkMode=${groupChatOssConfig.networkMode}, internal=${groupChatOssConfig.internal}, publicRead=${groupChatOssConfig.publicRead}`,
+  );
+
+  try {
+    const locationResult = await callGroupChatOssWithTimeoutFallback(
+      `getBucketLocation(${groupChatOssConfig.bucket})`,
+      async (client) =>
+        client.getBucketLocation(groupChatOssConfig.bucket, {
+          timeout: checkConfig.timeoutMs,
+        }),
+      async (client) =>
+        client.getBucketLocation(groupChatOssConfig.bucket, {
+          timeout: checkConfig.timeoutMs,
+        }),
+    );
+    const bucketRegion = sanitizeAliyunOssRegion(locationResult?.location);
+    if (bucketRegion && bucketRegion !== groupChatOssConfig.region) {
+      console.warn(
+        `[group-chat-file-storage] OSS 启动检查：Bucket 地域与配置不一致（bucket=${bucketRegion}, configured=${groupChatOssConfig.region}）。`,
+      );
+    } else {
+      console.log(
+        `[group-chat-file-storage] OSS 启动检查：Bucket 可访问，地域=${bucketRegion || groupChatOssConfig.region}。`,
+      );
+    }
+  } catch (error) {
+    if (isGroupChatOssAccessDeniedError(error)) {
+      bucketLocationAccessDenied = true;
+      console.warn(
+        "[group-chat-file-storage] OSS 启动检查：Bucket 级别权限不足或 AK 不属于该 Bucket 账号（请核对 AK 所属账号与 Bucket 所属账号是否一致）。",
+      );
+    }
+    console.warn(
+      `[group-chat-file-storage] OSS 启动检查：Bucket 可达性检查失败（不影响服务启动）：${formatGroupChatOssError(error)}`,
+    );
+  }
+
+  if (!checkConfig.writeProbe) {
+    console.log(
+      "[group-chat-file-storage] OSS 启动检查：已跳过写入探测（ALIYUN_OSS_STARTUP_WRITE_PROBE=false）。",
+    );
+    return;
+  }
+
+  const probeKey = buildGroupChatOssStartupProbeObjectKey();
+  const probeBody = Buffer.from(`educhat oss startup check ${new Date().toISOString()}\n`);
+  try {
+    await callGroupChatOssWithTimeoutFallback(
+      `put(${probeKey})`,
+      async (client) =>
+        client.put(probeKey, probeBody, {
+          timeout: checkConfig.timeoutMs,
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        }),
+      async (client) =>
+        client.put(probeKey, probeBody, {
+          timeout: checkConfig.timeoutMs,
+          headers: {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        }),
+    );
+  } catch (error) {
+    console.warn(
+      `[group-chat-file-storage] OSS 启动检查：写入探测失败（key=${probeKey}，不影响服务启动）：${formatGroupChatOssError(error)}`,
+    );
+    return;
+  }
+
+  try {
+    await callGroupChatOssWithTimeoutFallback(
+      `delete(${probeKey})`,
+      async (client) =>
+        client.delete(probeKey, {
+          timeout: checkConfig.timeoutMs,
+        }),
+      async (client) =>
+        client.delete(probeKey, {
+          timeout: checkConfig.timeoutMs,
+        }),
+    );
+    console.log("[group-chat-file-storage] OSS 启动检查通过：写入与删除能力正常。");
+    if (bucketLocationAccessDenied) {
+      console.log(
+        "[group-chat-file-storage] OSS 启动检查补充：对象写删正常，说明当前 AK 至少具备对象级权限；仅 BucketLocation 权限可能缺失。",
+      );
+    }
+  } catch (error) {
+    if (isGroupChatOssAccessDeniedError(error)) {
+      console.warn(
+        "[group-chat-file-storage] OSS 启动检查：对象写删权限不足（请给该 AK/RAM 用户授予目标 Bucket 的 PutObject/DeleteObject 权限）。",
+      );
+    }
+    console.warn(
+      `[group-chat-file-storage] OSS 启动检查：删除探测对象失败（key=${probeKey}，不影响服务启动）：${formatGroupChatOssError(error)}`,
+    );
+  }
+}
+
+async function deleteGroupChatStoredFileObjects(storedFiles) {
+  if (!groupChatOssClient) return { deletedCount: 0, failedKeys: [] };
+  const keys = Array.from(
+    new Set(
+      (Array.isArray(storedFiles) ? storedFiles : [])
+        .map((doc) => sanitizeGroupChatOssObjectKey(doc?.ossKey))
+        .filter(Boolean),
+    ),
+  );
+  let deletedCount = 0;
+  const failedKeys = new Set();
+  for (const key of keys) {
+    try {
+      const deleted = await deleteGroupChatOssObject(key);
+      if (deleted) deletedCount += 1;
+    } catch (error) {
+      failedKeys.add(key);
+      console.warn(
+        `[group-chat-file-storage] 删除 OSS 文件失败（${key}）：`,
+        error?.message || error,
+      );
+    }
+  }
+  return {
+    deletedCount,
+    failedKeys: Array.from(failedKeys),
+  };
+}
+
+async function deleteGeneratedImageHistoryOssObjects(historyItems) {
+  if (!groupChatOssClient) return { deletedCount: 0, failedKeys: [] };
+  const docs = Array.isArray(historyItems) ? historyItems : [];
+  const normalizedDocs = docs.map((item) => ({
+    ossKey: sanitizeGroupChatOssObjectKey(item?.ossKey),
+  }));
+  return deleteGroupChatStoredFileObjects(normalizedDocs);
+}
+
+function isGroupChatOssNotFoundError(error) {
+  if (Number(error?.status) === 404) return true;
+  const code = String(error?.code || "")
+    .trim()
+    .toLowerCase();
+  if (code === "nosuchkey" || code === "notfound") return true;
+  const message = String(error?.message || "")
+    .trim()
+    .toLowerCase();
+  return message.includes("not found") || message.includes("no such key");
+}
+
+async function findGroupChatStoredFileByRoomAndId({
+  roomId,
+  fileId,
+  projection = undefined,
+}) {
+  const safeRoomId = sanitizeId(roomId, "");
+  const safeFileId = sanitizeId(fileId, "");
+  if (!safeRoomId || !safeFileId) return null;
+
+  let storedFileDoc = await GroupChatStoredFile.findOne(
+    { _id: safeFileId, roomId: safeRoomId },
+    projection,
+  ).lean();
+  if (storedFileDoc) return storedFileDoc;
+
+  const legacyStoredFileDoc = await GroupChatStoredFile.findById(safeFileId, projection).lean();
+  if (sanitizeId(legacyStoredFileDoc?.roomId, "") === safeRoomId) {
+    storedFileDoc = legacyStoredFileDoc;
+  }
+  return storedFileDoc || null;
+}
+
+async function cleanupExpiredGroupChatStoredFiles() {
+  if (!groupChatOssClient) return { deletedDocCount: 0, deletedObjectCount: 0 };
+
+  let deletedDocCount = 0;
+  let deletedObjectCount = 0;
+  for (let round = 0; round < 20; round += 1) {
+    const expiredDocs = await GroupChatStoredFile.find(
+      {
+        expiresAt: { $lte: new Date() },
+        $or: [{ storageType: { $exists: false } }, { storageType: { $ne: "oss" } }],
+      },
+      { _id: 1, ossKey: 1 },
+    )
+      .sort({ expiresAt: 1, _id: 1 })
+      .limit(GROUP_CHAT_OSS_EXPIRED_CLEANUP_BATCH_SIZE)
+      .lean();
+    if (!expiredDocs.length) break;
+
+    const deleteSummary = await deleteGroupChatStoredFileObjects(expiredDocs);
+    deletedObjectCount += Number(deleteSummary?.deletedCount || 0);
+    const failedKeySet = new Set(
+      Array.isArray(deleteSummary?.failedKeys) ? deleteSummary.failedKeys : [],
+    );
+    const expiredDocIds = expiredDocs
+      .filter((doc) => {
+        const key = sanitizeGroupChatOssObjectKey(doc?.ossKey);
+        if (!key) return true;
+        return !failedKeySet.has(key);
+      })
+      .map((doc) => doc?._id)
+      .filter(Boolean);
+    if (!expiredDocIds.length) break;
+
+    const deleteResult = await GroupChatStoredFile.deleteMany({
+      _id: { $in: expiredDocIds },
+    });
+    deletedDocCount += Number(deleteResult?.deletedCount || 0);
+    if (expiredDocs.length < GROUP_CHAT_OSS_EXPIRED_CLEANUP_BATCH_SIZE) break;
+  }
+
+  return { deletedDocCount, deletedObjectCount };
+}
+
+function startGroupChatExpiredFileCleanupTask() {
+  if (!groupChatOssClient) return;
+  if (groupChatExpiredFileCleanupTimer) {
+    clearInterval(groupChatExpiredFileCleanupTimer);
+    groupChatExpiredFileCleanupTimer = null;
+  }
+  groupChatExpiredFileCleanupTimer = setInterval(() => {
+    void cleanupExpiredGroupChatStoredFiles().catch((error) => {
+      console.warn(
+        "Failed to cleanup expired group chat OSS files:",
+        error?.message || error,
+      );
+    });
+  }, GROUP_CHAT_OSS_EXPIRED_CLEANUP_INTERVAL_MS);
+  if (typeof groupChatExpiredFileCleanupTimer?.unref === "function") {
+    groupChatExpiredFileCleanupTimer.unref();
+  }
+}
+
+async function cleanupExpiredGeneratedImageHistories() {
+  if (!groupChatOssClient) return { deletedDocCount: 0, deletedObjectCount: 0 };
+
+  let deletedDocCount = 0;
+  let deletedObjectCount = 0;
+  for (let round = 0; round < 20; round += 1) {
+    const expiredDocs = await GeneratedImageHistory.find(
+      {
+        expiresAt: { $lte: new Date() },
+        $or: [{ imageStorageType: { $exists: false } }, { imageStorageType: { $ne: "oss" } }],
+      },
+      { _id: 1, ossKey: 1 },
+    )
+      .sort({ expiresAt: 1, _id: 1 })
+      .limit(GENERATED_IMAGE_OSS_EXPIRED_CLEANUP_BATCH_SIZE)
+      .lean();
+    if (!expiredDocs.length) break;
+
+    const deleteSummary = await deleteGeneratedImageHistoryOssObjects(expiredDocs);
+    deletedObjectCount += Number(deleteSummary?.deletedCount || 0);
+    const failedKeySet = new Set(
+      Array.isArray(deleteSummary?.failedKeys) ? deleteSummary.failedKeys : [],
+    );
+    const expiredDocIds = expiredDocs
+      .filter((doc) => {
+        const key = sanitizeGroupChatOssObjectKey(doc?.ossKey);
+        if (!key) return true;
+        return !failedKeySet.has(key);
+      })
+      .map((doc) => doc?._id)
+      .filter(Boolean);
+    if (!expiredDocIds.length) break;
+
+    const deleteResult = await GeneratedImageHistory.deleteMany({
+      _id: { $in: expiredDocIds },
+    });
+    deletedDocCount += Number(deleteResult?.deletedCount || 0);
+    if (expiredDocs.length < GENERATED_IMAGE_OSS_EXPIRED_CLEANUP_BATCH_SIZE) break;
+  }
+
+  return { deletedDocCount, deletedObjectCount };
+}
+
+function startGeneratedImageExpiredCleanupTask() {
+  if (!groupChatOssClient) return;
+  if (generatedImageExpiredCleanupTimer) {
+    clearInterval(generatedImageExpiredCleanupTimer);
+    generatedImageExpiredCleanupTimer = null;
+  }
+  generatedImageExpiredCleanupTimer = setInterval(() => {
+    void cleanupExpiredGeneratedImageHistories().catch((error) => {
+      console.warn(
+        "Failed to cleanup expired generated image OSS files:",
+        error?.message || error,
+      );
+    });
+  }, GENERATED_IMAGE_OSS_EXPIRED_CLEANUP_INTERVAL_MS);
+  if (typeof generatedImageExpiredCleanupTimer?.unref === "function") {
+    generatedImageExpiredCleanupTimer.unref();
+  }
+}
+
+async function migrateOssFilesToPermanentRetention() {
+  if (!groupChatOssClient) return;
+
+  try {
+    const [groupFileResult, messageResult, imageHistoryResult] = await Promise.all([
+      GroupChatStoredFile.updateMany(
+        {
+          expiresAt: { $exists: true, $ne: null },
+          $or: [{ storageType: "oss" }, { ossKey: { $exists: true, $ne: "" } }],
+        },
+        {
+          $set: {
+            expiresAt: null,
+          },
+        },
+      ),
+      GroupChatMessage.updateMany(
+        {
+          type: "file",
+          "file.expiresAt": { $exists: true, $ne: null },
+        },
+        {
+          $set: {
+            "file.expiresAt": null,
+          },
+        },
+      ),
+      GeneratedImageHistory.updateMany(
+        {
+          expiresAt: { $exists: true, $ne: null },
+          $or: [{ imageStorageType: "oss" }, { ossKey: { $exists: true, $ne: "" } }],
+        },
+        {
+          $set: {
+            expiresAt: null,
+          },
+        },
+      ),
+    ]);
+
+    const groupUpdated = Number(groupFileResult?.modifiedCount || 0);
+    const messageUpdated = Number(messageResult?.modifiedCount || 0);
+    const imageUpdated = Number(imageHistoryResult?.modifiedCount || 0);
+    if (groupUpdated > 0 || messageUpdated > 0 || imageUpdated > 0) {
+      console.log(
+        `[group-chat-file-storage] OSS 永久保留迁移完成：groupFiles=${groupUpdated}, fileMessages=${messageUpdated}, generatedImages=${imageUpdated}`,
+      );
+    }
+  } catch (error) {
+    console.warn(
+      "[group-chat-file-storage] OSS 永久保留迁移失败：",
+      error?.message || error,
+    );
+  }
 }
 
 function sanitizeGroupChatReactionEmoji(value) {
@@ -8921,6 +10272,27 @@ async function startServer() {
       error?.message || error,
     );
   });
+  await runGroupChatOssStartupHealthCheck().catch((error) => {
+    console.warn(
+      "Failed to run group chat OSS startup health check:",
+      error?.message || error,
+    );
+  });
+  await migrateOssFilesToPermanentRetention();
+  await cleanupExpiredGroupChatStoredFiles().catch((error) => {
+    console.warn(
+      "Failed to cleanup expired group chat OSS files on startup:",
+      error?.message || error,
+    );
+  });
+  await cleanupExpiredGeneratedImageHistories().catch((error) => {
+    console.warn(
+      "Failed to cleanup expired generated image OSS files on startup:",
+      error?.message || error,
+    );
+  });
+  startGroupChatExpiredFileCleanupTask();
+  startGeneratedImageExpiredCleanupTask();
 
   const server = http.createServer(app);
   initGroupChatWebSocketServer(server);

@@ -874,15 +874,21 @@ select.group-modal-input{
 .messages{
   flex:1;
   overflow:auto;
-  padding: 20px 16px 140px; /* 留出底部固定输入区空间，避免滚动到底部出现过长空白 */
+  padding: 0 16px;
 }
 
 .messages-inner{
   max-width: 760px;
   margin: 0 auto;
-  display:flex;
-  flex-direction:column;
-  gap: 16px;
+  padding-top: 20px;
+}
+
+.messages-virtuoso-item{
+  padding-bottom: 16px;
+}
+
+.messages-bottom-spacer{
+  height: var(--messages-bottom-spacer, 0px);
 }
 
 .selection-ask-btn{
@@ -991,6 +997,7 @@ select.group-modal-input{
   color: #374151;
   font-size: 16px;
   line-height: 1.8;
+  display: flow-root;
 }
 
 /* ===== Input (ChatGPT-like) ===== */
@@ -1420,7 +1427,6 @@ select.group-modal-input{
   .chat-layout.sidebar-mobile-open .sidebar-backdrop{
     display:block;
   }
-  .messages{ padding-bottom: 160px; }
   .chat-status{ display:none; }
   .smart-context-control{
     height:34px;
@@ -1521,6 +1527,7 @@ select.group-modal-input{
 
 .msg-text{
   white-space: pre-wrap;
+  display: flow-root;
 }
 
 .msg.user .msg-text{
@@ -1604,6 +1611,14 @@ select.group-modal-input{
   line-height: 1.7;
   color: var(--text);
   white-space: normal;
+}
+
+.md-body > :first-child{
+  margin-top: 0;
+}
+
+.md-body > :last-child{
+  margin-bottom: 0;
 }
 
 .md-body h1,
