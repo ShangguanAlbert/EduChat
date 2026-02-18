@@ -1533,9 +1533,9 @@ select.group-modal-input{
 .msg.user .msg-text{
   background: #dcebfa;
   color: #0f3156;
-  border-radius: 999px;
-  padding: 10px 18px;
-  width: fit-content;
+  border-radius: 12px;
+  padding: 10px 16px;
+  width: auto;
   max-width: 100%;
 }
 

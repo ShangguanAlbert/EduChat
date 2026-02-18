@@ -301,6 +301,7 @@
   gap: 12px;
   flex: 1;
   min-height: 0;
+  min-width: 0;
 }
 
 .admin-grid.admin-grid-agent-e {
@@ -357,6 +358,7 @@
   box-shadow: 0 14px 28px rgba(15, 23, 42, 0.06);
   padding: 14px;
   min-height: 0;
+  min-width: 0;
   height: 100%;
   overflow-x: hidden;
   overflow-y: auto;
@@ -664,9 +666,20 @@
 }
 
 .admin-panel-api .admin-field-row.split .admin-number-control,
-.admin-panel-api .admin-field-row.split .admin-reasoning-select {
+.admin-panel-api .admin-field-row.split .admin-reasoning-select,
+.admin-panel-api .admin-field-row.model-id > input {
   width: min(246px, 100%);
   margin-left: auto;
+}
+
+.admin-panel-api .admin-field-row > .admin-aliyun-search-textarea {
+  width: min(246px, 100%);
+  margin-left: auto;
+  min-height: 72px;
+  max-height: 72px;
+  resize: none;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .admin-panel-api .admin-field-row.split .admin-switch-row {
@@ -817,33 +830,135 @@
 
 .admin-panel.preview {
   overflow: hidden;
+  min-width: 0;
 }
 
 .admin-preview-chat {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow: hidden;
+}
+
+.admin-panel.preview .admin-panel-head,
+.admin-panel.preview .admin-panel-head-title,
+.admin-panel.preview .admin-preview-chat,
+.admin-panel.preview .admin-preview-error {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .admin-preview-chat .messages {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-gutter: stable both-edges;
   border-radius: 12px;
   border: 1px solid #d4deed;
   background: #f8fbff;
   padding: 10px 10px 14px;
 }
 
-.admin-preview-chat .messages-inner {
+.admin-preview-chat .messages > div,
+.admin-preview-chat [data-virtuoso-scroller],
+.admin-preview-chat [data-virtuoso-viewport],
+.admin-preview-chat [data-virtuoso-list] {
+  width: 100%;
   max-width: 100%;
-  padding: 0;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.admin-preview-chat .messages-inner {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0 14px 0 0;
+  box-sizing: border-box;
+}
+
+.admin-preview-chat .msg,
+.admin-preview-chat .msg-bubble,
+.admin-preview-chat .msg-text,
+.admin-preview-chat .md-body {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.admin-preview-chat .msg {
+  padding-left: 0;
+  padding-right: 2px;
+}
+
+.admin-preview-chat .msg.assistant .msg-bubble {
+  padding-left: 0;
+  padding-right: 4px;
+}
+
+.admin-preview-chat .msg.assistant,
+.admin-preview-chat .msg.assistant .msg-bubble,
+.admin-preview-chat .msg.assistant .msg-text,
+.admin-preview-chat .msg.assistant .md-body,
+.admin-preview-chat .msg.assistant .md-body > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .admin-preview-chat .messages-virtuoso-item {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding-bottom: 12px;
+}
+
+.admin-preview-chat .md-body pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.admin-preview-chat .md-body table {
+  width: 100%;
+  table-layout: fixed;
+  margin-right: 0;
+}
+
+.admin-preview-chat .md-body th,
+.admin-preview-chat .md-body td {
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.admin-preview-chat .md-body p,
+.admin-preview-chat .md-body li,
+.admin-preview-chat .md-body blockquote,
+.admin-preview-chat .md-body span,
+.admin-preview-chat .md-body a {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.admin-preview-chat .md-body img,
+.admin-preview-chat .md-body video,
+.admin-preview-chat .md-body iframe {
+  display: block;
+  max-width: 100%;
+  height: auto;
 }
 
 .admin-preview-chat .selection-ask-btn {
@@ -851,7 +966,60 @@
 }
 
 .admin-preview-chat .msg.user .msg-bubble {
-  max-width: min(84%, 640px);
+  max-width: 60%;
+  width: auto;
+}
+
+.admin-preview-chat .reasoning-content {
+  margin-left: 0;
+  padding-left: 12px;
+}
+
+.admin-preview-chat .reasoning-summary,
+.admin-preview-chat .reasoning-summary-chip {
+  max-width: 100%;
+}
+
+.admin-preview-chat .reasoning-summary-chip {
+  flex-wrap: wrap;
+}
+
+.admin-preview-chat .msg-actions {
+  flex-wrap: wrap;
+}
+
+.admin-preview-chat .attach-bar,
+.admin-preview-chat .attach-chip,
+.admin-preview-chat .file-card,
+.admin-preview-chat .file-meta,
+.admin-preview-chat .file-name,
+.admin-preview-chat .attach-name {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.admin-preview-chat .file-name {
+  width: 100%;
+}
+
+.admin-preview-chat .composer,
+.admin-preview-chat .composer-row,
+.admin-preview-chat .composer-text {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.admin-preview-chat .composer-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.admin-preview-chat .icon-btn,
+.admin-preview-chat .send-icon {
+  flex: 0 0 34px;
 }
 
 .admin-preview-chat .reasoning-content {
@@ -867,7 +1035,9 @@
 }
 
 .admin-preview-chat .composer-text {
+  flex: 1 1 auto;
   min-height: 28px;
+  overflow-x: hidden;
 }
 
 .admin-preview-error {
@@ -1028,7 +1198,8 @@
   .admin-settings-page {
     height: auto;
     min-height: 100vh;
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .admin-settings-shell {
@@ -1099,7 +1270,12 @@
   }
 
   .admin-panel-api .admin-field-row.split .admin-number-control,
-  .admin-panel-api .admin-field-row.split .admin-reasoning-select {
+  .admin-panel-api .admin-field-row.split .admin-reasoning-select,
+  .admin-panel-api .admin-field-row.model-id > input {
+    width: 100%;
+  }
+
+  .admin-panel-api .admin-field-row > .admin-aliyun-search-textarea {
     width: 100%;
   }
 

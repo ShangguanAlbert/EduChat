@@ -4,8 +4,11 @@ import multer from "multer";
 import dotenv from "dotenv";
 import http from "node:http";
 import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readFile as readFileAsync, rm, writeFile as writeFileAsync } from "node:fs/promises";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import crypto from "node:crypto";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import mammoth from "mammoth";
 import XLSX from "xlsx";
@@ -29,6 +32,24 @@ import {
 } from "./agent-e/config.js";
 import { selectAgentESkills } from "./agent-e/skills/registry.js";
 import { buildAgentESystemPrompt } from "./agent-e/promptComposer.js";
+import {
+  buildAliyunChatPayload,
+  buildAliyunDashScopePayload,
+  buildAliyunHeaders,
+  buildAliyunProviderConfig,
+  buildAliyunResponsesPayload,
+  formatAliyunUpstreamError,
+  pipeAliyunDashScopeSse,
+  resolveAliyunModelPolicy,
+  resolveAliyunProtocol,
+  resolveAliyunWebSearchRuntime,
+  shouldUseAliyunDashScopeMultimodalEndpoint,
+} from "./providers/aliyun/index.js";
+import {
+  ALIYUN_SEARCH_CITATION_FORMATS,
+  ALIYUN_SEARCH_FRESHNESS_OPTIONS,
+  ALIYUN_SEARCH_STRATEGIES,
+} from "./providers/aliyun/constants.js";
 
 dotenv.config();
 
@@ -47,6 +68,7 @@ const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 - 1; // strictly < 10MB
 const MAX_FILES = 8;
 const MAX_IMAGE_GENERATION_INPUT_FILES = 14;
 const MAX_PARSED_CHARS_PER_FILE = 12000;
+const ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS = 48000;
 const EXCEL_PREVIEW_MAX_ROWS = 120;
 const EXCEL_PREVIEW_MAX_COLS = 30;
 const EXCEL_PREVIEW_MAX_SHEETS = 8;
@@ -94,6 +116,15 @@ const GENERATED_IMAGE_OSS_EXPIRED_CLEANUP_BATCH_SIZE = 80;
 const CHAT_ATTACHMENT_OSS_SCOPE = "chat-attachments";
 const IMAGE_GENERATION_INPUT_OSS_SCOPE = "image-generation-inputs";
 const IMAGE_GENERATION_OUTPUT_OSS_SCOPE = "image-generation-outputs";
+const ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES = 50;
+const ALIYUN_DASHSCOPE_PDF_RENDER_DPI = 300;
+const ALIYUN_DASHSCOPE_PDF_RENDER_TIMEOUT_MS = 180 * 1000;
+const ALIYUN_DASHSCOPE_PDF_RENDER_STDOUT_MAX_BYTES = 1024 * 1024;
+const ALIYUN_DASHSCOPE_PDF_RENDER_SCRIPT_PATH = path.resolve(
+  process.cwd(),
+  "scripts",
+  "aliyun_pdf_to_images.py",
+);
 const GROUP_CHAT_TEXT_MAX_LENGTH = 1800;
 const GROUP_CHAT_ROOM_NAME_MAX_LENGTH = 30;
 const GROUP_CHAT_REPLY_PREVIEW_MAX_LENGTH = 120;
@@ -126,6 +157,10 @@ if (!groupChatOssClient) {
 } else {
   console.log("[group-chat-file-storage] OSS 已启用：仅走公网。");
 }
+const AGENT_D_FIXED_PROVIDER = "aliyun";
+const AGENT_D_FIXED_MODEL = "qwen3.5-plus";
+const AGENT_D_FIXED_MAX_OUTPUT_TOKENS = 65536;
+
 const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   provider: "inherit",
   model: "",
@@ -151,6 +186,20 @@ const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   webSearchSourceDouyin: true,
   webSearchSourceMoji: true,
   webSearchSourceToutiao: true,
+  aliyunThinkingBudget: 0,
+  aliyunSearchForced: false,
+  aliyunSearchStrategy: "turbo",
+  aliyunSearchEnableSource: false,
+  aliyunSearchEnableCitation: false,
+  aliyunSearchCitationFormat: "[<number>]",
+  aliyunSearchEnableSearchExtension: false,
+  aliyunSearchPrependSearchResult: false,
+  aliyunSearchFreshness: 0,
+  aliyunSearchAssignedSiteList: [],
+  aliyunSearchPromptIntervene: "",
+  aliyunResponsesEnableWebExtractor: false,
+  aliyunResponsesEnableCodeInterpreter: false,
+  aliyunFileProcessMode: "local_parse",
   openrouterPreset: "",
   openrouterIncludeReasoning: false,
   openrouterUseWebPlugin: false,
@@ -178,7 +227,17 @@ const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
     maxOutputTokens: 32000,
     maxReasoningTokens: 32000,
   }),
-  D: Object.freeze({}),
+  D: Object.freeze({
+    provider: AGENT_D_FIXED_PROVIDER,
+    model: AGENT_D_FIXED_MODEL,
+    includeCurrentTime: true,
+    maxOutputTokens: AGENT_D_FIXED_MAX_OUTPUT_TOKENS,
+    enableWebSearch: true,
+    aliyunSearchEnableSource: false,
+    aliyunSearchEnableSearchExtension: true,
+    aliyunResponsesEnableWebExtractor: true,
+    aliyunResponsesEnableCodeInterpreter: true,
+  }),
 });
 const AGENT_RUNTIME_DEFAULTS = Object.freeze({
   A: Object.freeze({
@@ -360,6 +419,14 @@ const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
     maxReasoningTokens: 32000,
   },
   {
+    id: "kimi-k2.5",
+    aliases: ["kimi-k2.5", "kimi-2.5"],
+    contextWindowTokens: 256000,
+    maxInputTokens: 224000,
+    maxOutputTokens: 32768,
+    maxReasoningTokens: 32000,
+  },
+  {
     id: "kimi-k2-thinking-251104",
     aliases: ["kimi-k2-thinking-251104", "kimi-k2-thinking"],
     contextWindowTokens: 256000,
@@ -536,6 +603,7 @@ function createDefaultAgentRuntimeConfigMap() {
 }
 
 const scryptAsync = promisify(crypto.scrypt);
+const execFileAsync = promisify(execFile);
 const CRC32_TABLE = createCrc32Table();
 
 const TEXT_EXTENSIONS = new Set([
@@ -730,6 +798,10 @@ const chatStateSchema = new mongoose.Schema(
       type: new mongoose.Schema(
         {
           agent: { type: String, default: "A" },
+          agentBySession: {
+            type: mongoose.Schema.Types.Mixed,
+            default: () => ({}),
+          },
           apiTemperature: { type: Number, default: 0.6 },
           apiTopP: { type: Number, default: 1 },
           apiReasoningEffort: { type: String, default: "high" },
@@ -744,6 +816,7 @@ const chatStateSchema = new mongoose.Schema(
       ),
       default: () => ({
         agent: "A",
+        agentBySession: {},
         apiTemperature: 0.6,
         apiTopP: 1,
         apiReasoningEffort: "high",
@@ -1075,6 +1148,62 @@ const runtimeConfigSchema = new mongoose.Schema(
     webSearchSourceToutiao: {
       type: Boolean,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.webSearchSourceToutiao,
+    },
+    aliyunThinkingBudget: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunThinkingBudget,
+    },
+    aliyunSearchForced: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchForced,
+    },
+    aliyunSearchStrategy: {
+      type: String,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchStrategy,
+    },
+    aliyunSearchEnableSource: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchEnableSource,
+    },
+    aliyunSearchEnableCitation: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchEnableCitation,
+    },
+    aliyunSearchCitationFormat: {
+      type: String,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchCitationFormat,
+    },
+    aliyunSearchEnableSearchExtension: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchEnableSearchExtension,
+    },
+    aliyunSearchPrependSearchResult: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchPrependSearchResult,
+    },
+    aliyunSearchFreshness: {
+      type: Number,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchFreshness,
+    },
+    aliyunSearchAssignedSiteList: {
+      type: [String],
+      default: () => [...DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchAssignedSiteList],
+    },
+    aliyunSearchPromptIntervene: {
+      type: String,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchPromptIntervene,
+    },
+    aliyunResponsesEnableWebExtractor: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunResponsesEnableWebExtractor,
+    },
+    aliyunResponsesEnableCodeInterpreter: {
+      type: Boolean,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunResponsesEnableCodeInterpreter,
+    },
+    aliyunFileProcessMode: {
+      type: String,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunFileProcessMode,
     },
     openrouterPreset: {
       type: String,
@@ -3291,6 +3420,37 @@ function normalizeMessageContent(content) {
       return;
     }
 
+    if (type === "file_url" || type === "input_file_url") {
+      const fileUrl = extractAliyunFileUrl(part);
+      if (!fileUrl) return;
+      const payload = { url: fileUrl };
+      const safeMime = sanitizeGroupChatFileMimeType(
+        part?.file_url?.mime_type ||
+          part?.file_url?.mimeType ||
+          part?.mime_type ||
+          part?.mimeType ||
+          part?.mimetype ||
+          "",
+      );
+      if (safeMime && safeMime !== "application/octet-stream") {
+        payload.mime_type = safeMime;
+      }
+      const safeName = sanitizeText(
+        part?.file_url?.name ||
+          part?.file_url?.filename ||
+          part?.name ||
+          part?.filename ||
+          "",
+        "",
+        180,
+      );
+      if (safeName) {
+        payload.name = safeName;
+      }
+      parts.push({ type: "file_url", file_url: payload });
+      return;
+    }
+
     if (type === "file") {
       const filePayload = normalizeOpenRouterFilePart(part);
       if (filePayload) {
@@ -3325,6 +3485,37 @@ function hasUsableMessageContent(content) {
   return Array.isArray(content) && content.length > 0;
 }
 
+function hasImageInputInMessages(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  return list.some((item) => messageContainsImageInput(item?.content));
+}
+
+function messageContainsImageInput(content) {
+  const parts = Array.isArray(content)
+    ? content
+    : content && typeof content === "object"
+      ? [content]
+      : [];
+
+  return parts.some((part) => {
+    if (!part || typeof part !== "object") return false;
+    if (typeof part.image === "string" && part.image.trim()) return true;
+    const type = String(part.type || "")
+      .trim()
+      .toLowerCase();
+    if (type === "image_url" || type === "input_image") return true;
+    const imageUrl = extractInputImageUrl(part);
+    return !!imageUrl;
+  });
+}
+
+function isImageUploadFile(file) {
+  const mime = String(file?.mimetype || file?.type || "")
+    .trim()
+    .toLowerCase();
+  return mime.startsWith("image/");
+}
+
 function cloneNormalizedMessageContent(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -3339,6 +3530,37 @@ function cloneNormalizedMessageContent(content) {
       const fileId = String(part?.file_id || part?.fileId || "").trim();
       if (fileId) {
         return { type, file_id: fileId };
+      }
+    }
+
+    if (type === "file_url" || type === "input_file_url") {
+      const fileUrl = extractAliyunFileUrl(part);
+      if (fileUrl) {
+        const payload = { url: fileUrl };
+        const safeMime = sanitizeGroupChatFileMimeType(
+          part?.file_url?.mime_type ||
+            part?.file_url?.mimeType ||
+            part?.mime_type ||
+            part?.mimeType ||
+            part?.mimetype ||
+            "",
+        );
+        if (safeMime && safeMime !== "application/octet-stream") {
+          payload.mime_type = safeMime;
+        }
+        const safeName = sanitizeText(
+          part?.file_url?.name ||
+            part?.file_url?.filename ||
+            part?.name ||
+            part?.filename ||
+            "",
+          "",
+          180,
+        );
+        if (safeName) {
+          payload.name = safeName;
+        }
+        return { type: "file_url", file_url: payload };
       }
     }
     const imageUrl = extractInputImageUrl(part);
@@ -3458,11 +3680,148 @@ async function saveUploadedFileContext({
   }
 }
 
-async function rehydrateUploadedFileContexts(messages, { userId, sessionId }) {
+async function pruneUploadedFileContextsForSession({
+  userId,
+  sessionId,
+  keepMessageId,
+}) {
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  const safeKeepMessageId = sanitizeId(keepMessageId, "");
+  if (!safeUserId || !safeSessionId || !safeKeepMessageId) return;
+
+  try {
+    await UploadedFileContext.deleteMany({
+      userId: safeUserId,
+      sessionId: safeSessionId,
+      messageId: { $ne: safeKeepMessageId },
+    });
+  } catch (error) {
+    console.warn(
+      `Failed to prune uploaded file contexts (${safeUserId}/${safeSessionId}, keep=${safeKeepMessageId}):`,
+      error?.message || error,
+    );
+  }
+}
+
+function extractTextPartsForAliyunContext(content) {
+  if (typeof content === "string") {
+    const text = content.trim();
+    return text ? [{ type: "text", text: content }] : [];
+  }
+  if (!Array.isArray(content)) return [];
+  return content
+    .map((part) => {
+      const type = String(part?.type || "")
+        .trim()
+        .toLowerCase();
+      if (type !== "text") return null;
+      const text = String(part?.text || "");
+      if (!text.trim()) return null;
+      return { type: "text", text };
+    })
+    .filter(Boolean);
+}
+
+async function buildAliyunDashScopeMediaPartsFromOssFiles(
+  ossFiles = [],
+  { includeNativeDocuments = false } = {},
+) {
+  const safeOssFiles = normalizeUploadedFileContextOssFiles(ossFiles);
+  if (safeOssFiles.length === 0) return [];
+
+  const allowNativeDocuments = !!includeNativeDocuments;
+  const parts = [];
+  const dedup = new Set();
+  for (const item of safeOssFiles) {
+    const mime = sanitizeGroupChatFileMimeType(item?.mimeType).toLowerCase();
+    const ext = getFileExtension(item?.fileName);
+    const isImage = mime.startsWith("image/");
+    const isVideo = mime.startsWith("video/");
+    if (!isImage && !isVideo) {
+      if (!allowNativeDocuments) continue;
+      if (shouldForceAliyunDashScopeLocalParseForFile({ ext, mime, buffer: null })) continue;
+    }
+
+    const url = await resolveAliyunDashScopeAttachmentUrl({
+      ossFile: item,
+      fallbackFileName: item?.fileName,
+    });
+    if (!url) continue;
+
+    const type = isImage ? "image_url" : isVideo ? "video_url" : "file_url";
+    const key = `${type}::${url}`;
+    if (dedup.has(key)) continue;
+    dedup.add(key);
+    if (isImage) {
+      parts.push({ type: "image_url", image_url: { url } });
+      continue;
+    }
+    if (isVideo) {
+      parts.push({ type: "video_url", video_url: { url } });
+      continue;
+    }
+    const docPart = buildAliyunDashScopeDocumentUrlPart({
+      url,
+      mime: item?.mimeType,
+      fileName: item?.fileName,
+    });
+    if (docPart) {
+      parts.push(docPart);
+    }
+  }
+  return parts;
+}
+
+async function buildAliyunDashScopeRehydratedContent(
+  content,
+  ossFiles = [],
+  { includeNativeDocuments = false } = {},
+) {
+  const normalized = normalizeMessageContent(content);
+  const clonedBase = hasUsableMessageContent(normalized)
+    ? cloneNormalizedMessageContent(normalized)
+    : "";
+  const mediaParts = await buildAliyunDashScopeMediaPartsFromOssFiles(ossFiles, {
+    includeNativeDocuments,
+  });
+  if (mediaParts.length === 0) {
+    return clonedBase;
+  }
+  const textParts = extractTextPartsForAliyunContext(normalized);
+  const merged = [...textParts, ...mediaParts];
+  if (merged.length > 0) return merged;
+  return clonedBase;
+}
+
+async function rehydrateUploadedFileContexts(
+  messages,
+  {
+    userId,
+    sessionId,
+    provider = "",
+    protocol = "",
+    model = "",
+    aliyunFileProcessMode = "local_parse",
+  } = {},
+) {
   if (!Array.isArray(messages) || messages.length === 0) return;
   const safeUserId = sanitizeId(userId, "");
   const safeSessionId = sanitizeId(sessionId, "");
   if (!safeUserId || !safeSessionId) return;
+  const safeProvider = normalizeProvider(provider);
+  const safeProtocol = sanitizeRuntimeProtocol(protocol);
+  const safeAliyunFileProcessMode = sanitizeAliyunFileProcessMode(
+    aliyunFileProcessMode,
+  );
+  const shouldKeepOnlyLatestAliyunFileContext =
+    safeProvider === "aliyun" && resolveAliyunProtocol(safeProtocol) === "dashscope";
+  const shouldRefreshAliyunMediaUrls =
+    safeProvider === "aliyun" &&
+    resolveAliyunProtocol(safeProtocol) === "dashscope" &&
+    !!resolveAliyunModelPolicy(model)?.supported;
+  const includeAliyunNativeDocuments =
+    shouldRefreshAliyunMediaUrls && safeAliyunFileProcessMode === "native_oss_url";
 
   const targets = [];
   const messageIds = [];
@@ -3488,7 +3847,7 @@ async function rehydrateUploadedFileContexts(messages, { userId, sessionId }) {
         messageId: { $in: messageIds },
         expiresAt: { $gt: new Date() },
       },
-      { messageId: 1, content: 1 },
+      { messageId: 1, content: 1, ossFiles: 1 },
     ).lean();
   } catch (error) {
     console.warn(
@@ -3500,16 +3859,45 @@ async function rehydrateUploadedFileContexts(messages, { userId, sessionId }) {
   if (!Array.isArray(docs) || docs.length === 0) return;
 
   const contentByMessageId = new Map();
-  docs.forEach((doc) => {
+  for (const doc of docs) {
     const messageId = sanitizeId(doc?.messageId, "");
-    if (!messageId) return;
+    if (!messageId) continue;
     const normalized = normalizeMessageContent(doc?.content);
-    if (!hasUsableMessageContent(normalized)) return;
-    contentByMessageId.set(messageId, cloneNormalizedMessageContent(normalized));
-  });
+    if (!hasUsableMessageContent(normalized)) continue;
+
+    let hydrated = cloneNormalizedMessageContent(normalized);
+    if (shouldRefreshAliyunMediaUrls) {
+      hydrated = await buildAliyunDashScopeRehydratedContent(
+        normalized,
+        doc?.ossFiles,
+        { includeNativeDocuments: includeAliyunNativeDocuments },
+      );
+    }
+    if (!hasUsableMessageContent(hydrated)) continue;
+    contentByMessageId.set(messageId, hydrated);
+  }
   if (contentByMessageId.size === 0) return;
 
+  let latestAliyunFileMessageId = "";
+  if (shouldKeepOnlyLatestAliyunFileContext) {
+    for (let i = targets.length - 1; i >= 0; i -= 1) {
+      const candidateId = targets[i]?.messageId || "";
+      if (candidateId && contentByMessageId.has(candidateId)) {
+        latestAliyunFileMessageId = candidateId;
+        break;
+      }
+    }
+    if (!latestAliyunFileMessageId) return;
+  }
+
   targets.forEach(({ msg, messageId }) => {
+    if (
+      shouldKeepOnlyLatestAliyunFileContext &&
+      latestAliyunFileMessageId &&
+      messageId !== latestAliyunFileMessageId
+    ) {
+      return;
+    }
     const content = contentByMessageId.get(messageId);
     if (!content) return;
     msg.content = content;
@@ -3594,14 +3982,65 @@ function attachVolcengineFileRefsToLatestUserMessage(messages, fileRefs) {
 async function attachFilesToLatestUserMessage(
   messages,
   files,
-  { provider = "openrouter", protocol = "chat" } = {},
+  {
+    provider = "openrouter",
+    protocol = "chat",
+    ossFiles = [],
+    aliyunFileProcessMode = "local_parse",
+  } = {},
 ) {
   if (!files || files.length === 0) return null;
 
   if (provider === "openrouter" && protocol === "chat") {
     return attachFilesToLatestUserMessageForOpenRouter(messages, files);
   }
+  if (provider === "aliyun" && protocol === "dashscope") {
+    return attachFilesToLatestUserMessageForAliyunDashScope(messages, files, {
+      ossFiles,
+      aliyunFileProcessMode,
+    });
+  }
   return attachFilesToLatestUserMessageByLocalParsing(messages, files);
+}
+
+function stripAliyunDocumentUrlPartsFromMessages(messages) {
+  const safeList = Array.isArray(messages) ? messages : [];
+  const stripped = safeList.map((msg) => {
+    const normalized = normalizeMessageContent(msg?.content);
+    if (typeof normalized === "string") {
+      return {
+        id: sanitizeId(msg?.id, ""),
+        role: msg?.role,
+        content: normalized,
+      };
+    }
+    const filtered = (Array.isArray(normalized) ? normalized : []).filter((part) => {
+      const type = String(part?.type || "")
+        .trim()
+        .toLowerCase();
+      return type !== "file_url" && type !== "input_file_url";
+    });
+    return {
+      id: sanitizeId(msg?.id, ""),
+      role: msg?.role,
+      content: filtered.length > 0 ? cloneNormalizedMessageContent(filtered) : "",
+    };
+  });
+  return normalizeMessages(stripped);
+}
+
+function isAliyunDashScopeUnsupportedNativeFileErrorText(text) {
+  const safe = String(text || "")
+    .trim()
+    .toLowerCase();
+  if (!safe) return false;
+  if (safe.includes("contentitem.init() got an unexpected keyword argument 'file_path'")) {
+    return true;
+  }
+  if (safe.includes("contentitem.init()") && safe.includes("file_path")) {
+    return true;
+  }
+  return false;
 }
 
 function resolveLatestUserMessage(messages) {
@@ -3725,7 +4164,302 @@ function buildOpenRouterFileInputPart(file) {
   return null;
 }
 
-async function buildParsedFilePreviewTextPart(file) {
+function resolveAliyunVideoMime({ mime, ext }) {
+  const normalizedMime = String(mime || "")
+    .trim()
+    .toLowerCase();
+  if (normalizedMime.startsWith("video/")) {
+    return normalizedMime.split(";")[0] || "";
+  }
+
+  const normalizedExt = String(ext || "")
+    .trim()
+    .toLowerCase();
+  if (normalizedExt === "mp4") return "video/mp4";
+  if (normalizedExt === "mpeg" || normalizedExt === "mpg") return "video/mpeg";
+  if (normalizedExt === "mov") return "video/quicktime";
+  if (normalizedExt === "avi") return "video/x-msvideo";
+  if (normalizedExt === "webm") return "video/webm";
+  if (normalizedExt === "mkv") return "video/x-matroska";
+  if (normalizedExt === "wmv") return "video/x-ms-wmv";
+  if (normalizedExt === "flv") return "video/x-flv";
+  return "";
+}
+
+async function resolveAliyunDashScopeAttachmentUrl({
+  ossFile = null,
+  fallbackFileName = "",
+} = {}) {
+  const normalizePublicUrl = (value) => {
+    const safeUrl = sanitizeGroupChatHttpUrl(value);
+    if (!safeUrl) return "";
+    try {
+      const parsed = new URL(safeUrl);
+      const host = normalizeGroupChatOssPublicEndpoint(parsed.hostname);
+      if (host) {
+        parsed.hostname = host;
+      }
+      return parsed.toString();
+    } catch {
+      return safeUrl;
+    }
+  };
+  if (!ossFile || typeof ossFile !== "object") return "";
+  const ossKey = sanitizeGroupChatOssObjectKey(ossFile?.ossKey);
+  const fileName = sanitizeGroupChatFileName(ossFile?.fileName || fallbackFileName);
+  if (ossKey) {
+    const signedUrl = await buildGroupChatFileSignedDownloadUrl({
+      ossKey,
+      fileName,
+    });
+    const safeSignedUrl = normalizePublicUrl(signedUrl);
+    if (safeSignedUrl) return safeSignedUrl;
+  }
+  return normalizePublicUrl(ossFile?.fileUrl);
+}
+
+function buildAliyunDashScopeDocumentUrlPart({ url = "", mime = "", fileName = "" } = {}) {
+  const safeUrl = sanitizeGroupChatHttpUrl(url);
+  if (!safeUrl) return null;
+
+  const filePayload = { url: safeUrl };
+  const safeMime = sanitizeGroupChatFileMimeType(mime);
+  if (safeMime && safeMime !== "application/octet-stream") {
+    filePayload.mime_type = safeMime;
+  }
+  const safeName = sanitizeText(fileName, "", 180);
+  if (safeName) {
+    filePayload.name = safeName;
+  }
+  return { type: "file_url", file_url: filePayload };
+}
+
+function shouldForceAliyunDashScopeLocalParseForFile({ ext = "", mime = "", buffer = null } = {}) {
+  if (isPdfFile(ext, mime)) return true;
+  if (isWordFile(ext, mime)) return true;
+  if (isExcelFile(ext, mime)) return true;
+  if (isTextLikeFile(ext, mime, buffer)) return true;
+  return false;
+}
+
+async function renderPdfToAliyunDashScopeImagesWithPython({
+  inputPath = "",
+  outputDir = "",
+  maxPages = ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES,
+  dpi = ALIYUN_DASHSCOPE_PDF_RENDER_DPI,
+} = {}) {
+  const safeInputPath = String(inputPath || "").trim();
+  const safeOutputDir = String(outputDir || "").trim();
+  if (!safeInputPath || !safeOutputDir) {
+    return { ok: false, pageCount: 0, renderedPaths: [], error: "missing pdf path" };
+  }
+
+  const safeMaxPages = Math.max(1, Math.min(50, Number(maxPages) || 1));
+  const safeDpi = Math.max(96, Math.min(300, Number(dpi) || ALIYUN_DASHSCOPE_PDF_RENDER_DPI));
+  const scriptPath = ALIYUN_DASHSCOPE_PDF_RENDER_SCRIPT_PATH;
+  if (!existsSync(scriptPath)) {
+    return {
+      ok: false,
+      pageCount: 0,
+      renderedPaths: [],
+      error: "missing scripts/aliyun_pdf_to_images.py",
+    };
+  }
+
+  try {
+    const { stdout = "" } = await execFileAsync(
+      "python3",
+      [
+        scriptPath,
+        safeInputPath,
+        safeOutputDir,
+        String(safeMaxPages),
+        String(safeDpi),
+      ],
+      {
+        timeout: ALIYUN_DASHSCOPE_PDF_RENDER_TIMEOUT_MS,
+        maxBuffer: ALIYUN_DASHSCOPE_PDF_RENDER_STDOUT_MAX_BYTES,
+      },
+    );
+    const lastJsonLine =
+      String(stdout || "")
+        .trim()
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .pop() || "{}";
+    let parsed = {};
+    try {
+      parsed = JSON.parse(lastJsonLine);
+    } catch {
+      parsed = {};
+    }
+    const renderedPaths = Array.isArray(parsed?.rendered)
+      ? parsed.rendered.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const pageCount = Math.max(0, Number(parsed?.page_count) || 0);
+    const ok = !!parsed?.ok;
+    const errorMessage = sanitizeText(parsed?.error, "", 600);
+    return {
+      ok,
+      pageCount,
+      renderedPaths,
+      error: errorMessage,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      pageCount: 0,
+      renderedPaths: [],
+      error: sanitizeText(error?.message, "python render failed", 600),
+    };
+  }
+}
+
+async function buildAliyunDashScopePdfImageParts(file) {
+  const safeBuffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from([]);
+  if (safeBuffer.length === 0) {
+    return { parts: [], pageCount: 0, error: "empty pdf buffer" };
+  }
+  const safeName = sanitizeText(file?.originalname, "document.pdf", 180);
+  let tempDir = "";
+  try {
+    tempDir = await mkdtemp(path.join(tmpdir(), "educhat-aliyun-pdf-"));
+    const inputPath = path.join(tempDir, "input.pdf");
+    const outputDir = path.join(tempDir, "rendered");
+    await writeFileAsync(inputPath, safeBuffer);
+    await mkdir(outputDir, { recursive: true });
+
+    const rendered = await renderPdfToAliyunDashScopeImagesWithPython({
+      inputPath,
+      outputDir,
+      maxPages: ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES,
+      dpi: ALIYUN_DASHSCOPE_PDF_RENDER_DPI,
+    });
+    const imageParts = [];
+    for (const renderedPath of rendered.renderedPaths) {
+      const imageBuffer = await readFileAsync(renderedPath).catch(() => Buffer.from([]));
+      if (!imageBuffer.length) continue;
+      const imageDataUrl = buildDataUrlForBuffer(imageBuffer, "image/jpeg");
+      if (!imageDataUrl) continue;
+      imageParts.push({ type: "image_url", image_url: { url: imageDataUrl } });
+    }
+    if (imageParts.length === 0) {
+      return {
+        parts: [],
+        pageCount: rendered.pageCount,
+        error: rendered.error || "pdf rendered with no pages",
+      };
+    }
+
+    const summaryLines = [
+      `[附件: ${safeName}]`,
+      "已按阿里云官方建议，将 PDF 按页转换为图片后输入模型。",
+    ];
+    if (rendered.pageCount > imageParts.length) {
+      summaryLines.push(
+        `PDF 共 ${rendered.pageCount} 页，本次仅发送前 ${imageParts.length} 页。`,
+      );
+    }
+    return {
+      parts: [{ type: "text", text: summaryLines.join("\n") }, ...imageParts],
+      pageCount: rendered.pageCount,
+      error: "",
+    };
+  } catch (error) {
+    return {
+      parts: [],
+      pageCount: 0,
+      error: sanitizeText(error?.message, "pdf render failed", 600),
+    };
+  } finally {
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+}
+
+async function buildAliyunDashScopeFileInputParts(
+  file,
+  { ossFile = null, aliyunFileProcessMode = "local_parse" } = {},
+) {
+  const safeBuffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from([]);
+  if (safeBuffer.length === 0) return [];
+
+  const mime = String(file?.mimetype || "")
+    .trim()
+    .toLowerCase();
+  const ext = getFileExtension(file?.originalname);
+  const safeName = sanitizeText(file?.originalname, "upload.bin", 180);
+
+  if (mime.startsWith("image/")) {
+    const urlFromOss = await resolveAliyunDashScopeAttachmentUrl({
+      ossFile,
+      fallbackFileName: safeName,
+    });
+    if (urlFromOss) {
+      return [{ type: "image_url", image_url: { url: urlFromOss } }];
+    }
+    const imageUrl = buildDataUrlForBuffer(safeBuffer, mime || "image/jpeg");
+    if (imageUrl) {
+      return [{ type: "image_url", image_url: { url: imageUrl } }];
+    }
+  }
+
+  const videoMime = resolveAliyunVideoMime({ mime, ext });
+  if (videoMime) {
+    const urlFromOss = await resolveAliyunDashScopeAttachmentUrl({
+      ossFile,
+      fallbackFileName: safeName,
+    });
+    if (urlFromOss) {
+      return [{ type: "video_url", video_url: { url: urlFromOss } }];
+    }
+    const videoUrl = buildDataUrlForBuffer(safeBuffer, videoMime);
+    if (videoUrl) {
+      return [{ type: "video_url", video_url: { url: videoUrl } }];
+    }
+  }
+
+  if (isPdfFile(ext, mime)) {
+    const converted = await buildAliyunDashScopePdfImageParts(file);
+    if (converted.parts.length > 0) {
+      return converted.parts;
+    }
+    if (converted.error) {
+      console.warn(
+        `[aliyun/dashscope] PDF 转图片失败（${safeName}），回退本地文本解析：${converted.error}`,
+      );
+    }
+    return [];
+  }
+
+  if (shouldForceAliyunDashScopeLocalParseForFile({ ext, mime, buffer: safeBuffer })) {
+    return [];
+  }
+
+  const normalizedFileMode = sanitizeAliyunFileProcessMode(aliyunFileProcessMode);
+  if (normalizedFileMode === "native_oss_url") {
+    const urlFromOss = await resolveAliyunDashScopeAttachmentUrl({
+      ossFile,
+      fallbackFileName: safeName,
+    });
+    if (urlFromOss) {
+      const docPart = buildAliyunDashScopeDocumentUrlPart({
+        url: urlFromOss,
+        mime,
+        fileName: safeName,
+      });
+      if (docPart) return [docPart];
+    }
+  }
+
+  return [];
+}
+
+async function buildParsedFilePreviewTextPart(
+  file,
+  { maxChars = MAX_PARSED_CHARS_PER_FILE } = {},
+) {
   const mime = file?.mimetype || "application/octet-stream";
   let textContent = "";
   let formatHint = "";
@@ -3739,7 +4473,7 @@ async function buildParsedFilePreviewTextPart(file) {
     formatHint = `解析失败: ${error?.message || "unknown error"}`;
   }
 
-  const normalized = clipText(textContent);
+  const normalized = clipText(textContent, maxChars);
   const fallbackPreview = `${String(
     Buffer.isBuffer(file?.buffer) ? file.buffer.toString("base64") : "",
   ).slice(0, 1600)}...`;
@@ -3777,6 +4511,58 @@ async function attachFilesToLatestUserMessageForOpenRouter(messages, files) {
   return {
     messageId: sanitizeId(msg.id, ""),
     content: parts,
+  };
+}
+
+async function attachFilesToLatestUserMessageForAliyunDashScope(
+  messages,
+  files,
+  { ossFiles = [], aliyunFileProcessMode = "local_parse" } = {},
+) {
+  const msg = resolveLatestUserMessage(messages);
+  if (!msg) return null;
+
+  const parts = buildInitialAttachmentParts(msg.content);
+  const safeOssFiles = Array.isArray(ossFiles) ? ossFiles : [];
+  for (let idx = 0; idx < files.length; idx += 1) {
+    const file = files[idx];
+    const fallbackName = sanitizeGroupChatFileName(file?.originalname);
+    const fallbackSize = Number(file?.size || 0);
+    const fallbackMime = sanitizeGroupChatFileMimeType(file?.mimetype || "");
+    const ossFile =
+      safeOssFiles[idx] ||
+      safeOssFiles.find((item) => {
+        const sameName =
+          sanitizeGroupChatFileName(item?.fileName) === fallbackName && !!fallbackName;
+        const sameSize =
+          Number(item?.size || 0) === fallbackSize && Number.isFinite(fallbackSize);
+        const sameMime =
+          sanitizeGroupChatFileMimeType(item?.mimeType || "") === fallbackMime &&
+          !!fallbackMime;
+        return sameName || (sameSize && sameMime);
+      }) ||
+      null;
+    const resolvedParts = await buildAliyunDashScopeFileInputParts(file, {
+      ossFile,
+      aliyunFileProcessMode,
+    });
+    if (Array.isArray(resolvedParts) && resolvedParts.length > 0) {
+      parts.push(...resolvedParts);
+      continue;
+    }
+    const fallback = await buildParsedFilePreviewTextPart(file, {
+      maxChars: ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS,
+    });
+    if (fallback) {
+      parts.push(fallback);
+    }
+  }
+
+  if (parts.length === 0) return null;
+  msg.content = parts;
+  return {
+    messageId: sanitizeId(msg.id, ""),
+    content: cloneNormalizedMessageContent(parts),
   };
 }
 
@@ -3909,15 +4695,23 @@ async function streamAgentResponse({
     : getProviderByAgent(agentId, config);
   const model =
     sanitizeRuntimeModel(modelOverride) || getModelByAgent(agentId, config);
-  const protocolInfo = resolveRequestProtocol(config.protocol, provider);
+  const aliyunModelPolicy =
+    provider === "aliyun" ? resolveAliyunModelPolicy(model) : null;
+  const protocolInfo = resolveRequestProtocol(config.protocol, provider, model);
   if (!protocolInfo.supported) {
     res.status(400).json({ error: protocolInfo.message });
     return;
   }
   const protocol = protocolInfo.value;
+  const aliyunFileProcessMode = sanitizeAliyunFileProcessMode(
+    config?.aliyunFileProcessMode,
+  );
   const shouldUsePersistentFileContext =
     (provider === "volcengine" && protocol === "responses") ||
-    (provider === "openrouter" && protocol === "chat");
+    (provider === "openrouter" && protocol === "chat") ||
+    (provider === "aliyun" && protocol === "dashscope");
+  const shouldKeepOnlyLatestAliyunFileContext =
+    provider === "aliyun" && protocol === "dashscope";
   const providerConfig = getProviderConfig(provider);
   if (!providerConfig.apiKey) {
     res.status(500).json({
@@ -3925,17 +4719,6 @@ async function streamAgentResponse({
     });
     return;
   }
-  const endpoint =
-    protocol === "responses"
-      ? providerConfig.responsesEndpoint
-      : providerConfig.chatEndpoint;
-  if (!endpoint) {
-    res.status(500).json({
-      error: `当前 provider (${provider}) 未配置 ${protocol} 协议端点。`,
-    });
-    return;
-  }
-
   const thinkingEnabled = sanitizeEnableThinking(config.enableThinking);
   const reasoningEffortRequested = thinkingEnabled ? "high" : "none";
   const reasoning = resolveReasoningPolicy(
@@ -3943,7 +4726,7 @@ async function streamAgentResponse({
     reasoningEffortRequested,
     provider,
   );
-  const webSearchRuntime = resolveVolcengineWebSearchRuntime({
+  const webSearchRuntime = resolveProviderWebSearchRuntime({
     provider,
     protocol,
     model,
@@ -3965,6 +4748,22 @@ async function streamAgentResponse({
   let filesForLocalAttach = Array.isArray(files) ? files.filter(Boolean) : [];
   let effectiveVolcengineFileRefs = sanitizeVolcengineFileRefsPayload(volcengineFileRefs);
   if (
+    provider === "aliyun" &&
+    aliyunModelPolicy &&
+    !aliyunModelPolicy.allowImageInput
+  ) {
+    const hasImageInput =
+      hasImageInputInMessages(safeMessages) ||
+      filesForLocalAttach.some((file) => isImageUploadFile(file)) ||
+      effectiveVolcengineFileRefs.some((item) => item.inputType === "input_image");
+    if (hasImageInput) {
+      res.status(400).json({
+        error: "当前阿里云 MiniMax 模型不支持图片输入，请仅发送文本内容。",
+      });
+      return;
+    }
+  }
+  if (
     safeMessages.length === 0 &&
     attachUploadedFiles &&
     filesForLocalAttach.length > 0
@@ -3977,10 +4776,18 @@ async function streamAgentResponse({
     return;
   }
 
-  if (shouldUsePersistentFileContext) {
+  const shouldSkipPersistentFileContextRehydrate =
+    shouldKeepOnlyLatestAliyunFileContext &&
+    attachUploadedFiles &&
+    filesForLocalAttach.length > 0;
+  if (shouldUsePersistentFileContext && !shouldSkipPersistentFileContextRehydrate) {
     await rehydrateUploadedFileContexts(safeMessages, {
       userId: chatUserId,
       sessionId,
+      provider,
+      protocol,
+      model,
+      aliyunFileProcessMode,
     });
   }
 
@@ -4060,6 +4867,10 @@ async function streamAgentResponse({
       content: "请基于附件内容进行分析和回答。",
     });
   }
+  const aliyunDashScopeFallbackBaseMessages =
+    provider === "aliyun" && protocol === "dashscope"
+      ? normalizeMessages(requestMessages)
+      : [];
 
   if (
     attachUploadedFiles &&
@@ -4118,11 +4929,24 @@ async function streamAgentResponse({
 
   let uploadedFileContextRecord = null;
   if (attachUploadedFiles && filesForLocalAttach.length > 0) {
-    uploadedFileContextRecord = await attachFilesToLatestUserMessage(
-      requestMessages,
-      filesForLocalAttach,
-      { provider, protocol },
-    );
+    try {
+      uploadedFileContextRecord = await attachFilesToLatestUserMessage(
+        requestMessages,
+        filesForLocalAttach,
+        {
+          provider,
+          protocol,
+          model,
+          ossFiles: uploadedContextOssFiles,
+          aliyunFileProcessMode,
+        },
+      );
+    } catch (error) {
+      res.status(400).json({
+        error: error?.message || "附件处理失败，请检查文件格式后重试。",
+      });
+      return;
+    }
     if (shouldUsePersistentFileContext && uploadedFileContextRecord?.messageId) {
       await saveUploadedFileContext({
         userId: chatUserId,
@@ -4131,6 +4955,13 @@ async function streamAgentResponse({
         content: uploadedFileContextRecord.content,
         ossFiles: uploadedContextOssFiles,
       });
+      if (shouldKeepOnlyLatestAliyunFileContext) {
+        await pruneUploadedFileContextsForSession({
+          userId: chatUserId,
+          sessionId,
+          keepMessageId: uploadedFileContextRecord.messageId,
+        });
+      }
     }
   }
   if (
@@ -4148,7 +4979,7 @@ async function streamAgentResponse({
     requestMessages = extractSmartContextIncrementalMessages(requestMessages);
   }
 
-  const providerMessages = requestMessages.map((msg) => ({
+  let providerMessages = requestMessages.map((msg) => ({
     role: msg.role,
     content: msg.content,
   }));
@@ -4160,27 +4991,121 @@ async function streamAgentResponse({
   const promptLeakDetected =
     promptLeakGuardEnabled && isPromptLeakProbeRequest(requestMessages);
 
-  const payload =
-    protocol === "responses"
-      ? buildResponsesRequestPayload({
-          model,
-          messages: providerMessages,
-          instructions: composedSystemPrompt,
-          config,
-          thinkingEnabled,
-          reasoning,
-          webSearchRuntime,
-          previousResponseId: smartContextRuntime.previousResponseId,
-          forceStore: smartContextRuntime.enabled,
-        })
-      : buildChatRequestPayload({
-          model,
-          messages: providerMessages,
-          systemPrompt: composedSystemPrompt,
-          provider,
-          config,
-          reasoning,
-        });
+  const aliyunSharedSampling =
+    provider === "aliyun"
+      ? {
+          temperature: sanitizeRuntimeNumber(
+            config.temperature,
+            DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
+            0,
+            2,
+          ),
+          topP: sanitizeRuntimeNumber(
+            config.topP,
+            DEFAULT_AGENT_RUNTIME_CONFIG.topP,
+            0,
+            1,
+          ),
+          frequencyPenalty: sanitizeRuntimeNumber(
+            config.frequencyPenalty,
+            DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty,
+            -2,
+            2,
+          ),
+          presencePenalty: sanitizeRuntimeNumber(
+            config.presencePenalty,
+            DEFAULT_AGENT_RUNTIME_CONFIG.presencePenalty,
+            -2,
+            2,
+          ),
+        }
+      : null;
+
+  let payload = null;
+  if (provider === "aliyun") {
+
+    if (protocol === "responses") {
+      payload = buildAliyunResponsesPayload({
+        model,
+        messages: providerMessages,
+        instructions: composedSystemPrompt,
+        config,
+        thinkingEnabled: reasoning.enabled,
+        webSearchRuntime,
+        previousResponseId: smartContextRuntime.previousResponseId,
+        forceStore: smartContextRuntime.enabled,
+        maxToolCalls: webSearchRuntime.maxToolCalls,
+        buildResponsesInputItems,
+      });
+    } else if (protocol === "dashscope") {
+      payload = buildAliyunDashScopePayload({
+        model,
+        messages: providerMessages,
+        systemPrompt: composedSystemPrompt,
+        config,
+        thinkingEnabled: reasoning.enabled,
+        webSearchRuntime,
+        temperature: aliyunSharedSampling?.temperature,
+        topP: aliyunSharedSampling?.topP,
+      });
+    } else {
+      payload = buildAliyunChatPayload({
+        model,
+        messages: providerMessages,
+        systemPrompt: composedSystemPrompt,
+        config,
+        thinkingEnabled: reasoning.enabled,
+        webSearchRuntime,
+        temperature: aliyunSharedSampling?.temperature,
+        topP: aliyunSharedSampling?.topP,
+        frequencyPenalty: aliyunSharedSampling?.frequencyPenalty,
+        presencePenalty: aliyunSharedSampling?.presencePenalty,
+      });
+    }
+  } else if (protocol === "responses") {
+    payload = buildResponsesRequestPayload({
+      model,
+      messages: providerMessages,
+      instructions: composedSystemPrompt,
+      config,
+      thinkingEnabled,
+      reasoning,
+      webSearchRuntime,
+      previousResponseId: smartContextRuntime.previousResponseId,
+      forceStore: smartContextRuntime.enabled,
+    });
+  } else {
+    payload = buildChatRequestPayload({
+      model,
+      messages: providerMessages,
+      systemPrompt: composedSystemPrompt,
+      provider,
+      config,
+      reasoning,
+    });
+  }
+
+  let useAliyunDashScopeMultimodalEndpoint =
+    provider === "aliyun" &&
+    protocol === "dashscope" &&
+    shouldUseAliyunDashScopeMultimodalEndpoint({
+      model,
+      messages: providerMessages,
+    });
+  let endpoint =
+    provider === "aliyun" && protocol === "dashscope"
+      ? useAliyunDashScopeMultimodalEndpoint
+        ? providerConfig.dashscopeMultimodalEndpoint || providerConfig.dashscopeEndpoint
+        : providerConfig.dashscopeEndpoint
+      : protocol === "responses"
+        ? providerConfig.responsesEndpoint
+        : providerConfig.chatEndpoint;
+  if (!endpoint) {
+    res.status(500).json({
+      error: `当前 provider (${provider}) 未配置 ${protocol} 协议端点。`,
+    });
+    return;
+  }
 
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -4201,6 +5126,8 @@ async function streamAgentResponse({
     webSearchMatchedModelId: webSearchRuntime.matchedModelId,
     webSearchEnabled: webSearchRuntime.enabled,
     webSearchThinkingPromptInjected: webSearchRuntime.injectThinkingPrompt,
+    aliyunDashscopeMultimodalEndpointUsed: useAliyunDashScopeMultimodalEndpoint,
+    aliyunFileProcessModeApplied: provider === "aliyun" ? aliyunFileProcessMode : "",
     smartContextRequested: smartContextRuntime.requested,
     smartContextEnabled: smartContextRuntime.enabled,
     smartContextUsePreviousResponseId: smartContextRuntime.usePreviousResponseId,
@@ -4211,6 +5138,98 @@ async function streamAgentResponse({
     ...safeMetaExtras,
   });
 
+  let upstream;
+  let aliyunNativeFileFallbackAttempted = false;
+  const tryAliyunDashScopeNativeFileFallback = async (triggerText = "") => {
+    if (aliyunNativeFileFallbackAttempted) return false;
+    if (provider !== "aliyun" || protocol !== "dashscope") return false;
+    if (aliyunFileProcessMode !== "native_oss_url") return false;
+    if (!isAliyunDashScopeUnsupportedNativeFileErrorText(triggerText)) return false;
+    aliyunNativeFileFallbackAttempted = true;
+
+    const retryMessages = stripAliyunDocumentUrlPartsFromMessages(
+      aliyunDashScopeFallbackBaseMessages,
+    );
+    if (attachUploadedFiles && filesForLocalAttach.length > 0) {
+      let retryUploadedContextRecord = null;
+      try {
+        retryUploadedContextRecord = await attachFilesToLatestUserMessage(
+          retryMessages,
+          filesForLocalAttach,
+          {
+            provider,
+            protocol,
+            model,
+            ossFiles: uploadedContextOssFiles,
+            aliyunFileProcessMode: "local_parse",
+          },
+        );
+      } catch {
+        retryUploadedContextRecord = null;
+      }
+      if (retryUploadedContextRecord) {
+        uploadedFileContextRecord = retryUploadedContextRecord;
+      }
+      if (shouldUsePersistentFileContext && retryUploadedContextRecord?.messageId) {
+        await saveUploadedFileContext({
+          userId: chatUserId,
+          sessionId,
+          messageId: retryUploadedContextRecord.messageId,
+          content: retryUploadedContextRecord.content,
+          ossFiles: uploadedContextOssFiles,
+        });
+        if (shouldKeepOnlyLatestAliyunFileContext) {
+          await pruneUploadedFileContextsForSession({
+            userId: chatUserId,
+            sessionId,
+            keepMessageId: retryUploadedContextRecord.messageId,
+          });
+        }
+      }
+    }
+
+    if (retryMessages.length === 0) return false;
+    providerMessages = retryMessages.map((msg) => ({
+      role: msg.role,
+      content: msg.content,
+    }));
+    payload = buildAliyunDashScopePayload({
+      model,
+      messages: providerMessages,
+      systemPrompt: composedSystemPrompt,
+      config,
+      thinkingEnabled: reasoning.enabled,
+      webSearchRuntime,
+      temperature: aliyunSharedSampling?.temperature,
+      topP: aliyunSharedSampling?.topP,
+    });
+    useAliyunDashScopeMultimodalEndpoint = shouldUseAliyunDashScopeMultimodalEndpoint({
+      model,
+      messages: providerMessages,
+    });
+    endpoint = useAliyunDashScopeMultimodalEndpoint
+      ? providerConfig.dashscopeMultimodalEndpoint || providerConfig.dashscopeEndpoint
+      : providerConfig.dashscopeEndpoint;
+    if (!endpoint) return false;
+
+    try {
+      upstream = await sendProviderRequestWithRetry({
+        endpoint,
+        headers: buildProviderHeaders(provider, providerConfig.apiKey, protocol),
+        body: JSON.stringify(payload),
+        provider,
+        protocol,
+      });
+    } catch {
+      return false;
+    }
+
+    console.warn(
+      "[aliyun/dashscope] native document URL unsupported by upstream, fallback to local_parse for this request.",
+    );
+    return true;
+  };
+
   if (promptLeakDetected) {
     writeEvent(res, "token", { text: "我只是你的助手" });
     writeEvent(res, "done", { ok: true });
@@ -4218,50 +5237,67 @@ async function streamAgentResponse({
     return;
   }
 
-  let upstream;
   try {
-    upstream = await fetch(endpoint, {
-      method: "POST",
+    upstream = await sendProviderRequestWithRetry({
+      endpoint,
       headers: buildProviderHeaders(provider, providerConfig.apiKey, protocol),
       body: JSON.stringify(payload),
+      provider,
+      protocol,
     });
   } catch (error) {
     console.error(`[${provider}/${protocol}] request failed:`, error);
+    const failureMessage = formatProviderRequestFailure(
+      provider,
+      protocol,
+      endpoint,
+      error,
+    );
     writeEvent(res, "error", {
-      message: `${provider}/${protocol} request failed: ${error.message}`,
+      message: failureMessage,
     });
     res.end();
     return;
   }
 
   if (!upstream.ok || !upstream.body) {
-    const detail = await safeReadText(upstream);
+    let detail = await safeReadText(upstream);
     console.error(`[${provider}/${protocol}] upstream error:`, upstream.status, detail);
-    if (
-      smartContextRuntime.usePreviousResponseId &&
-      shouldResetSmartContextReference(upstream.status, detail)
-    ) {
-      await clearSessionContextRef({
-        userId: smartContextRuntime.userId,
-        sessionId: smartContextRuntime.sessionId,
+    await tryAliyunDashScopeNativeFileFallback(detail);
+    if (!upstream.ok || !upstream.body) {
+      detail = await safeReadText(upstream);
+      if (
+        smartContextRuntime.usePreviousResponseId &&
+        shouldResetSmartContextReference(upstream.status, detail)
+      ) {
+        await clearSessionContextRef({
+          userId: smartContextRuntime.userId,
+          sessionId: smartContextRuntime.sessionId,
+        });
+      }
+      const message = formatProviderUpstreamError(
+        provider,
+        protocol,
+        upstream.status,
+        detail,
+      );
+      writeEvent(res, "error", {
+        message,
       });
+      res.end();
+      return;
     }
-    const message = formatProviderUpstreamError(
-      provider,
-      protocol,
-      upstream.status,
-      detail,
-    );
-    writeEvent(res, "error", {
-      message,
-    });
-    res.end();
-    return;
   }
 
   try {
     let responsesResult = null;
-    if (protocol === "responses") {
+    if (provider === "aliyun" && protocol === "dashscope") {
+      await pipeAliyunDashScopeSse(upstream, res, {
+        reasoningEnabled: reasoning.enabled,
+        emitSearchUsage: webSearchRuntime.enabled,
+        writeEvent,
+      });
+    } else if (protocol === "responses") {
       responsesResult = await pipeResponsesSse(upstream, res, reasoning.enabled, {
         emitSearchUsage: webSearchRuntime.enabled,
       });
@@ -4284,8 +5320,25 @@ async function streamAgentResponse({
     }
     writeEvent(res, "done", { ok: true });
   } catch (error) {
-    console.error(`[${provider}/${protocol}] stream handling failed:`, error);
-    writeEvent(res, "error", { message: error.message || "stream failed" });
+    let finalError = error;
+    const fallbackApplied = await tryAliyunDashScopeNativeFileFallback(
+      error?.message || "",
+    );
+    if (fallbackApplied && upstream?.ok && upstream?.body) {
+      try {
+        await pipeAliyunDashScopeSse(upstream, res, {
+          reasoningEnabled: reasoning.enabled,
+          emitSearchUsage: webSearchRuntime.enabled,
+          writeEvent,
+        });
+        writeEvent(res, "done", { ok: true });
+        return;
+      } catch (retryError) {
+        finalError = retryError;
+      }
+    }
+    console.error(`[${provider}/${protocol}] stream handling failed:`, finalError);
+    writeEvent(res, "error", { message: finalError?.message || "stream failed" });
   } finally {
     res.end();
   }
@@ -5277,6 +6330,44 @@ function buildResponsesRequestPayload({
   return payload;
 }
 
+function resolveProviderWebSearchRuntime({
+  provider,
+  protocol,
+  model,
+  config,
+  thinkingEnabled,
+}) {
+  if (provider === "aliyun") {
+    const policy = resolveAliyunModelPolicy(model);
+    const runtime = resolveAliyunWebSearchRuntime({
+      protocol,
+      config,
+      model,
+    });
+    const modelSupported = policy.supported && !!policy.allowWebSearch;
+    return {
+      requested: runtime.requested,
+      enabled: runtime.enabled,
+      modelSupported,
+      supportsThinking: modelSupported,
+      matchedModelId: sanitizeRuntimeModel(model),
+      maxToolCalls: runtime.maxToolCalls,
+      tool: null,
+      injectThinkingPrompt: false,
+      options: runtime.options,
+      tools: runtime.tools,
+    };
+  }
+
+  return resolveVolcengineWebSearchRuntime({
+    provider,
+    protocol,
+    model,
+    config,
+    thinkingEnabled,
+  });
+}
+
 function resolveVolcengineWebSearchRuntime({
   provider,
   protocol,
@@ -5619,6 +6710,43 @@ function extractInputVideoUrl(part) {
   return url || "";
 }
 
+function extractAliyunFileUrl(part) {
+  if (!part || typeof part !== "object") return "";
+
+  if (typeof part.file === "string") {
+    const directFile = part.file.trim();
+    if (directFile) return directFile;
+  }
+
+  if (typeof part.file_url === "string") {
+    const direct = part.file_url.trim();
+    if (direct) return direct;
+  }
+  if (part.file_url && typeof part.file_url === "object") {
+    const nested = String(part.file_url.url || "").trim();
+    if (nested) return nested;
+  }
+
+  if (typeof part.fileUrl === "string") {
+    const directCamel = part.fileUrl.trim();
+    if (directCamel) return directCamel;
+  }
+  if (part.fileUrl && typeof part.fileUrl === "object") {
+    const nestedCamel = String(part.fileUrl.url || "").trim();
+    if (nestedCamel) return nestedCamel;
+  }
+
+  if (part.file && typeof part.file === "object") {
+    const fileObjUrl = String(
+      part.file.url || part.file.file_url || part.file.fileUrl || "",
+    ).trim();
+    if (fileObjUrl) return fileObjUrl;
+  }
+
+  const url = String(part.url || "").trim();
+  return url || "";
+}
+
 function normalizeOpenRouterFilePart(part) {
   const file = part?.file && typeof part.file === "object" ? part.file : {};
   const rawFileData =
@@ -5692,18 +6820,33 @@ function supportsVolcengineResponsesReasoningEffort(model) {
   return allowlist.some((item) => normalizedModel.includes(item));
 }
 
-function resolveRequestProtocol(requestedProtocol, provider) {
+function resolveRequestProtocol(requestedProtocol, provider, model = "") {
   const protocol = sanitizeRuntimeProtocol(requestedProtocol);
 
   if (provider === "volcengine") {
     return { supported: true, value: "responses", forced: protocol !== "responses" };
   }
 
-  if (protocol === "responses" && provider !== "volcengine") {
-    return { supported: true, value: "chat", forced: true };
+  if (provider === "aliyun") {
+    const policy = resolveAliyunModelPolicy(model);
+    if (!policy.supported) {
+      return {
+        supported: false,
+        value: "chat",
+        forced: false,
+        message: policy.errorMessage || "当前阿里云模型不受支持。",
+      };
+    }
+    const normalized = resolveAliyunProtocol(protocol);
+    const value = policy.forceProtocol || normalized;
+    return { supported: true, value, forced: value !== protocol };
   }
 
-  return { supported: true, value: protocol, forced: false };
+  if (provider === "openrouter") {
+    return { supported: true, value: "chat", forced: protocol !== "chat" };
+  }
+
+  return { supported: true, value: "chat", forced: protocol !== "chat" };
 }
 
 function extractSmartContextIncrementalMessages(messages) {
@@ -6324,11 +7467,15 @@ async function parsePdf(buffer) {
   }
 }
 
-function clipText(text) {
+function clipText(text, maxChars = MAX_PARSED_CHARS_PER_FILE) {
   const normalized = String(text || "").trim();
   if (!normalized) return "";
-  if (normalized.length <= MAX_PARSED_CHARS_PER_FILE) return normalized;
-  const clipped = normalized.slice(0, MAX_PARSED_CHARS_PER_FILE);
+  const numeric = Number(maxChars);
+  const safeMax = Number.isFinite(numeric)
+    ? Math.max(200, Math.min(500000, Math.round(numeric)))
+    : MAX_PARSED_CHARS_PER_FILE;
+  if (normalized.length <= safeMax) return normalized;
+  const clipped = normalized.slice(0, safeMax);
   return `${clipped}\n...（内容过长，已截断）`;
 }
 
@@ -6603,11 +7750,14 @@ function extractResponsesWebSearchUsage(responseObj) {
     responseObj?.usage && typeof responseObj.usage === "object"
       ? responseObj.usage
       : {};
-  const webSearchCalls = extractNamedToolUsageCount(usage.tool_usage, "web_search");
-  const details = extractNamedToolUsageDetails(
-    usage.tool_usage_details,
-    "web_search",
+  const webSearchCalls = Math.max(
+    extractNamedToolUsageCount(usage.tool_usage, "web_search"),
+    extractNamedToolUsageCount(usage.x_tools, "web_search"),
   );
+  const details = {
+    ...extractNamedToolUsageDetails(usage.tool_usage_details, "web_search"),
+    ...extractNamedToolUsageDetails(usage.x_tools, "web_search"),
+  };
 
   return {
     webSearchCalls,
@@ -6851,7 +8001,7 @@ function getModelByAgent(agentId, runtimeConfig = null) {
     A: "doubao-seed-1-6-251015",
     B: "glm-4-7-251222",
     C: "deepseek-v3-2-251201",
-    D: "z-ai/glm-4.7-flash",
+    D: AGENT_D_FIXED_MODEL,
   };
 
   const targetAgent = sanitizeAgent(agentId);
@@ -6859,7 +8009,7 @@ function getModelByAgent(agentId, runtimeConfig = null) {
     A: process.env.AGENT_MODEL_A || defaults.A,
     B: process.env.AGENT_MODEL_B || defaults.B,
     C: process.env.AGENT_MODEL_C || defaults.C,
-    D: process.env.AGENT_MODEL_D || defaults.D,
+    D: defaults.D,
   };
 
   return sanitizeRuntimeModel(map[targetAgent] || map.A) || map.A;
@@ -6985,7 +8135,8 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     model || getModelByAgent(normalizedAgentId, { model: "" });
   const tokenProfile = resolveRuntimeTokenProfileByModel(modelForMatching);
   const tokenDefaults = tokenProfile || defaults;
-  const lockTokenFields = protocol === "responses";
+  const lockTokenFields = protocol === "responses" && provider === "volcengine";
+  const lockAliyunMaxOutput = provider === "aliyun";
   const creativityMode = sanitizeCreativityMode(source.creativityMode);
   const temperature = sanitizeRuntimeNumber(
     source.temperature,
@@ -7030,7 +8181,7 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     RUNTIME_MAX_INPUT_TOKENS,
   );
   const maxOutputTokens = sanitizeRuntimeInteger(
-    source.maxOutputTokens,
+    lockAliyunMaxOutput ? tokenDefaults.maxOutputTokens : source.maxOutputTokens,
     tokenDefaults.maxOutputTokens,
     64,
     RUNTIME_MAX_OUTPUT_TOKENS,
@@ -7091,6 +8242,62 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     source.webSearchSourceToutiao,
     defaults.webSearchSourceToutiao,
   );
+  const aliyunThinkingBudget =
+    provider === "aliyun"
+      ? 0
+      : sanitizeRuntimeInteger(
+          source.aliyunThinkingBudget,
+          defaults.aliyunThinkingBudget,
+          0,
+          RUNTIME_MAX_REASONING_TOKENS,
+        );
+  const aliyunSearchForced = sanitizeRuntimeBoolean(
+    source.aliyunSearchForced,
+    defaults.aliyunSearchForced,
+  );
+  const aliyunSearchStrategy = sanitizeAliyunSearchStrategy(
+    source.aliyunSearchStrategy,
+  );
+  const aliyunSearchEnableSource = sanitizeRuntimeBoolean(
+    source.aliyunSearchEnableSource,
+    defaults.aliyunSearchEnableSource,
+  );
+  const aliyunSearchEnableCitation = sanitizeRuntimeBoolean(
+    source.aliyunSearchEnableCitation,
+    defaults.aliyunSearchEnableCitation,
+  );
+  const aliyunSearchCitationFormat = sanitizeAliyunSearchCitationFormat(
+    source.aliyunSearchCitationFormat,
+  );
+  const aliyunSearchEnableSearchExtension = sanitizeRuntimeBoolean(
+    source.aliyunSearchEnableSearchExtension,
+    defaults.aliyunSearchEnableSearchExtension,
+  );
+  const aliyunSearchPrependSearchResult = sanitizeRuntimeBoolean(
+    source.aliyunSearchPrependSearchResult,
+    defaults.aliyunSearchPrependSearchResult,
+  );
+  const aliyunSearchFreshness = sanitizeAliyunSearchFreshness(
+    source.aliyunSearchFreshness,
+  );
+  const aliyunSearchAssignedSiteList = sanitizeAliyunAssignedSiteList(
+    source.aliyunSearchAssignedSiteList,
+    defaults.aliyunSearchAssignedSiteList,
+  );
+  const aliyunSearchPromptIntervene = sanitizeAliyunPromptIntervene(
+    source.aliyunSearchPromptIntervene,
+  );
+  const aliyunResponsesEnableWebExtractor = sanitizeRuntimeBoolean(
+    source.aliyunResponsesEnableWebExtractor,
+    defaults.aliyunResponsesEnableWebExtractor,
+  );
+  const aliyunResponsesEnableCodeInterpreter = sanitizeRuntimeBoolean(
+    source.aliyunResponsesEnableCodeInterpreter,
+    defaults.aliyunResponsesEnableCodeInterpreter,
+  );
+  const aliyunFileProcessMode = sanitizeAliyunFileProcessMode(
+    source.aliyunFileProcessMode,
+  );
   const openrouterPreset = sanitizeOpenRouterPreset(source.openrouterPreset);
   const openrouterIncludeReasoning = sanitizeRuntimeBoolean(
     source.openrouterIncludeReasoning,
@@ -7140,6 +8347,20 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     webSearchSourceDouyin,
     webSearchSourceMoji,
     webSearchSourceToutiao,
+    aliyunThinkingBudget,
+    aliyunSearchForced,
+    aliyunSearchStrategy,
+    aliyunSearchEnableSource,
+    aliyunSearchEnableCitation,
+    aliyunSearchCitationFormat,
+    aliyunSearchEnableSearchExtension,
+    aliyunSearchPrependSearchResult,
+    aliyunSearchFreshness,
+    aliyunSearchAssignedSiteList,
+    aliyunSearchPromptIntervene,
+    aliyunResponsesEnableWebExtractor,
+    aliyunResponsesEnableCodeInterpreter,
+    aliyunFileProcessMode,
     openrouterPreset,
     openrouterIncludeReasoning,
     openrouterUseWebPlugin,
@@ -7152,6 +8373,53 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
   if (isVolcengineFixedSamplingModel(modelForMatching)) {
     next.temperature = VOLCENGINE_FIXED_TEMPERATURE;
     next.topP = VOLCENGINE_FIXED_TOP_P;
+  }
+
+  if (provider === "aliyun") {
+    const policy = resolveAliyunModelPolicy(modelForMatching);
+    if (policy.forceProtocol) {
+      next.protocol = policy.forceProtocol;
+    }
+    if (policy.fixedSampling) {
+      next.temperature = sanitizeRuntimeNumber(
+        policy.fixedSampling.temperature,
+        next.temperature,
+        0,
+        2,
+      );
+      next.topP = sanitizeRuntimeNumber(policy.fixedSampling.topP, next.topP, 0, 1);
+    }
+    if (!policy.allowWebSearch) {
+      next.enableWebSearch = false;
+      next.aliyunSearchForced = false;
+      next.aliyunSearchEnableSource = false;
+      next.aliyunSearchEnableCitation = false;
+      next.aliyunSearchEnableSearchExtension = false;
+      next.aliyunSearchPrependSearchResult = false;
+      next.aliyunResponsesEnableWebExtractor = false;
+      next.aliyunResponsesEnableCodeInterpreter = false;
+    }
+  }
+
+  if (normalizedAgentId === "D") {
+    const sourceProvider = sanitizeRuntimeProvider(source.provider);
+    const sourceModel = sanitizeRuntimeModel(source.model).toLowerCase();
+    const shouldApplyBootDefaults =
+      sourceProvider !== AGENT_D_FIXED_PROVIDER || sourceModel !== AGENT_D_FIXED_MODEL;
+
+    next.provider = AGENT_D_FIXED_PROVIDER;
+    next.model = AGENT_D_FIXED_MODEL;
+    next.includeCurrentTime = true;
+    next.maxOutputTokens = AGENT_D_FIXED_MAX_OUTPUT_TOKENS;
+    next.aliyunSearchEnableSource = false;
+
+    if (shouldApplyBootDefaults) {
+      next.protocol = "responses";
+      next.enableWebSearch = true;
+      next.aliyunSearchEnableSearchExtension = true;
+      next.aliyunResponsesEnableWebExtractor = true;
+      next.aliyunResponsesEnableCodeInterpreter = true;
+    }
   }
 
   return next;
@@ -7198,6 +8466,32 @@ function normalizeRuntimeConfigFromPreset(runtimeConfig, agentId = "A") {
     next.topP = VOLCENGINE_FIXED_TOP_P;
   }
 
+  if (config.provider === "aliyun") {
+    const policy = resolveAliyunModelPolicy(modelForMatching);
+    if (policy.forceProtocol) {
+      next.protocol = policy.forceProtocol;
+    }
+    if (policy.fixedSampling) {
+      next.temperature = sanitizeRuntimeNumber(
+        policy.fixedSampling.temperature,
+        next.temperature,
+        0,
+        2,
+      );
+      next.topP = sanitizeRuntimeNumber(policy.fixedSampling.topP, next.topP, 0, 1);
+    }
+    if (!policy.allowWebSearch) {
+      next.enableWebSearch = false;
+      next.aliyunSearchForced = false;
+      next.aliyunSearchEnableSource = false;
+      next.aliyunSearchEnableCitation = false;
+      next.aliyunSearchEnableSearchExtension = false;
+      next.aliyunSearchPrependSearchResult = false;
+      next.aliyunResponsesEnableWebExtractor = false;
+      next.aliyunResponsesEnableCodeInterpreter = false;
+    }
+  }
+
   return next;
 }
 
@@ -7216,6 +8510,7 @@ function sanitizeRuntimeProtocol(value) {
     .trim()
     .toLowerCase();
   if (key === "responses" || key === "response") return "responses";
+  if (key === "dashscope" || key === "native") return "dashscope";
   return "chat";
 }
 
@@ -7259,6 +8554,74 @@ function sanitizeOpenRouterPdfEngine(value) {
     .toLowerCase();
   if (key === "pdf-text" || key === "mistral-ocr" || key === "native") return key;
   return "auto";
+}
+
+function sanitizeAliyunSearchStrategy(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (ALIYUN_SEARCH_STRATEGIES.includes(key)) return key;
+  return DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchStrategy;
+}
+
+function sanitizeAliyunSearchCitationFormat(value) {
+  const text = String(value || "").trim();
+  if (ALIYUN_SEARCH_CITATION_FORMATS.includes(text)) return text;
+  return DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchCitationFormat;
+}
+
+function sanitizeAliyunSearchFreshness(value) {
+  const num = sanitizeRuntimeInteger(value, 0, 0, 365);
+  if (ALIYUN_SEARCH_FRESHNESS_OPTIONS.includes(num)) return num;
+  return DEFAULT_AGENT_RUNTIME_CONFIG.aliyunSearchFreshness;
+}
+
+function sanitizeAliyunAssignedSiteList(value, fallback = []) {
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[\n,]/)
+      : Array.isArray(fallback)
+        ? fallback
+        : [];
+  const uniq = new Set();
+  const list = [];
+  source.slice(0, 80).forEach((item) => {
+    const normalized = normalizeAliyunAssignedSite(item);
+    if (!normalized) return;
+    if (uniq.has(normalized)) return;
+    uniq.add(normalized);
+    list.push(normalized);
+  });
+  return list.slice(0, 25);
+}
+
+function normalizeAliyunAssignedSite(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+  if (!raw) return "";
+  if (!raw.includes(".")) return "";
+  if (!/^[a-z0-9.-]+$/.test(raw)) return "";
+  return raw.slice(0, 120);
+}
+
+function sanitizeAliyunPromptIntervene(value) {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .trim()
+    .slice(0, 240);
+}
+
+function sanitizeAliyunFileProcessMode(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "native_oss_url" || key === "native") return "native_oss_url";
+  return "local_parse";
 }
 
 function sanitizeEnableThinking(value) {
@@ -7362,14 +8725,14 @@ function getProviderByAgent(agentId, runtimeConfig = null) {
     A: "volcengine",
     B: "volcengine",
     C: "volcengine",
-    D: "openrouter",
+    D: AGENT_D_FIXED_PROVIDER,
   };
   const targetAgent = sanitizeAgent(agentId);
   const map = {
     A: process.env.AGENT_PROVIDER_A || defaults.A,
     B: process.env.AGENT_PROVIDER_B || defaults.B,
     C: process.env.AGENT_PROVIDER_C || defaults.C,
-    D: process.env.AGENT_PROVIDER_D || defaults.D,
+    D: defaults.D,
   };
   return normalizeProvider(map[targetAgent] || map.A);
 }
@@ -7411,7 +8774,6 @@ function modelRequiresReasoning(model) {
 }
 
 function providerSupportsReasoning(provider) {
-  if (provider === "aliyun") return false;
   return true;
 }
 
@@ -7429,15 +8791,10 @@ function normalizeProvider(value) {
 
 function getProviderConfig(provider) {
   if (provider === "aliyun") {
-    return {
-      chatEndpoint:
-        process.env.ALIYUN_CHAT_ENDPOINT ||
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-      responsesEndpoint: "",
+    return buildAliyunProviderConfig({
+      env: process.env,
       apiKey: readEnvApiKey("ALIYUN_API_KEY", "DASHSCOPE_API_KEY"),
-      missingKeyMessage:
-        "未检测到阿里云 API Key。请在 .env 中配置 ALIYUN_API_KEY（或 DASHSCOPE_API_KEY）。",
-    };
+    });
   }
 
   if (provider === "volcengine") {
@@ -7493,6 +8850,13 @@ function isPlaceholderApiKey(value) {
 }
 
 function buildProviderHeaders(provider, apiKey, protocol = "chat") {
+  if (provider === "aliyun") {
+    return buildAliyunHeaders({
+      apiKey,
+      protocol,
+    });
+  }
+
   const headers = {
     Authorization: `Bearer ${apiKey}`,
     "Content-Type": "application/json",
@@ -7509,6 +8873,102 @@ function buildProviderHeaders(provider, apiKey, protocol = "chat") {
   }
 
   return headers;
+}
+
+function extractRequestFailureCode(error) {
+  const cause = error?.cause && typeof error.cause === "object" ? error.cause : null;
+  const code = sanitizeText(cause?.code || error?.code, "", 80)
+    .trim()
+    .toUpperCase();
+  if (code) return code;
+  const causeName = sanitizeText(cause?.name, "", 80)
+    .trim()
+    .toLowerCase();
+  if (causeName.includes("timeout")) return "TIMEOUT";
+  return "";
+}
+
+function isRetryableRequestFailure(error) {
+  const code = extractRequestFailureCode(error);
+  return (
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "UND_ERR_HEADERS_TIMEOUT" ||
+    code === "UND_ERR_SOCKET"
+  );
+}
+
+function formatProviderRequestFailure(provider, protocol, endpoint, error) {
+  const safeProvider = sanitizeText(provider, "upstream", 60);
+  const safeProtocol = sanitizeText(protocol, "chat", 40);
+  const baseMessage = sanitizeText(error?.message, "fetch failed", 300);
+  const cause = error?.cause && typeof error.cause === "object" ? error.cause : null;
+  const causeMessage = sanitizeText(cause?.message, "", 400);
+  const code = extractRequestFailureCode(error);
+
+  let endpointHost = "";
+  try {
+    endpointHost = new URL(String(endpoint || "")).host;
+  } catch {
+    endpointHost = "";
+  }
+
+  if (safeProvider === "aliyun" && safeProtocol === "dashscope") {
+    if (code === "ENOTFOUND") {
+      return `aliyun/dashscope request failed: 无法解析域名${endpointHost ? `（${endpointHost}）` : ""}，请检查本机 DNS / 网络。`;
+    }
+    if (
+      code === "ETIMEDOUT" ||
+      code === "UND_ERR_CONNECT_TIMEOUT" ||
+      code === "UND_ERR_HEADERS_TIMEOUT" ||
+      code === "TIMEOUT"
+    ) {
+      return `aliyun/dashscope request failed: 连接超时${endpointHost ? `（${endpointHost}）` : ""}，请稍后重试。`;
+    }
+    if (code === "ECONNRESET" || code === "UND_ERR_SOCKET") {
+      return `aliyun/dashscope request failed: 连接被重置${endpointHost ? `（${endpointHost}）` : ""}，请重试。`;
+    }
+    if (code === "ECONNREFUSED") {
+      return `aliyun/dashscope request failed: 目标拒绝连接${endpointHost ? `（${endpointHost}）` : ""}。`;
+    }
+  }
+
+  const details = [];
+  if (endpointHost) details.push(`host=${endpointHost}`);
+  if (code) details.push(`code=${code}`);
+  if (causeMessage) details.push(`cause=${causeMessage}`);
+  const detailText = details.length > 0 ? ` (${details.join("; ")})` : "";
+  return `${safeProvider}/${safeProtocol} request failed: ${baseMessage}${detailText}`;
+}
+
+async function sendProviderRequestWithRetry({
+  endpoint,
+  headers,
+  body,
+  provider,
+  protocol,
+}) {
+  const maxAttempts = provider === "aliyun" && protocol === "dashscope" ? 2 : 1;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body,
+      });
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts || !isRetryableRequestFailure(error)) {
+        throw error;
+      }
+      await sleepMs(250 * attempt);
+    }
+  }
+
+  throw lastError || new Error("request failed");
 }
 
 function formatProviderUpstreamError(provider, protocol, status, detail) {
@@ -7546,6 +9006,15 @@ function formatProviderUpstreamError(provider, protocol, status, detail) {
       param: errorParam,
     });
     if (volcengineMapped) return volcengineMapped;
+  }
+
+  if (provider === "aliyun") {
+    return formatAliyunUpstreamError({
+      status,
+      code: errorCode,
+      message: errorMessage,
+      raw,
+    });
   }
 
   return `${provider}/${protocol} error (${status}): ${errorMessage || raw || "unknown error"}`;
@@ -7752,6 +9221,7 @@ function defaultChatState() {
     },
     settings: {
       agent: "A",
+      agentBySession: {},
       apiTemperature: 0.6,
       apiTopP: 1,
       apiReasoningEffort: "high",
@@ -7859,9 +9329,26 @@ function sanitizeSmartContextEnabledBySessionAgent(raw) {
   return normalized;
 }
 
+function sanitizeAgentBySession(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const normalized = {};
+
+  Object.entries(source)
+    .slice(0, 1200)
+    .forEach(([rawSessionId, rawAgentId]) => {
+      const sessionId = sanitizeId(rawSessionId, "");
+      const agentId = sanitizeSmartContextMapAgentId(rawAgentId);
+      if (!sessionId || !agentId) return;
+      normalized[sessionId] = agentId;
+    });
+
+  return normalized;
+}
+
 function sanitizeStateSettings(raw) {
   const source = raw && typeof raw === "object" ? raw : {};
   const agent = sanitizeAgent(source.agent);
+  const agentBySession = sanitizeAgentBySession(source.agentBySession);
   const apiTemperature = sanitizeNumber(source.apiTemperature, 0.6, 0, 2);
   const apiTopP = sanitizeNumber(source.apiTopP, 1, 0, 1);
   const apiReasoningEffort = sanitizeReasoning(source.apiReasoningEffort, "high");
@@ -7873,6 +9360,7 @@ function sanitizeStateSettings(raw) {
 
   return {
     agent,
+    agentBySession,
     apiTemperature,
     apiTopP,
     apiReasoningEffort,
@@ -10254,6 +11742,19 @@ function broadcastGroupChatMemberJoined(roomId, user) {
 async function startServer() {
   await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 6000 });
   console.log(`Mongo connected: ${mongoUri}`);
+
+  const server = http.createServer(app);
+  initGroupChatWebSocketServer(server);
+
+  server.listen(port, () => {
+    console.log(`API server listening on http://localhost:${port}`);
+    console.log(`Group chat websocket listening on ws://localhost:${port}${GROUP_CHAT_WS_PATH}`);
+  });
+
+  void runStartupMaintenanceTasks();
+}
+
+async function runStartupMaintenanceTasks() {
   await ensureUploadedFileContextIndexes().catch((error) => {
     console.warn(
       "Failed to ensure uploaded file context indexes:",
@@ -10293,14 +11794,6 @@ async function startServer() {
   });
   startGroupChatExpiredFileCleanupTask();
   startGeneratedImageExpiredCleanupTask();
-
-  const server = http.createServer(app);
-  initGroupChatWebSocketServer(server);
-
-  server.listen(port, () => {
-    console.log(`API server listening on http://localhost:${port}`);
-    console.log(`Group chat websocket listening on ws://localhost:${port}${GROUP_CHAT_WS_PATH}`);
-  });
 }
 
 async function ensureUploadedFileContextIndexes() {

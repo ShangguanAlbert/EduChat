@@ -31,12 +31,15 @@ import {
 import { clearAdminToken, getAdminToken } from "./login/adminSession.js";
 import {
   AGENT_IDS,
+  ALIYUN_MINIMAX_FIXED_TOP_P,
+  ALIYUN_MINIMAX_FIXED_TEMPERATURE,
   DEFAULT_AGENT_RUNTIME_CONFIG,
   VOLCENGINE_FIXED_SAMPLING_MODEL_ID,
   VOLCENGINE_FIXED_TOP_P,
   VOLCENGINE_FIXED_TEMPERATURE,
   createDefaultAgentRuntimeConfigMap,
   isVolcengineFixedSamplingModel,
+  resolveAliyunModelPolicyForRuntime,
   resolveRuntimeTokenProfileByModel,
   sanitizeRuntimeConfigMap,
   sanitizeSingleRuntimeConfig,
@@ -61,13 +64,56 @@ const AGENT_E_LOCKED_RUNTIME_FIELDS = new Set([
   "topP",
   "maxOutputTokens",
 ]);
+const AGENT_D_LOCKED_RUNTIME_FIELDS = new Set([
+  "provider",
+  "model",
+  "includeCurrentTime",
+  "maxOutputTokens",
+]);
 const OPENROUTER_PDF_ENGINE_OPTIONS = [
   { value: "auto", label: "自动（默认）" },
   { value: "pdf-text", label: "pdf-text（免费）" },
   { value: "mistral-ocr", label: "mistral-ocr（OCR）" },
   { value: "native", label: "native（模型原生）" },
 ];
+const ALIYUN_PROTOCOL_OPTIONS = [
+  { value: "chat", label: "聊天接口" },
+  { value: "responses", label: "回应接口" },
+  { value: "dashscope", label: "DashScope 原生接口" },
+];
+const ALIYUN_FILE_PROCESS_MODE_OPTIONS = [
+  { value: "local_parse", label: "本地解析（兼容模式）" },
+  { value: "native_oss_url", label: "原生文件 URL（调试模式）" },
+];
+const ALIYUN_SEARCH_STRATEGY_OPTIONS = [
+  { value: "turbo", label: "极速（默认）" },
+  { value: "max", label: "高召回" },
+  { value: "agent", label: "多轮检索" },
+  { value: "agent_max", label: "多轮检索（含网页抓取）" },
+];
+const ALIYUN_SEARCH_CITATION_FORMAT_OPTIONS = [
+  { value: "[<number>]", label: "[1]" },
+  { value: "[ref_<number>]", label: "[参考1]" },
+];
+const ALIYUN_SEARCH_FRESHNESS_OPTIONS = [
+  { value: 0, label: "不限时效（默认）" },
+  { value: 7, label: "最近 7 天" },
+  { value: 30, label: "最近 30 天" },
+  { value: 180, label: "最近 180 天" },
+  { value: 365, label: "最近 365 天" },
+];
 const DEBUG_VIDEO_EXTENSIONS = new Set(["mp4", "avi", "mov"]);
+const DEBUG_IMAGE_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+  "svg",
+  "heic",
+  "avif",
+]);
 const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = [
   {
     id: "doubao-seed-1-8-251228",
@@ -117,7 +163,7 @@ function createDefaultAgentProviderMap() {
     A: "volcengine",
     B: "volcengine",
     C: "volcengine",
-    D: "openrouter",
+    D: "aliyun",
   };
 }
 
@@ -126,7 +172,7 @@ function createDefaultAgentModelMap() {
     A: "doubao-seed-1-6-251015",
     B: "glm-4-7-251222",
     C: "deepseek-v3-2-251201",
-    D: "z-ai/glm-4.7-flash",
+    D: "qwen3.5-plus",
   };
 }
 
@@ -142,6 +188,7 @@ function sanitizeAgentProviderMap(raw) {
       next[agentId] = key;
     }
   });
+  next.D = "aliyun";
   return next;
 }
 
@@ -153,6 +200,7 @@ function sanitizeAgentModelMap(raw) {
       .trim()
       .slice(0, 180);
   });
+  next.D = "qwen3.5-plus";
   return next;
 }
 
@@ -302,6 +350,19 @@ function resolveVolcengineWebSearchCapability(model) {
     supportsThinking: !!best.item.supportsThinking,
     matchedModelId: best.item.id,
   };
+}
+
+function isLikelyImageFile(file) {
+  const mime = String(file?.type || "")
+    .trim()
+    .toLowerCase();
+  if (mime.startsWith("image/")) return true;
+  const name = String(file?.name || "")
+    .trim()
+    .toLowerCase();
+  if (!name.includes(".")) return false;
+  const ext = name.split(".").pop();
+  return DEBUG_IMAGE_EXTENSIONS.has(ext);
 }
 
 function toPreviewMessages(list) {
@@ -695,14 +756,54 @@ export default function AdminSettingsPage() {
         : "OpenRouter";
   const showVolcenginePanel = selectedProvider === "volcengine";
   const showOpenRouterPanel = selectedProvider === "openrouter";
-  const providerSupportsReasoning = selectedProvider !== "aliyun";
-  const providerReasoningHint = providerSupportsReasoning
-    ? "当前服务商支持深度思考开关：关闭=none，开启=high。"
-    : "阿里云当前仅使用 Chat 协议，不支持深度思考参数。";
+  const showAliyunPanel = selectedProvider === "aliyun";
+  const providerSupportsReasoning = true;
+  const providerReasoningHint = "当前服务商支持深度思考开关：关闭=none，开启=high。";
+  const aliyunProtocol = useMemo(() => {
+    const key = String(selectedRuntime.protocol || "")
+      .trim()
+      .toLowerCase();
+    if (key === "responses") return "responses";
+    if (key === "dashscope") return "dashscope";
+    return "chat";
+  }, [selectedRuntime.protocol]);
   const selectedModelDefault = agentModelDefaults[selectedAgent] || "";
   const selectedModelForMatching = String(
     selectedRuntime.model || selectedModelDefault || "",
   ).trim();
+  const aliyunModelPolicy = useMemo(
+    () => resolveAliyunModelPolicyForRuntime(selectedModelForMatching),
+    [selectedModelForMatching],
+  );
+  const aliyunModelUnsupported = showAliyunPanel && !aliyunModelPolicy.supported;
+  const aliyunProtocolOptions = useMemo(() => {
+    if (!showAliyunPanel || !aliyunModelPolicy.forceProtocol) {
+      return ALIYUN_PROTOCOL_OPTIONS;
+    }
+    return ALIYUN_PROTOCOL_OPTIONS.filter(
+      (item) => item.value === aliyunModelPolicy.forceProtocol,
+    );
+  }, [showAliyunPanel, aliyunModelPolicy.forceProtocol]);
+  const aliyunProtocolLocked = showAliyunPanel && !!aliyunModelPolicy.forceProtocol;
+  const aliyunExpectedProtocol =
+    showAliyunPanel && aliyunModelPolicy.forceProtocol
+      ? aliyunModelPolicy.forceProtocol
+      : aliyunProtocol;
+  const aliyunWebSearchAllowed =
+    !showAliyunPanel || !!aliyunModelPolicy.allowWebSearch;
+  const aliyunSamplingFixed = showAliyunPanel && !!aliyunModelPolicy.fixedSampling;
+  const aliyunSearchDisabled =
+    loading || !selectedRuntime.enableWebSearch || !aliyunWebSearchAllowed;
+  const aliyunDashscopeSearchOnlyDisabled = loading || aliyunProtocol !== "dashscope";
+  const aliyunFileProcessModeDisabled =
+    loading || aliyunModelUnsupported || aliyunProtocol !== "dashscope";
+  const aliyunAssignedSiteListText = useMemo(
+    () =>
+      Array.isArray(selectedRuntime.aliyunSearchAssignedSiteList)
+        ? selectedRuntime.aliyunSearchAssignedSiteList.join("\n")
+        : "",
+    [selectedRuntime.aliyunSearchAssignedSiteList],
+  );
   const samplingLockedByModel = useMemo(
     () => isVolcengineFixedSamplingModel(selectedModelForMatching),
     [selectedModelForMatching],
@@ -745,6 +846,7 @@ export default function AdminSettingsPage() {
         : "该模型不支持深度思考联动，联网搜索将按默认模式直接调用。";
 
   const isAgentESelected = selectedAgent === "E";
+  const isAgentDSelected = selectedAgent === "D";
   const isCoreAgentSelected = AGENT_IDS.includes(selectedAgent);
   const selectedPrompt = isAgentESelected ? "" : prompts[selectedAgent] || "";
   const selectedAgentName = AGENT_META[selectedAgent]?.name || `智能体 ${selectedAgent}`;
@@ -979,7 +1081,14 @@ export default function AdminSettingsPage() {
 
   useEffect(() => {
     if (!isCoreAgentSelected) return;
-    const expectedProtocol = showVolcenginePanel ? "responses" : "chat";
+    let expectedProtocol = "chat";
+    if (showVolcenginePanel) {
+      expectedProtocol = "responses";
+    } else if (showAliyunPanel) {
+      expectedProtocol = aliyunExpectedProtocol;
+    } else if (showOpenRouterPanel) {
+      expectedProtocol = "chat";
+    }
     if (selectedRuntime.protocol === expectedProtocol) return;
 
     setRuntimeConfigs((prev) => {
@@ -996,9 +1105,12 @@ export default function AdminSettingsPage() {
     markDirty();
   }, [
     isCoreAgentSelected,
+    aliyunExpectedProtocol,
     markDirty,
     selectedAgent,
     selectedRuntime.protocol,
+    showAliyunPanel,
+    showOpenRouterPanel,
     showVolcenginePanel,
   ]);
 
@@ -1029,6 +1141,73 @@ export default function AdminSettingsPage() {
     webSearchSupported,
   ]);
 
+  useEffect(() => {
+    if (!isCoreAgentSelected) return;
+    if (!showAliyunPanel) return;
+    if (aliyunWebSearchAllowed) return;
+    if (!selectedRuntime.enableWebSearch) return;
+
+    setRuntimeConfigs((prev) => {
+      const current = prev[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+      if (!current.enableWebSearch) return prev;
+      return {
+        ...prev,
+        [selectedAgent]: sanitizeSingleRuntimeConfig({
+          ...current,
+          enableWebSearch: false,
+        }, selectedAgent),
+      };
+    });
+    markDirty();
+  }, [
+    aliyunWebSearchAllowed,
+    isCoreAgentSelected,
+    markDirty,
+    selectedAgent,
+    selectedRuntime.enableWebSearch,
+    showAliyunPanel,
+  ]);
+
+  useEffect(() => {
+    if (!isCoreAgentSelected) return;
+    if (!showAliyunPanel) return;
+    if (!aliyunSamplingFixed) return;
+    const targetTemperature = Number(
+      aliyunModelPolicy.fixedSampling?.temperature ?? ALIYUN_MINIMAX_FIXED_TEMPERATURE,
+    );
+    const targetTopP = Number(
+      aliyunModelPolicy.fixedSampling?.topP ?? ALIYUN_MINIMAX_FIXED_TOP_P,
+    );
+    const temperatureChanged =
+      Math.abs(Number(selectedRuntime.temperature) - targetTemperature) > 1e-6;
+    const topPChanged = Math.abs(Number(selectedRuntime.topP) - targetTopP) > 1e-6;
+    if (!temperatureChanged && !topPChanged) return;
+
+    setRuntimeConfigs((prev) => {
+      const current = prev[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+      const next = sanitizeSingleRuntimeConfig({
+        ...current,
+        temperature: targetTemperature,
+        topP: targetTopP,
+      }, selectedAgent);
+      return {
+        ...prev,
+        [selectedAgent]: next,
+      };
+    });
+    markDirty();
+  }, [
+    aliyunModelPolicy.fixedSampling?.temperature,
+    aliyunModelPolicy.fixedSampling?.topP,
+    aliyunSamplingFixed,
+    isCoreAgentSelected,
+    markDirty,
+    selectedAgent,
+    selectedRuntime.temperature,
+    selectedRuntime.topP,
+    showAliyunPanel,
+  ]);
+
   function updatePrompt(value) {
     if (!isCoreAgentSelected) return;
     setPrompts((prev) => ({
@@ -1040,6 +1219,7 @@ export default function AdminSettingsPage() {
 
   function updateRuntimeField(field, value) {
     if (!isCoreAgentSelected) return;
+    if (selectedAgent === "D" && AGENT_D_LOCKED_RUNTIME_FIELDS.has(field)) return;
     setRuntimeConfigs((prev) => {
       const current = prev[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
       const modelForMatching = String(
@@ -1363,6 +1543,13 @@ export default function AdminSettingsPage() {
     const safePicked = Array.isArray(pickedFiles) ? pickedFiles.filter(Boolean) : [];
     if (safePicked.length === 0) return [];
 
+    if (showAliyunPanel && !aliyunModelPolicy.allowImageInput) {
+      const hasImage = safePicked.some((file) => isLikelyImageFile(file));
+      if (hasImage) {
+        throw new Error("当前阿里云 MiniMax 模型不支持图片输入，请仅发送文本内容。");
+      }
+    }
+
     const agentId = selectedAgent;
     const runtimeConfig = resolveDebugRuntimeConfig(agentId);
     if (!shouldUseDebugVolcengineFilesApi(agentId, runtimeConfig)) {
@@ -1427,6 +1614,10 @@ export default function AdminSettingsPage() {
     if (!adminToken || debugLoading) return;
     const agentId = selectedAgent;
     const runtimeConfig = resolveDebugRuntimeConfig(agentId);
+    if (showAliyunPanel && !aliyunModelPolicy.supported) {
+      setDebugError(aliyunModelPolicy.errorMessage || "当前阿里云模型不受支持。");
+      return;
+    }
     const content = String(text || "").trim();
     const safeFiles = Array.isArray(files) ? files.filter(Boolean) : [];
     const { localFiles, volcengineFileRefs, attachments } = splitDebugFileItems(safeFiles);
@@ -1568,6 +1759,10 @@ export default function AdminSettingsPage() {
 
   async function onDebugAssistantRegenerate(assistantMessageId, promptMessageId) {
     if (!adminToken || debugLoading || !assistantMessageId || !promptMessageId) return;
+    if (showAliyunPanel && !aliyunModelPolicy.supported) {
+      setDebugError(aliyunModelPolicy.errorMessage || "当前阿里云模型不受支持。");
+      return;
+    }
 
     const agentId = selectedAgent;
     const runtimeConfig = resolveDebugRuntimeConfig(agentId);
@@ -1826,7 +2021,7 @@ export default function AdminSettingsPage() {
                     </label>
                   </div>
 
-                  <label className="admin-field-row" htmlFor="admin-agent-e-model">
+                  <label className="admin-field-row model-id" htmlFor="admin-agent-e-model">
                     <span>模型 ID</span>
                     <input
                       id="admin-agent-e-model"
@@ -2104,7 +2299,11 @@ export default function AdminSettingsPage() {
                   <MessageInput
                     onSend={onDebugSend}
                     onPrepareFiles={onDebugPrepareFiles}
-                    disabled={debugLoading || loading}
+                    disabled={
+                      debugLoading ||
+                      loading ||
+                      (showAliyunPanel && !aliyunModelPolicy.supported)
+                    }
                   />
                 </div>
                 {debugError ? (
@@ -2169,11 +2368,11 @@ export default function AdminSettingsPage() {
                   value={selectedProvider}
                   options={PROVIDER_OPTIONS}
                   onChange={(next) => updateRuntimeField("provider", next)}
-                  disabled={loading}
+                  disabled={loading || isAgentDSelected}
                 />
               </div>
 
-              <label className="admin-field-row" htmlFor="admin-runtime-model">
+              <label className="admin-field-row model-id" htmlFor="admin-runtime-model">
                 <span>模型 ID</span>
                 <input
                   id="admin-runtime-model"
@@ -2185,14 +2384,14 @@ export default function AdminSettingsPage() {
                       ? `留空则使用默认模型：${selectedModelDefault}`
                       : "留空则走 .env 里对应 AGENT_MODEL_*"
                   }
-                  disabled={loading}
+                  disabled={loading || isAgentDSelected}
                 />
               </label>
               {showVolcenginePanel ? (
                 <p className="admin-field-note">
                   {`已自动匹配长度限制：最大输出 ${volcMatchedMaxOutputText}。`}
                 </p>
-              ) : !showOpenRouterPanel ? (
+              ) : !showOpenRouterPanel && !showAliyunPanel ? (
                 matchedTokenProfile ? (
                   <p className="admin-field-note">
                     {`已自动匹配长度限制：上下文 ${matchedTokenProfile.contextWindowTokens}，最大输入 ${matchedTokenProfile.maxInputTokens}，最大输出 ${matchedTokenProfile.maxOutputTokens}。`}
@@ -2203,9 +2402,19 @@ export default function AdminSettingsPage() {
                   </p>
                 )
               ) : null}
-              {showOpenRouterPanel ? (
+                  {showOpenRouterPanel ? (
+                    <p className="admin-field-note">
+                      Openrouter api仅支持最大输出（max_tokens）配置。
+                    </p>
+                  ) : showAliyunPanel ? (
                 <p className="admin-field-note">
-                  Openrouter api仅支持最大输出（max_tokens）配置。
+                  {aliyunModelUnsupported
+                    ? "当前阿里云模型不受支持，请更换模型后再调用。"
+                    : aliyunProtocolLocked
+                      ? `当前模型调用方式固定为 ${
+                          aliyunProtocolOptions[0]?.label || "指定协议"
+                        }。`
+                      : "阿里云支持聊天接口、回应接口、DashScope 原生接口三种调用方式，最大输出固定使用模型默认值。"}
                 </p>
               ) : !showVolcenginePanel ? (
                 <p className="admin-field-note">
@@ -2276,23 +2485,25 @@ export default function AdminSettingsPage() {
                     />
                   </label>
 
-                  <div className="admin-field-row split">
-                    <span className="admin-label-with-hint">
-                      注入系统时间
-                      <InfoHint text="开启后，每次会话都会在系统提示词中注入当前日期（年月日）。" />
-                    </span>
-                    <label className="admin-switch-row">
-                      <input
-                        type="checkbox"
-                        checked={!!selectedRuntime.includeCurrentTime}
-                        onChange={(e) =>
-                          updateRuntimeField("includeCurrentTime", e.target.checked)
-                        }
-                        disabled={loading}
-                      />
-                      <span>{selectedRuntime.includeCurrentTime ? "开启" : "关闭"}</span>
-                    </label>
-                  </div>
+                  {!isAgentDSelected ? (
+                    <div className="admin-field-row split">
+                      <span className="admin-label-with-hint">
+                        注入系统时间
+                        <InfoHint text="开启后，每次会话都会在系统提示词中注入当前日期（年月日）。" />
+                      </span>
+                      <label className="admin-switch-row">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedRuntime.includeCurrentTime}
+                          onChange={(e) =>
+                            updateRuntimeField("includeCurrentTime", e.target.checked)
+                          }
+                          disabled={loading}
+                        />
+                        <span>{selectedRuntime.includeCurrentTime ? "开启" : "关闭"}</span>
+                      </label>
+                    </div>
+                  ) : null}
 
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
@@ -2439,31 +2650,40 @@ export default function AdminSettingsPage() {
                 </>
               ) : (
                 <>
-                  <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
-                    <span>生成随机性</span>
-                    <NumberRuntimeInput
-                      id="admin-runtime-temperature"
-                      value={selectedRuntime.temperature}
-                      min={0}
-                      max={2}
-                      step={0.1}
-                      onChange={(next) => updateRuntimeField("temperature", next)}
-                      disabled={loading || samplingLockedByModel}
-                    />
-                  </label>
+                  {!aliyunSamplingFixed ? (
+                    <>
+                      <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
+                        <span>生成随机性</span>
+                        <NumberRuntimeInput
+                          id="admin-runtime-temperature"
+                          value={selectedRuntime.temperature}
+                          min={0}
+                          max={2}
+                          step={0.1}
+                          onChange={(next) => updateRuntimeField("temperature", next)}
+                          disabled={loading || samplingLockedByModel}
+                        />
+                      </label>
 
-                  <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
-                    <span>累计概率</span>
-                    <NumberRuntimeInput
-                      id="admin-runtime-top-p"
-                      value={selectedRuntime.topP}
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      onChange={(next) => updateRuntimeField("topP", next)}
-                      disabled={loading || samplingLockedByModel}
-                    />
-                  </label>
+                      <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
+                        <span>累计概率</span>
+                        <NumberRuntimeInput
+                          id="admin-runtime-top-p"
+                          value={selectedRuntime.topP}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          onChange={(next) => updateRuntimeField("topP", next)}
+                          disabled={loading || samplingLockedByModel}
+                        />
+                      </label>
+                    </>
+                  ) : (
+                    <p className="admin-field-note">
+                      当前模型采样参数固定：temperature = {ALIYUN_MINIMAX_FIXED_TEMPERATURE}、
+                      top_p = {ALIYUN_MINIMAX_FIXED_TOP_P}。
+                    </p>
+                  )}
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
                     <span>上下文轮数</span>
@@ -2478,23 +2698,62 @@ export default function AdminSettingsPage() {
                     />
                   </label>
 
-                  <div className="admin-field-row split">
-                    <span className="admin-label-with-hint">
-                      注入系统时间
-                      <InfoHint text="开启后，每次会话都会在系统提示词中注入当前日期（年月日）。" />
-                    </span>
-                    <label className="admin-switch-row">
-                      <input
-                        type="checkbox"
-                        checked={!!selectedRuntime.includeCurrentTime}
-                        onChange={(e) =>
-                          updateRuntimeField("includeCurrentTime", e.target.checked)
-                        }
-                        disabled={loading}
+                  {showAliyunPanel ? (
+                    <div className="admin-field-row split">
+                      <span className="admin-label-with-hint">
+                        阿里云调用方式
+                        <InfoHint
+                          text={
+                            aliyunProtocolLocked
+                              ? "当前模型仅支持一种调用协议，已自动锁定。"
+                              : "支持 OpenAI Chat、OpenAI Responses 和 DashScope 原生接口。"
+                          }
+                        />
+                      </span>
+                      <AdminPortalSelect
+                        value={aliyunProtocol}
+                        options={aliyunProtocolOptions}
+                        onChange={(next) => updateRuntimeField("protocol", next)}
+                        disabled={loading || aliyunProtocolLocked || aliyunModelUnsupported}
+                        compact
                       />
-                      <span>{selectedRuntime.includeCurrentTime ? "开启" : "关闭"}</span>
-                    </label>
-                  </div>
+                    </div>
+                  ) : null}
+                  {showAliyunPanel ? (
+                    <div className="admin-field-row split">
+                      <span className="admin-label-with-hint">
+                        文件处理模式
+                        <InfoHint text="仅 DashScope 原生接口生效。兼容模式会先本地解析再注入文本；调试模式会优先下发 OSS 文件 URL。" />
+                      </span>
+                      <AdminPortalSelect
+                        value={selectedRuntime.aliyunFileProcessMode}
+                        options={ALIYUN_FILE_PROCESS_MODE_OPTIONS}
+                        onChange={(next) => updateRuntimeField("aliyunFileProcessMode", next)}
+                        disabled={aliyunFileProcessModeDisabled}
+                        compact
+                      />
+                    </div>
+                  ) : null}
+
+                  {!isAgentDSelected ? (
+                    <div className="admin-field-row split">
+                      <span className="admin-label-with-hint">
+                        注入系统时间
+                        <InfoHint text="开启后，每次会话都会在系统提示词中注入当前日期（年月日）。" />
+                      </span>
+                      <label className="admin-switch-row">
+                        <input
+                          type="checkbox"
+                          checked={!!selectedRuntime.includeCurrentTime}
+                          onChange={(e) =>
+                            updateRuntimeField("includeCurrentTime", e.target.checked)
+                          }
+                          disabled={loading}
+                        />
+                        <span>{selectedRuntime.includeCurrentTime ? "开启" : "关闭"}</span>
+                      </label>
+                    </div>
+                  ) : null}
 
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
@@ -2529,7 +2788,7 @@ export default function AdminSettingsPage() {
                     </label>
                   </div>
 
-                  {!showOpenRouterPanel ? (
+                  {!showOpenRouterPanel && !showAliyunPanel ? (
                     <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens-chat">
                       <span className="admin-label-with-hint">
                         上下文窗口
@@ -2547,7 +2806,7 @@ export default function AdminSettingsPage() {
                     </label>
                   ) : null}
 
-                  {!showOpenRouterPanel ? (
+                  {!showOpenRouterPanel && !showAliyunPanel ? (
                     <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens-chat">
                       <span className="admin-label-with-hint">
                         最大输入长度
@@ -2572,7 +2831,9 @@ export default function AdminSettingsPage() {
                         text={
                           showOpenRouterPanel
                             ? "会映射到 OpenRouter Chat 的 max_tokens 参数。"
-                            : "会映射到 Chat 的最大输出参数。"
+                          : showAliyunPanel
+                              ? "阿里云接入固定使用模型默认最大输出，不手动下发最大输出参数。"
+                              : "会映射到 Chat 的最大输出参数。"
                         }
                       />
                     </span>
@@ -2583,9 +2844,272 @@ export default function AdminSettingsPage() {
                       max={1048576}
                       step={64}
                       onChange={(next) => updateRuntimeField("maxOutputTokens", next)}
-                      disabled={loading}
+                      disabled={loading || showAliyunPanel}
                     />
                   </label>
+                  {showAliyunPanel && aliyunWebSearchAllowed ? (
+                    <>
+                      <div className="admin-field-row split">
+                        <span className="admin-label-with-hint">
+                          联网搜索
+                          <InfoHint text="启用后会下发联网搜索能力；回应模式会挂载网页搜索工具。" />
+                        </span>
+                        <label className="admin-switch-row">
+                          <input
+                            type="checkbox"
+                            checked={!!selectedRuntime.enableWebSearch}
+                            onChange={(e) =>
+                              updateRuntimeField("enableWebSearch", e.target.checked)
+                            }
+                            disabled={loading}
+                          />
+                          <span>{selectedRuntime.enableWebSearch ? "开启" : "关闭"}</span>
+                        </label>
+                      </div>
+
+                      <div className="admin-field-row split">
+                        <span>强制搜索</span>
+                        <label className="admin-switch-row">
+                          <input
+                            type="checkbox"
+                            checked={!!selectedRuntime.aliyunSearchForced}
+                            onChange={(e) =>
+                              updateRuntimeField("aliyunSearchForced", e.target.checked)
+                            }
+                            disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
+                          />
+                          <span>{selectedRuntime.aliyunSearchForced ? "开启" : "关闭"}</span>
+                        </label>
+                      </div>
+
+                      <div className="admin-field-row split">
+                        <span>搜索策略</span>
+                        <AdminPortalSelect
+                          value={selectedRuntime.aliyunSearchStrategy}
+                          options={ALIYUN_SEARCH_STRATEGY_OPTIONS}
+                          onChange={(next) => updateRuntimeField("aliyunSearchStrategy", next)}
+                          disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
+                          compact
+                        />
+                      </div>
+
+                      <div className="admin-field-row split">
+                        <span>返回搜索来源</span>
+                        <label className="admin-switch-row">
+                          <input
+                            type="checkbox"
+                            checked={!!selectedRuntime.aliyunSearchEnableSource}
+                            onChange={(e) =>
+                              updateRuntimeField("aliyunSearchEnableSource", e.target.checked)
+                            }
+                            disabled={aliyunSearchDisabled || aliyunDashscopeSearchOnlyDisabled}
+                          />
+                          <span>{selectedRuntime.aliyunSearchEnableSource ? "开启" : "关闭"}</span>
+                        </label>
+                      </div>
+
+                      <div className="admin-field-row split">
+                        <span>角标标注</span>
+                        <label className="admin-switch-row">
+                          <input
+                            type="checkbox"
+                            checked={!!selectedRuntime.aliyunSearchEnableCitation}
+                            onChange={(e) =>
+                              updateRuntimeField("aliyunSearchEnableCitation", e.target.checked)
+                            }
+                            disabled={
+                              aliyunSearchDisabled ||
+                              aliyunDashscopeSearchOnlyDisabled ||
+                              !selectedRuntime.aliyunSearchEnableSource
+                            }
+                          />
+                          <span>{selectedRuntime.aliyunSearchEnableCitation ? "开启" : "关闭"}</span>
+                        </label>
+                      </div>
+
+                      <div className="admin-field-row split">
+                        <span>角标格式</span>
+                        <AdminPortalSelect
+                          value={selectedRuntime.aliyunSearchCitationFormat}
+                          options={ALIYUN_SEARCH_CITATION_FORMAT_OPTIONS}
+                          onChange={(next) =>
+                            updateRuntimeField("aliyunSearchCitationFormat", next)
+                          }
+                          disabled={
+                            aliyunSearchDisabled ||
+                            aliyunDashscopeSearchOnlyDisabled ||
+                            !selectedRuntime.aliyunSearchEnableCitation
+                          }
+                          compact
+                        />
+                      </div>
+
+                      <div className="admin-field-row split">
+                        <span>垂域搜索</span>
+                        <label className="admin-switch-row">
+                          <input
+                            type="checkbox"
+                            checked={!!selectedRuntime.aliyunSearchEnableSearchExtension}
+                            onChange={(e) =>
+                              updateRuntimeField(
+                                "aliyunSearchEnableSearchExtension",
+                                e.target.checked,
+                              )
+                            }
+                            disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
+                          />
+                          <span>
+                            {selectedRuntime.aliyunSearchEnableSearchExtension
+                              ? "开启"
+                              : "关闭"}
+                          </span>
+                        </label>
+                      </div>
+
+                      <div className="admin-field-row split">
+                        <span>首包先返回来源</span>
+                        <label className="admin-switch-row">
+                          <input
+                            type="checkbox"
+                            checked={!!selectedRuntime.aliyunSearchPrependSearchResult}
+                            onChange={(e) =>
+                              updateRuntimeField(
+                                "aliyunSearchPrependSearchResult",
+                                e.target.checked,
+                              )
+                            }
+                            disabled={aliyunSearchDisabled || aliyunDashscopeSearchOnlyDisabled}
+                          />
+                          <span>
+                            {selectedRuntime.aliyunSearchPrependSearchResult ? "开启" : "关闭"}
+                          </span>
+                        </label>
+                      </div>
+
+                      <div className="admin-field-row split">
+                        <span>搜索时效</span>
+                        <AdminPortalSelect
+                          value={selectedRuntime.aliyunSearchFreshness}
+                          options={ALIYUN_SEARCH_FRESHNESS_OPTIONS}
+                          onChange={(next) => updateRuntimeField("aliyunSearchFreshness", next)}
+                          disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
+                          compact
+                        />
+                      </div>
+
+                      <label className="admin-field-row" htmlFor="admin-runtime-aliyun-assigned-sites">
+                        <span className="admin-label-with-hint">
+                          限定站点
+                          <InfoHint text="每行或逗号分隔一个域名，最多 25 个。" />
+                        </span>
+                        <textarea
+                          className="admin-textarea admin-runtime-textarea admin-aliyun-search-textarea"
+                          id="admin-runtime-aliyun-assigned-sites"
+                          value={aliyunAssignedSiteListText}
+                          onChange={(e) =>
+                            updateRuntimeField(
+                              "aliyunSearchAssignedSiteList",
+                              String(e.target.value || "")
+                                .split(/[\n,]/)
+                                .map((item) => item.trim())
+                                .filter(Boolean),
+                            )
+                          }
+                          placeholder={"例如：baidu.com\nsina.cn"}
+                          disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
+                        />
+                      </label>
+
+                      <label className="admin-field-row" htmlFor="admin-runtime-aliyun-prompt-intervene">
+                        <span className="admin-label-with-hint">
+                          检索范围干预
+                          <InfoHint text="自然语言限制检索范围，例如“仅检索人工智能技术相关内容”。" />
+                        </span>
+                        <textarea
+                          className="admin-textarea admin-runtime-textarea admin-aliyun-search-textarea"
+                          id="admin-runtime-aliyun-prompt-intervene"
+                          value={String(selectedRuntime.aliyunSearchPromptIntervene || "")}
+                          onChange={(e) =>
+                            updateRuntimeField(
+                              "aliyunSearchPromptIntervene",
+                              e.target.value,
+                            )
+                          }
+                          placeholder="例如：仅检索人工智能技术相关内容"
+                          disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
+                        />
+                      </label>
+
+                      {aliyunProtocol === "responses" ? (
+                        <>
+                          <label
+                            className="admin-field-row split"
+                            htmlFor="admin-runtime-aliyun-web-search-max-tool-calls"
+                          >
+                            <span className="admin-label-with-hint">
+                              工具调用轮次上限
+                              <InfoHint text="仅回应模式生效，范围 1 到 10。" />
+                            </span>
+                            <NumberRuntimeInput
+                              id="admin-runtime-aliyun-web-search-max-tool-calls"
+                              value={selectedRuntime.webSearchMaxToolCalls}
+                              min={1}
+                              max={10}
+                              step={1}
+                              onChange={(next) =>
+                                updateRuntimeField("webSearchMaxToolCalls", next)
+                              }
+                              disabled={aliyunSearchDisabled}
+                            />
+                          </label>
+
+                          <div className="admin-field-row split">
+                            <span>附加工具：网页提取</span>
+                            <label className="admin-switch-row">
+                              <input
+                                type="checkbox"
+                                checked={!!selectedRuntime.aliyunResponsesEnableWebExtractor}
+                                onChange={(e) =>
+                                  updateRuntimeField(
+                                    "aliyunResponsesEnableWebExtractor",
+                                    e.target.checked,
+                                  )
+                                }
+                                disabled={aliyunSearchDisabled}
+                              />
+                              <span>
+                                {selectedRuntime.aliyunResponsesEnableWebExtractor
+                                  ? "开启"
+                                  : "关闭"}
+                              </span>
+                            </label>
+                          </div>
+
+                          <div className="admin-field-row split">
+                            <span>附加工具：代码解释器</span>
+                            <label className="admin-switch-row">
+                              <input
+                                type="checkbox"
+                                checked={!!selectedRuntime.aliyunResponsesEnableCodeInterpreter}
+                                onChange={(e) =>
+                                  updateRuntimeField(
+                                    "aliyunResponsesEnableCodeInterpreter",
+                                    e.target.checked,
+                                  )
+                                }
+                                disabled={aliyunSearchDisabled}
+                              />
+                              <span>
+                                {selectedRuntime.aliyunResponsesEnableCodeInterpreter
+                                  ? "开启"
+                                  : "关闭"}
+                              </span>
+                            </label>
+                          </div>
+                        </>
+                      ) : null}
+                    </>
+                  ) : null}
 
                   {showOpenRouterPanel ? (
                     <>
@@ -2605,18 +3129,65 @@ export default function AdminSettingsPage() {
                     </>
                   ) : null}
 
-                  {!showOpenRouterPanel ? (
+                  {showAliyunPanel ? (
+                    <p className="admin-field-note">
+                      当前服务商：{selectedProviderName}
+                      {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
+                      当前调用方式：
+                      {aliyunProtocolOptions.find((item) => item.value === aliyunProtocol)?.label ||
+                        "聊天接口"}
+                      。
+                      阿里云请求固定不下发最大输出参数，默认使用模型最大输出。
+                    </p>
+                  ) : !showOpenRouterPanel ? (
                     <p className="admin-field-note">
                       当前服务商：{selectedProviderName}
                       {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
                       该服务商当前仅使用 Chat 协议，Responses 参数已自动隐藏。
                     </p>
                   ) : null}
-                  {!showOpenRouterPanel ? (
+                  {!showOpenRouterPanel && !showAliyunPanel ? (
                     <p
                       className={`admin-field-note ${providerSupportsReasoning ? "" : "warning"}`}
                     >
                       {providerReasoningHint}
+                    </p>
+                  ) : null}
+                  {showAliyunPanel && !aliyunModelPolicy.supported ? (
+                    <p className="admin-field-note warning">
+                      {aliyunModelPolicy.errorMessage}
+                    </p>
+                  ) : null}
+                  {showAliyunPanel && aliyunModelPolicy.key === "kimi_k2_5" ? (
+                    <p className="admin-field-note">
+                      提示：Kimi 仅支持 `kimi-k2.5`，固定使用 DashScope 原生多模态端点，且不支持联网搜索。
+                    </p>
+                  ) : null}
+                  {showAliyunPanel && aliyunModelPolicy.key === "minimax_m2" ? (
+                    <p className="admin-field-note warning">
+                      提示：MiniMax-M2.5 / MiniMax-M2.1 固定使用 Chat API，禁用联网搜索与图片输入。
+                    </p>
+                  ) : null}
+                  {showAliyunPanel && !aliyunWebSearchAllowed && aliyunModelPolicy.supported ? (
+                    <p className="admin-field-note warning">
+                      当前模型不支持联网搜索，相关搜索参数已自动隐藏并禁用。
+                    </p>
+                  ) : null}
+                  {showAliyunPanel && aliyunWebSearchAllowed && aliyunProtocol !== "dashscope" ? (
+                    <p className="admin-field-note warning">
+                      提示：返回搜索来源、角标标注、角标格式、首包先返回来源仅在 DashScope 原生
+                      接口下生效。
+                    </p>
+                  ) : null}
+                  {showAliyunPanel && aliyunWebSearchAllowed && aliyunProtocol === "responses" ? (
+                    <p className="admin-field-note warning">
+                      提示：回应模式的联网搜索通过网页搜索工具挂载，不下发搜索参数选项。
+                    </p>
+                  ) : null}
+                  {showAliyunPanel &&
+                  selectedRuntime.aliyunFileProcessMode === "native_oss_url" ? (
+                    <p className="admin-field-note warning">
+                      调试提示：原生文件 URL 模式已开启。若上游返回文件格式不支持，请切回“本地解析（兼容模式）”。
                     </p>
                   ) : null}
                 </>
@@ -2655,7 +3226,11 @@ export default function AdminSettingsPage() {
               <MessageInput
                 onSend={onDebugSend}
                 onPrepareFiles={onDebugPrepareFiles}
-                disabled={debugLoading || loading}
+                disabled={
+                  debugLoading ||
+                  loading ||
+                  (showAliyunPanel && !aliyunModelPolicy.supported)
+                }
               />
             </div>
             {debugError ? (

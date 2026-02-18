@@ -6,7 +6,7 @@ const AGENTS = [
   { id: "A", name: "智能体 A" },
   { id: "B", name: "智能体 B" },
   { id: "C", name: "智能体 C" },
-  { id: "D", name: "智能体 D" },
+  { id: "D", name: "群聊助手" },
   { id: "E", name: "SSCI审稿人" },
 ];
 

@@ -80,7 +80,7 @@ const DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   A: "volcengine",
   B: "volcengine",
   C: "volcengine",
-  D: "openrouter",
+  D: "aliyun",
   E: "openrouter",
 });
 const SIDEBAR_VISIBILITY_STORAGE_KEY = "chat_sidebar_visible";
@@ -245,6 +245,91 @@ function removeSmartContextBySessions(map, sessionIds) {
   return changed ? next : source;
 }
 
+function sanitizeAgentBySessionMap(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const normalized = {};
+
+  Object.entries(source)
+    .slice(0, 1200)
+    .forEach(([rawSessionId, rawAgentId]) => {
+      const sessionId = sanitizeSmartContextSessionId(rawSessionId);
+      const agentId = sanitizeSmartContextAgentId(rawAgentId);
+      if (!sessionId || !agentId) return;
+      normalized[sessionId] = agentId;
+    });
+
+  return normalized;
+}
+
+function readAgentBySession(map, sessionId, fallback = "A") {
+  const source = map && typeof map === "object" ? map : {};
+  const safeSessionId = sanitizeSmartContextSessionId(sessionId);
+  const safeFallback = sanitizeSmartContextAgentId(fallback) || "A";
+  if (!safeSessionId) return safeFallback;
+
+  const savedAgent = sanitizeSmartContextAgentId(source[safeSessionId]);
+  return savedAgent || safeFallback;
+}
+
+function patchAgentBySession(map, sessionId, agentId) {
+  const source = sanitizeAgentBySessionMap(map);
+  const safeSessionId = sanitizeSmartContextSessionId(sessionId);
+  const safeAgentId = sanitizeSmartContextAgentId(agentId);
+  if (!safeSessionId || !safeAgentId) return source;
+  if (source[safeSessionId] === safeAgentId) return source;
+  return {
+    ...source,
+    [safeSessionId]: safeAgentId,
+  };
+}
+
+function removeAgentBySessions(map, sessionIds) {
+  const source = sanitizeAgentBySessionMap(map);
+  const remove = sessionIds instanceof Set ? sessionIds : new Set();
+  if (remove.size === 0) return source;
+
+  let changed = false;
+  const next = {};
+  Object.entries(source).forEach(([sessionId, agentId]) => {
+    if (remove.has(sessionId)) {
+      changed = true;
+      return;
+    }
+    next[sessionId] = agentId;
+  });
+  return changed ? next : source;
+}
+
+function ensureAgentBySessionMap(map, sessions, fallbackAgent = "A") {
+  const source = sanitizeAgentBySessionMap(map);
+  const safeFallback = sanitizeSmartContextAgentId(fallbackAgent) || "A";
+  const validSessionIds = new Set();
+
+  if (Array.isArray(sessions)) {
+    sessions.slice(0, 600).forEach((session) => {
+      const sessionId = sanitizeSmartContextSessionId(session?.id);
+      if (!sessionId) return;
+      validSessionIds.add(sessionId);
+    });
+  }
+
+  let changed = false;
+  const next = {};
+  validSessionIds.forEach((sessionId) => {
+    const nextAgent = sanitizeSmartContextAgentId(source[sessionId]) || safeFallback;
+    if (source[sessionId] !== nextAgent) changed = true;
+    next[sessionId] = nextAgent;
+  });
+  Object.keys(source).forEach((sessionId) => {
+    if (!validSessionIds.has(sessionId)) changed = true;
+  });
+
+  if (!changed && Object.keys(next).length === Object.keys(source).length) {
+    return source;
+  }
+  return next;
+}
+
 export default function ChatDesktopPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -254,6 +339,7 @@ export default function ChatDesktopPage() {
 
   const [activeId, setActiveId] = useState("s1");
   const [agent, setAgent] = useState("A");
+  const [agentBySession, setAgentBySession] = useState({});
   const [agentRuntimeConfigs, setAgentRuntimeConfigs] = useState(
     createDefaultAgentRuntimeConfigMap(),
   );
@@ -306,6 +392,10 @@ export default function ChatDesktopPage() {
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeId) || null,
     [sessions, activeId],
+  );
+  const activeSessionAgent = useMemo(
+    () => readAgentBySession(agentBySession, activeId, "A"),
+    [agentBySession, activeId],
   );
   const messages = useMemo(
     () => sessionMessages[activeId] || [],
@@ -508,6 +598,7 @@ export default function ChatDesktopPage() {
     const next = createNewSessionRecord();
     setSessions((prev) => [next.session, ...prev]);
     setSessionMessages((prev) => ({ ...prev, [next.session.id]: next.messages }));
+    setAgentBySession((prev) => patchAgentBySession(prev, next.session.id, agent));
     if (next.messages[0]) {
       queueMessageUpsert(next.session.id, next.messages[0]);
     }
@@ -566,6 +657,7 @@ export default function ChatDesktopPage() {
     setSmartContextEnabledBySessionAgent((prev) =>
       removeSmartContextBySessions(prev, new Set([sessionId])),
     );
+    setAgentBySession((prev) => removeAgentBySessions(prev, new Set([sessionId])));
     clearStreamDraft(sessionId);
     clearSessionMessageQueue(sessionId);
 
@@ -577,6 +669,7 @@ export default function ChatDesktopPage() {
   function onAgentChange(nextAgent) {
     if (agentSwitchLocked) return;
     setAgent(nextAgent);
+    setAgentBySession((prev) => patchAgentBySession(prev, activeId, nextAgent));
   }
 
   function onBatchDeleteSessions(sessionIds) {
@@ -615,6 +708,7 @@ export default function ChatDesktopPage() {
     setSmartContextEnabledBySessionAgent((prev) =>
       removeSmartContextBySessions(prev, remove),
     );
+    setAgentBySession((prev) => removeAgentBySessions(prev, remove));
     clearManyStreamDrafts(sessionIds);
     sessionIds.forEach((id) => clearSessionMessageQueue(id));
   }
@@ -1455,21 +1549,9 @@ export default function ChatDesktopPage() {
             )
           : null;
 
-        let nextAgent = AGENT_META[stateSettings.agent] ? stateSettings.agent : "A";
-        if (restoreContext?.agentId && AGENT_META[restoreContext.agentId]) {
-          nextAgent = restoreContext.agentId;
-        }
-        const nextRuntime = nextRuntimeConfigs[nextAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
-        const nextApiTemperature = String(normalizeTemperature(nextRuntime.temperature));
-        const nextApiTopP = String(normalizeTopP(nextRuntime.topP));
-        const nextApiReasoning = nextRuntime.enableThinking ? "high" : "none";
+        const fallbackAgent = AGENT_META[stateSettings.agent] ? stateSettings.agent : "A";
         const nextAppliedReasoning = normalizeReasoningEffort(
           stateSettings.lastAppliedReasoning ?? "high",
-        );
-        const nextProvider = resolveAgentProvider(
-          nextAgent,
-          nextRuntime,
-          nextProviderDefaults,
         );
         const nextSmartContextEnabledMap = sanitizeSmartContextEnabledMap(
           stateSettings.smartContextEnabledBySessionAgent,
@@ -1482,12 +1564,36 @@ export default function ChatDesktopPage() {
         if (!resolvedSessions.some((s) => s.id === resolvedActiveId)) {
           resolvedActiveId = resolvedSessions[0]?.id || "s1";
         }
-        if (
-          restoreContext?.sessionId &&
-          resolvedSessions.some((s) => s.id === restoreContext.sessionId)
-        ) {
+        const canRestoreSession =
+          !!restoreContext?.sessionId &&
+          resolvedSessions.some((s) => s.id === restoreContext.sessionId);
+        if (canRestoreSession) {
           resolvedActiveId = restoreContext.sessionId;
         }
+
+        let nextAgentBySession = ensureAgentBySessionMap(
+          stateSettings.agentBySession,
+          resolvedSessions,
+          fallbackAgent,
+        );
+        if (canRestoreSession && restoreContext?.agentId && AGENT_META[restoreContext.agentId]) {
+          nextAgentBySession = patchAgentBySession(
+            nextAgentBySession,
+            restoreContext.sessionId,
+            restoreContext.agentId,
+          );
+        }
+
+        const nextAgent = readAgentBySession(nextAgentBySession, resolvedActiveId, fallbackAgent);
+        const nextRuntime = nextRuntimeConfigs[nextAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
+        const nextApiTemperature = String(normalizeTemperature(nextRuntime.temperature));
+        const nextApiTopP = String(normalizeTopP(nextRuntime.topP));
+        const nextApiReasoning = nextRuntime.enableThinking ? "high" : "none";
+        const nextProvider = resolveAgentProvider(
+          nextAgent,
+          nextRuntime,
+          nextProviderDefaults,
+        );
 
         if (stateSettings.smartContextEnabled && nextProvider === "volcengine") {
           const legacyKey = buildSmartContextKey(resolvedActiveId, nextAgent);
@@ -1504,6 +1610,7 @@ export default function ChatDesktopPage() {
         setSessionMessages(resolvedMessages);
         setActiveId(resolvedActiveId);
         setAgent(nextAgent);
+        setAgentBySession(nextAgentBySession);
         setAgentRuntimeConfigs(nextRuntimeConfigs);
         setAgentProviderDefaults(nextProviderDefaults);
         setApiTemperature(nextApiTemperature);
@@ -1558,6 +1665,12 @@ export default function ChatDesktopPage() {
   }, [activeRuntimeConfig]);
 
   useEffect(() => {
+    if (!activeId) return;
+    if (agent === activeSessionAgent) return;
+    setAgent(activeSessionAgent);
+  }, [activeId, activeSessionAgent, agent]);
+
+  useEffect(() => {
     if (!persistReadyRef.current || bootstrapLoading) return;
     pendingMetaSaveRef.current = true;
 
@@ -1584,6 +1697,7 @@ export default function ChatDesktopPage() {
           sessions,
           settings: {
             agent,
+            agentBySession: sanitizeAgentBySessionMap(agentBySession),
             apiTemperature: normalizeTemperature(apiTemperature),
             apiTopP: normalizeTopP(apiTopP),
             apiReasoningEffort: normalizeReasoningEffort(apiReasoningEffort),
@@ -1606,6 +1720,7 @@ export default function ChatDesktopPage() {
     groups,
     sessions,
     agent,
+    agentBySession,
     apiTemperature,
     apiTopP,
     apiReasoningEffort,

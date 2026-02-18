@@ -2,7 +2,7 @@ export const AGENT_META = {
   A: { name: "智能体 A" },
   B: { name: "智能体 B" },
   C: { name: "智能体 C" },
-  D: { name: "智能体 D" },
+  D: { name: "群聊助手" },
   E: { name: "SSCI审稿人" },
 };
 
