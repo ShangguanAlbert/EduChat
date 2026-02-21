@@ -49,6 +49,7 @@ import {
   clearChatSmartContext,
   fetchChatBootstrap,
   getAuthTokenHeader,
+  prepareChatAttachments,
   saveChatSessionMessages,
   saveChatStateMeta,
   saveUserProfile,
@@ -143,6 +144,53 @@ function resolveRuntimeConfigForAgent(agentId, runtimeConfigs) {
     provider: "volcengine",
     protocol: "responses",
   };
+}
+
+function sanitizeUploadedAttachmentLinks(raw) {
+  const source = Array.isArray(raw) ? raw : [];
+  return source
+    .map((item) => ({
+      name: String(item?.fileName || item?.name || "")
+        .trim()
+        .slice(0, 240),
+      type: String(item?.mimeType || item?.type || "")
+        .trim()
+        .toLowerCase(),
+      size: Number(item?.size || 0),
+      url: String(item?.url || "").trim(),
+      ossKey: String(item?.ossKey || "").trim(),
+    }))
+    .filter((item) => !!item.url);
+}
+
+function mergeAttachmentsWithUploadedLinks(attachments, rawLinks) {
+  const list = Array.isArray(attachments) ? attachments : [];
+  const links = sanitizeUploadedAttachmentLinks(rawLinks);
+  if (list.length === 0 || links.length === 0) return list;
+
+  const nextLinks = [...links];
+  return list.map((attachment) => {
+    const normalizedName = String(attachment?.name || "").trim();
+    const normalizedType = String(attachment?.type || "")
+      .trim()
+      .toLowerCase();
+    const normalizedSize = Number(attachment?.size || 0);
+    const exactIndex = nextLinks.findIndex((item) => {
+      const sameName = item.name && normalizedName && item.name === normalizedName;
+      const sameType = item.type && normalizedType && item.type === normalizedType;
+      const sameSize = item.size > 0 && normalizedSize > 0 && item.size === normalizedSize;
+      return sameName || (sameType && sameSize);
+    });
+    const fallbackIndex = exactIndex >= 0 ? exactIndex : 0;
+    const matched = nextLinks[fallbackIndex] || null;
+    if (!matched) return attachment;
+    nextLinks.splice(fallbackIndex, 1);
+    return {
+      ...attachment,
+      url: matched.url,
+      ossKey: matched.ossKey || attachment?.ossKey || "",
+    };
+  });
 }
 
 function getSmartContextDefaultEnabled(agentId) {
@@ -906,9 +954,11 @@ export default function ChatDesktopPage() {
   }
 
   function shouldUseVolcengineFilesApi(runtimeConfig) {
-    const provider = String(runtimeConfig?.provider || "")
-      .trim()
-      .toLowerCase();
+    const provider = resolveAgentProvider(
+      agent,
+      runtimeConfig,
+      agentProviderDefaults,
+    );
     const protocol = String(runtimeConfig?.protocol || "")
       .trim()
       .toLowerCase();
@@ -930,11 +980,100 @@ export default function ChatDesktopPage() {
     return "";
   }
 
+  function isPdfUploadFile(file) {
+    const mime = String(file?.type || "")
+      .trim()
+      .toLowerCase();
+    const name = String(file?.name || "")
+      .trim()
+      .toLowerCase();
+    const ext = name.includes(".") ? name.split(".").pop() : "";
+    return mime.includes("pdf") || ext === "pdf";
+  }
+
+  function shouldUseAliyunPdfPreprocess(runtimeConfig, currentAgent) {
+    const provider = resolveAgentProvider(
+      currentAgent,
+      runtimeConfig,
+      agentProviderDefaults,
+    );
+    const safeAgent = String(currentAgent || "")
+      .trim()
+      .toUpperCase();
+    return provider === "aliyun" && safeAgent === "D";
+  }
+
   async function onPrepareFiles(pickedFiles) {
     const safePicked = Array.isArray(pickedFiles) ? pickedFiles.filter(Boolean) : [];
     if (safePicked.length === 0) return [];
 
     const runtimeConfig = resolveRuntimeConfigForAgent(agent, agentRuntimeConfigs);
+    if (shouldUseAliyunPdfPreprocess(runtimeConfig, agent)) {
+      const indexedPicked = safePicked.map((file, index) => ({
+        index,
+        file,
+        isPdf: isPdfUploadFile(file),
+      }));
+      const pdfCandidates = indexedPicked.filter((item) => item.isPdf);
+      const localItems = indexedPicked
+        .filter((item) => !item.isPdf)
+        .map((item) => ({
+          index: item.index,
+          kind: "local",
+          file: item.file,
+          name: String(item.file?.name || ""),
+          size: Number(item.file?.size || 0),
+          type: String(item.file?.type || ""),
+        }));
+
+      if (pdfCandidates.length > 0) {
+        const prepareResult = await prepareChatAttachments({
+          agentId: agent,
+          sessionId: activeId,
+          files: pdfCandidates.map((item) => item.file),
+        });
+        const preparedRefs = Array.isArray(prepareResult?.files) ? prepareResult.files : [];
+        if (preparedRefs.length !== pdfCandidates.length) {
+          throw new Error("PDF 预处理结果异常，请重新上传。");
+        }
+
+        const preparedItems = preparedRefs.map((ref, idx) => {
+          const file = pdfCandidates[idx].file;
+          const preparedToken = String(ref?.token || "").trim();
+          if (!preparedToken) {
+            throw new Error("PDF 预处理缺少 token，请重新上传。");
+          }
+          return {
+            index: pdfCandidates[idx].index,
+            kind: "prepared_ref",
+            // Keep the original File for local preview in composer.
+            file,
+            name: String(file?.name || ref?.fileName || ""),
+            size: Number(ref?.size || file?.size || 0),
+            type: String(ref?.mimeType || file?.type || ""),
+            mimeType: String(ref?.mimeType || file?.type || ""),
+            preparedToken,
+          };
+        });
+
+        return [...localItems, ...preparedItems]
+          .sort((a, b) => a.index - b.index)
+          .map((item) => {
+            const nextItem = { ...item };
+            delete nextItem.index;
+            return nextItem;
+          });
+      }
+
+      return localItems
+        .sort((a, b) => a.index - b.index)
+        .map((item) => {
+          const nextItem = { ...item };
+          delete nextItem.index;
+          return nextItem;
+        });
+    }
+
     if (!shouldUseVolcengineFilesApi(runtimeConfig)) {
       return safePicked.map((file) => ({
         kind: "local",
@@ -985,6 +1124,8 @@ export default function ChatDesktopPage() {
       mimeType: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
       inputType: String(ref?.inputType || remoteCandidates[idx].inputType || ""),
       fileId: String(ref?.fileId || ""),
+      url: String(ref?.url || "").trim(),
+      ossKey: String(ref?.ossKey || "").trim(),
     }));
 
     return [...localItems, ...remoteItems]
@@ -1006,7 +1147,24 @@ export default function ChatDesktopPage() {
     const fileItems = Array.isArray(files) ? files.filter(Boolean) : [];
     const localFiles = [];
     const volcengineFileRefs = [];
+    const preparedAttachmentRefs = [];
     const attachments = fileItems.map((item) => {
+      if (item?.kind === "prepared_ref") {
+        const preparedToken = String(item?.preparedToken || "").trim();
+        if (preparedToken) {
+          preparedAttachmentRefs.push({
+            token: preparedToken,
+            fileName: String(item?.name || ""),
+            mimeType: String(item?.mimeType || item?.type || ""),
+            size: Number(item?.size || 0),
+          });
+        }
+        return {
+          name: String(item?.name || "文件"),
+          size: Number(item?.size || 0),
+          type: String(item?.mimeType || item?.type || ""),
+        };
+      }
       if (item?.kind === "volc_ref") {
         const fileId = String(item?.fileId || "").trim();
         const inputType = String(item?.inputType || "").trim().toLowerCase();
@@ -1030,6 +1188,8 @@ export default function ChatDesktopPage() {
           type: String(item?.mimeType || item?.type || ""),
           fileId,
           inputType,
+          url: String(item?.url || "").trim(),
+          ossKey: String(item?.ossKey || "").trim(),
         };
       }
 
@@ -1108,6 +1268,9 @@ export default function ChatDesktopPage() {
     if (volcengineFileRefs.length > 0) {
       formData.append("volcengineFileRefs", JSON.stringify(volcengineFileRefs));
     }
+    if (preparedAttachmentRefs.length > 0) {
+      formData.append("preparedAttachmentRefs", JSON.stringify(preparedAttachmentRefs));
+    }
 
     setFocusUserMessageId("");
     setIsAtLatest(true);
@@ -1135,6 +1298,35 @@ export default function ChatDesktopPage() {
 
       await readSseStream(resp, {
         onMeta: (meta) => {
+          const uploadedLinks = Array.isArray(meta?.uploadedAttachmentLinks)
+            ? meta.uploadedAttachmentLinks
+            : [];
+          if (uploadedLinks.length > 0) {
+            setSessionMessages((prev) => {
+              const list = prev[currentSessionId] || [];
+              const nextList = list.map((item) => {
+                if (item.id !== userMsg.id || item.role !== "user") return item;
+                const nextAttachments = mergeAttachmentsWithUploadedLinks(
+                  item.attachments,
+                  uploadedLinks,
+                );
+                const changed = nextAttachments.some(
+                  (attachment, idx) => attachment?.url !== item.attachments?.[idx]?.url,
+                );
+                if (!changed) return item;
+                const changedMessage = {
+                  ...item,
+                  attachments: nextAttachments,
+                };
+                queueMessageUpsert(currentSessionId, changedMessage);
+                return changedMessage;
+              });
+              return {
+                ...prev,
+                [currentSessionId]: nextList,
+              };
+            });
+          }
           const enabled = !!meta?.reasoningEnabled;
           const applied = meta?.reasoningApplied || "none";
           streamReasoningEnabledRef.current = enabled;

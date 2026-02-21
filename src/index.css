@@ -1,5 +1,20 @@
 :root {
-  font-family: system-ui, Helvetica, Arial, sans-serif;
+  --app-font-family:
+    "Noto Sans SC",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif,
+    "Apple Color Emoji",
+    "Segoe UI Emoji",
+    "Segoe UI Symbol";
+  font-family: var(--app-font-family);
   line-height: 1.5;
   font-weight: 400;
 
@@ -36,6 +51,14 @@ body {
   display: block;        /* 不要 flex 居中整个应用 */
   place-items: unset;    /* 取消模板的居中布局 */
   overflow-x: hidden;
+  font-family: var(--app-font-family);
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
 }
 
 h1 {

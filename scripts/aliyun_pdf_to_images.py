@@ -4,7 +4,7 @@ import os
 import sys
 
 MAX_PAGES_CAP = 50
-DEFAULT_DPI = 300
+DEFAULT_DPI = 200
 
 def to_int(value, default):
     try:

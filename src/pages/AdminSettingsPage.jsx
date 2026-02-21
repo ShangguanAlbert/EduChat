@@ -20,6 +20,7 @@ import {
   exportAdminChatsZip,
   exportAdminUsersTxt,
   fetchAdminAgentSettings,
+  prepareAdminDebugAttachments,
   uploadAdminVolcengineDebugFiles,
   saveAdminAgentSettings,
   streamAdminAgentDebug,
@@ -368,8 +369,59 @@ function isLikelyImageFile(file) {
 function toPreviewMessages(list) {
   return (list || [])
     .filter((item) => item && (item.role === "user" || item.role === "assistant"))
-    .map((item) => ({ role: item.role, content: String(item.content || "") }))
+    .map((item) => ({
+      id: String(item.id || ""),
+      role: item.role,
+      content: String(item.content || ""),
+    }))
     .filter((item) => item.content.trim().length > 0);
+}
+
+function sanitizeUploadedAttachmentLinks(raw) {
+  const source = Array.isArray(raw) ? raw : [];
+  return source
+    .map((item) => ({
+      name: String(item?.fileName || item?.name || "")
+        .trim()
+        .slice(0, 240),
+      type: String(item?.mimeType || item?.type || "")
+        .trim()
+        .toLowerCase(),
+      size: Number(item?.size || 0),
+      url: String(item?.url || "").trim(),
+      ossKey: String(item?.ossKey || "").trim(),
+    }))
+    .filter((item) => !!item.url);
+}
+
+function mergeAttachmentsWithUploadedLinks(attachments, rawLinks) {
+  const list = Array.isArray(attachments) ? attachments : [];
+  const links = sanitizeUploadedAttachmentLinks(rawLinks);
+  if (list.length === 0 || links.length === 0) return list;
+
+  const nextLinks = [...links];
+  return list.map((attachment) => {
+    const normalizedName = String(attachment?.name || "").trim();
+    const normalizedType = String(attachment?.type || "")
+      .trim()
+      .toLowerCase();
+    const normalizedSize = Number(attachment?.size || 0);
+    const exactIndex = nextLinks.findIndex((item) => {
+      const sameName = item.name && normalizedName && item.name === normalizedName;
+      const sameType = item.type && normalizedType && item.type === normalizedType;
+      const sameSize = item.size > 0 && normalizedSize > 0 && item.size === normalizedSize;
+      return sameName || (sameType && sameSize);
+    });
+    const fallbackIndex = exactIndex >= 0 ? exactIndex : 0;
+    const matched = nextLinks[fallbackIndex] || null;
+    if (!matched) return attachment;
+    nextLinks.splice(fallbackIndex, 1);
+    return {
+      ...attachment,
+      url: matched.url,
+      ossKey: matched.ossKey || attachment?.ossKey || "",
+    };
+  });
 }
 
 function formatTokenCountAsK(value) {
@@ -1449,21 +1501,49 @@ export default function AdminSettingsPage() {
     return runtimeConfigs[agentId] || DEFAULT_AGENT_RUNTIME_CONFIG;
   }
 
-  function shouldUseDebugVolcengineFilesApi(agentId, runtimeConfig) {
-    if (agentId === "E") return true;
+  function resolveDebugProvider(agentId, runtimeConfig) {
+    if (agentId === "E") return "volcengine";
     const runtimeProvider = String(runtimeConfig?.provider || "")
       .trim()
       .toLowerCase();
-    const provider =
-      runtimeProvider && runtimeProvider !== "inherit"
-        ? runtimeProvider
-        : String(agentProviderDefaults?.[agentId] || "openrouter")
-            .trim()
-            .toLowerCase();
+    return runtimeProvider && runtimeProvider !== "inherit"
+      ? runtimeProvider
+      : String(agentProviderDefaults?.[agentId] || "openrouter")
+          .trim()
+          .toLowerCase();
+  }
+
+  function buildDebugSessionId(agentId) {
+    const safeAgentId = String(agentId || "")
+      .trim()
+      .toUpperCase();
+    if (!safeAgentId) return "admin-debug";
+    return `admin-debug-${safeAgentId}`;
+  }
+
+  function shouldUseDebugVolcengineFilesApi(agentId, runtimeConfig) {
+    const provider = resolveDebugProvider(agentId, runtimeConfig);
     const protocol = String(runtimeConfig?.protocol || "")
       .trim()
       .toLowerCase();
     return provider === "volcengine" && protocol === "responses";
+  }
+
+  function shouldUseDebugAliyunPdfPreprocess(agentId, runtimeConfig) {
+    if (String(agentId || "").trim().toUpperCase() !== "D") return false;
+    const provider = resolveDebugProvider(agentId, runtimeConfig);
+    return provider === "aliyun";
+  }
+
+  function isDebugPdfFile(file) {
+    const mime = String(file?.type || "")
+      .trim()
+      .toLowerCase();
+    const name = String(file?.name || "")
+      .trim()
+      .toLowerCase();
+    const ext = name.includes(".") ? name.split(".").pop() : "";
+    return mime.includes("pdf") || ext === "pdf";
   }
 
   function classifyDebugVolcengineFilesApiType(file) {
@@ -1485,7 +1565,24 @@ export default function AdminSettingsPage() {
     const safeItems = Array.isArray(files) ? files.filter(Boolean) : [];
     const localFiles = [];
     const volcengineFileRefs = [];
+    const preparedAttachmentRefs = [];
     const attachments = safeItems.map((item) => {
+      if (item?.kind === "prepared_ref") {
+        const preparedToken = String(item?.preparedToken || "").trim();
+        if (preparedToken) {
+          preparedAttachmentRefs.push({
+            token: preparedToken,
+            fileName: String(item?.name || ""),
+            mimeType: String(item?.mimeType || item?.type || ""),
+            size: Number(item?.size || 0),
+          });
+        }
+        return {
+          name: String(item?.name || "文件"),
+          size: Number(item?.size || 0),
+          type: String(item?.mimeType || item?.type || ""),
+        };
+      }
       if (item?.kind === "volc_ref") {
         const fileId = String(item?.fileId || "").trim();
         const inputType = String(item?.inputType || "")
@@ -1511,6 +1608,8 @@ export default function AdminSettingsPage() {
           type: String(item?.mimeType || item?.type || ""),
           fileId,
           inputType,
+          url: String(item?.url || "").trim(),
+          ossKey: String(item?.ossKey || "").trim(),
         };
       }
 
@@ -1534,6 +1633,7 @@ export default function AdminSettingsPage() {
     return {
       localFiles,
       volcengineFileRefs,
+      preparedAttachmentRefs,
       attachments,
     };
   }
@@ -1552,6 +1652,66 @@ export default function AdminSettingsPage() {
 
     const agentId = selectedAgent;
     const runtimeConfig = resolveDebugRuntimeConfig(agentId);
+    if (shouldUseDebugAliyunPdfPreprocess(agentId, runtimeConfig)) {
+      const indexedPicked = safePicked.map((file, index) => ({
+        index,
+        file,
+        isPdf: isDebugPdfFile(file),
+      }));
+      const pdfCandidates = indexedPicked.filter((item) => item.isPdf);
+      const localItems = indexedPicked
+        .filter((item) => !item.isPdf)
+        .map((item) => ({
+          index: item.index,
+          kind: "local",
+          file: item.file,
+          name: String(item.file?.name || ""),
+          size: Number(item.file?.size || 0),
+          type: String(item.file?.type || ""),
+        }));
+      if (pdfCandidates.length > 0) {
+        const prepareResult = await prepareAdminDebugAttachments(adminToken, {
+          agentId,
+          sessionId: buildDebugSessionId(agentId),
+          files: pdfCandidates.map((item) => item.file),
+        });
+        const preparedRefs = Array.isArray(prepareResult?.files) ? prepareResult.files : [];
+        if (preparedRefs.length !== pdfCandidates.length) {
+          throw new Error("PDF 预处理结果异常，请重试。");
+        }
+        const preparedItems = preparedRefs.map((ref, idx) => {
+          const file = pdfCandidates[idx].file;
+          const preparedToken = String(ref?.token || "").trim();
+          if (!preparedToken) {
+            throw new Error("PDF 预处理缺少 token，请重试。");
+          }
+          return {
+            index: pdfCandidates[idx].index,
+            kind: "prepared_ref",
+            name: String(file?.name || ref?.fileName || ""),
+            size: Number(ref?.size || file?.size || 0),
+            type: String(ref?.mimeType || file?.type || ""),
+            mimeType: String(ref?.mimeType || file?.type || ""),
+            preparedToken,
+          };
+        });
+        return [...localItems, ...preparedItems]
+          .sort((a, b) => a.index - b.index)
+          .map((item) => {
+            const nextItem = { ...item };
+            delete nextItem.index;
+            return nextItem;
+          });
+      }
+      return localItems
+        .sort((a, b) => a.index - b.index)
+        .map((item) => {
+          const nextItem = { ...item };
+          delete nextItem.index;
+          return nextItem;
+        });
+    }
+
     if (!shouldUseDebugVolcengineFilesApi(agentId, runtimeConfig)) {
       return safePicked.map((file) => ({
         kind: "local",
@@ -1599,6 +1759,8 @@ export default function AdminSettingsPage() {
       mimeType: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
       inputType: String(ref?.inputType || remoteCandidates[idx].inputType || ""),
       fileId: String(ref?.fileId || ""),
+      url: String(ref?.url || "").trim(),
+      ossKey: String(ref?.ossKey || "").trim(),
     }));
 
     return [...localItems, ...remoteItems]
@@ -1620,7 +1782,12 @@ export default function AdminSettingsPage() {
     }
     const content = String(text || "").trim();
     const safeFiles = Array.isArray(files) ? files.filter(Boolean) : [];
-    const { localFiles, volcengineFileRefs, attachments } = splitDebugFileItems(safeFiles);
+    const {
+      localFiles,
+      volcengineFileRefs,
+      preparedAttachmentRefs,
+      attachments,
+    } = splitDebugFileItems(safeFiles);
     if (!content && safeFiles.length === 0) return;
     const userContent =
       content || (safeFiles.length > 0 ? "请分析我上传的附件内容。" : "");
@@ -1655,12 +1822,42 @@ export default function AdminSettingsPage() {
         adminToken,
         {
           agentId,
+          sessionId: buildDebugSessionId(agentId),
           messages: toPreviewMessages([...existing, userMessage]),
           runtimeConfig,
           files: localFiles,
           volcengineFileRefs,
+          preparedAttachmentRefs,
         },
         {
+          onMeta: (meta) => {
+            const uploadedLinks = Array.isArray(meta?.uploadedAttachmentLinks)
+              ? meta.uploadedAttachmentLinks
+              : [];
+            if (uploadedLinks.length === 0) return;
+            setDebugByAgent((prev) => {
+              const list = prev[agentId] || [];
+              const nextList = list.map((item) => {
+                if (item.id !== userMessage.id || item.role !== "user") return item;
+                const nextAttachments = mergeAttachmentsWithUploadedLinks(
+                  item.attachments,
+                  uploadedLinks,
+                );
+                const changed = nextAttachments.some(
+                  (attachment, idx) => attachment?.url !== item.attachments?.[idx]?.url,
+                );
+                if (!changed) return item;
+                return {
+                  ...item,
+                  attachments: nextAttachments,
+                };
+              });
+              return {
+                ...prev,
+                [agentId]: nextList,
+              };
+            });
+          },
           onToken: (chunk) => {
             if (!chunk) return;
             setDebugByAgent((prev) => {
@@ -1777,7 +1974,11 @@ export default function AdminSettingsPage() {
 
     const promptMsg = list[promptIndex];
     const sourceFiles = Array.isArray(promptMsg.sourceFiles) ? promptMsg.sourceFiles : [];
-    const { localFiles, volcengineFileRefs } = splitDebugFileItems(sourceFiles);
+    const {
+      localFiles,
+      volcengineFileRefs,
+      preparedAttachmentRefs,
+    } = splitDebugFileItems(sourceFiles);
     const historyForApi = toPreviewMessages(list.slice(0, promptIndex + 1));
     if (historyForApi.length === 0 && sourceFiles.length === 0) return;
 
@@ -1805,10 +2006,12 @@ export default function AdminSettingsPage() {
         adminToken,
         {
           agentId,
+          sessionId: buildDebugSessionId(agentId),
           messages: historyForApi,
           runtimeConfig,
           files: localFiles,
           volcengineFileRefs,
+          preparedAttachmentRefs,
         },
         {
           onToken: (chunk) => {
@@ -2508,7 +2711,7 @@ export default function AdminSettingsPage() {
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
                       SP防泄漏指令
-                      <InfoHint text="默认关闭。开启后会注入高优先级防泄漏提示词；若用户试图套取内部配置，助手仅回复“我只是你的助手”。" />
+                      <InfoHint text="默认关闭。开启后会注入 SP 防泄漏指令；识别到探查系统设定时，将执行身份回应或礼貌拒绝且不解释判定依据。" />
                     </span>
                     <label className="admin-switch-row">
                       <input
@@ -2758,7 +2961,7 @@ export default function AdminSettingsPage() {
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
                       SP防泄漏指令
-                      <InfoHint text="默认关闭。开启后会注入高优先级防泄漏提示词；若用户试图套取内部配置，助手仅回复“我只是你的助手”。" />
+                      <InfoHint text="默认关闭。开启后会注入 SP 防泄漏指令；识别到探查系统设定时，将执行身份回应或礼貌拒绝且不解释判定依据。" />
                     </span>
                     <label className="admin-switch-row">
                       <input
@@ -3129,17 +3332,7 @@ export default function AdminSettingsPage() {
                     </>
                   ) : null}
 
-                  {showAliyunPanel ? (
-                    <p className="admin-field-note">
-                      当前服务商：{selectedProviderName}
-                      {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
-                      当前调用方式：
-                      {aliyunProtocolOptions.find((item) => item.value === aliyunProtocol)?.label ||
-                        "聊天接口"}
-                      。
-                      阿里云请求固定不下发最大输出参数，默认使用模型最大输出。
-                    </p>
-                  ) : !showOpenRouterPanel ? (
+                  {!showOpenRouterPanel && !showAliyunPanel ? (
                     <p className="admin-field-note">
                       当前服务商：{selectedProviderName}
                       {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。

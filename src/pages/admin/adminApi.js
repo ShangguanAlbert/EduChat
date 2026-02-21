@@ -126,13 +126,20 @@ export async function streamAdminAgentDebug(adminToken, payload, handlers = {}) 
   const volcengineFileRefs = Array.isArray(safePayload.volcengineFileRefs)
     ? safePayload.volcengineFileRefs.filter(Boolean)
     : [];
+  const preparedAttachmentRefs = Array.isArray(safePayload.preparedAttachmentRefs)
+    ? safePayload.preparedAttachmentRefs.filter(Boolean)
+    : [];
+  const sessionId = String(safePayload.sessionId || "").trim();
 
   let body;
   let headers;
 
-  if (files.length > 0 || volcengineFileRefs.length > 0) {
+  if (files.length > 0 || volcengineFileRefs.length > 0 || preparedAttachmentRefs.length > 0) {
     const formData = new FormData();
     formData.append("agentId", agentId);
+    if (sessionId) {
+      formData.append("sessionId", sessionId);
+    }
     formData.append(
       "messages",
       JSON.stringify(
@@ -142,6 +149,9 @@ export async function streamAdminAgentDebug(adminToken, payload, handlers = {}) 
     formData.append(runtimeKey, JSON.stringify(runtimePayload));
     if (volcengineFileRefs.length > 0) {
       formData.append("volcengineFileRefs", JSON.stringify(volcengineFileRefs));
+    }
+    if (preparedAttachmentRefs.length > 0) {
+      formData.append("preparedAttachmentRefs", JSON.stringify(preparedAttachmentRefs));
     }
     files.forEach((file) => {
       formData.append("files", file);
@@ -153,9 +163,11 @@ export async function streamAdminAgentDebug(adminToken, payload, handlers = {}) 
   } else {
     body = JSON.stringify({
       agentId,
+      sessionId,
       messages: Array.isArray(safePayload.messages) ? safePayload.messages : [],
       [runtimeKey]: runtimePayload,
       volcengineFileRefs,
+      preparedAttachmentRefs,
     });
     headers = authHeader(adminToken, {
       "Content-Type": "application/json",
@@ -224,6 +236,31 @@ export async function uploadAdminVolcengineDebugFiles(
   });
 
   const resp = await fetch("/api/auth/admin/volcengine-files/upload", {
+    method: "POST",
+    headers: authHeader(adminToken),
+    body: formData,
+  });
+  const data = await readJson(resp);
+  if (!resp.ok) {
+    const message = data?.error || data?.message || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+  return data;
+}
+
+export async function prepareAdminDebugAttachments(
+  adminToken,
+  { agentId = "A", sessionId = "", files = [] } = {},
+) {
+  const safeFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  const formData = new FormData();
+  formData.append("agentId", String(agentId || "A"));
+  formData.append("sessionId", String(sessionId || "").trim());
+  safeFiles.forEach((file) => {
+    formData.append("files", file);
+  });
+
+  const resp = await fetch("/api/auth/admin/attachments/prepare", {
     method: "POST",
     headers: authHeader(adminToken),
     body: formData,

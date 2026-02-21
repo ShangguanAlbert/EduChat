@@ -57,6 +57,7 @@ const app = express();
 const groupChatWsRoomSockets = new Map();
 const groupChatWsMetaBySocket = new Map();
 const groupChatWsOnlineCountsByRoom = new Map();
+const chatPreparedAttachmentCache = new Map();
 let groupChatExpiredFileCleanupTimer = null;
 let generatedImageExpiredCleanupTimer = null;
 const port = process.env.PORT || 8787;
@@ -66,6 +67,9 @@ const authSecret = String(
 ).trim();
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 - 1; // strictly < 10MB
 const MAX_FILES = 8;
+const CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS = 45 * 60 * 1000;
+const CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS = 320;
+const CHAT_PREPARED_ATTACHMENT_MAX_REFS = MAX_FILES;
 const MAX_IMAGE_GENERATION_INPUT_FILES = 14;
 const MAX_PARSED_CHARS_PER_FILE = 12000;
 const ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS = 48000;
@@ -114,6 +118,7 @@ const GROUP_CHAT_OSS_EXPIRED_CLEANUP_BATCH_SIZE = 120;
 const GENERATED_IMAGE_OSS_EXPIRED_CLEANUP_INTERVAL_MS = 60 * 1000;
 const GENERATED_IMAGE_OSS_EXPIRED_CLEANUP_BATCH_SIZE = 80;
 const CHAT_ATTACHMENT_OSS_SCOPE = "chat-attachments";
+const CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE = "chat-prepared-pdf-images";
 const IMAGE_GENERATION_INPUT_OSS_SCOPE = "image-generation-inputs";
 const IMAGE_GENERATION_OUTPUT_OSS_SCOPE = "image-generation-outputs";
 const ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES = 50;
@@ -128,6 +133,7 @@ const ALIYUN_DASHSCOPE_PDF_RENDER_SCRIPT_PATH = path.resolve(
 const GROUP_CHAT_TEXT_MAX_LENGTH = 1800;
 const GROUP_CHAT_ROOM_NAME_MAX_LENGTH = 30;
 const GROUP_CHAT_REPLY_PREVIEW_MAX_LENGTH = 120;
+const GROUP_CHAT_LOCAL_PARSE_HINT_TEXT = "仅解析文字中的文本";
 const GROUP_CHAT_MAX_REACTIONS_PER_MESSAGE = 32;
 const GROUP_CHAT_REACTION_EMOJI_MAX_SYMBOLS = 6;
 const GROUP_CHAT_MAX_READ_STATES_PER_ROOM = GROUP_CHAT_MAX_MEMBERS_PER_ROOM;
@@ -160,6 +166,35 @@ if (!groupChatOssClient) {
 const AGENT_D_FIXED_PROVIDER = "aliyun";
 const AGENT_D_FIXED_MODEL = "qwen3.5-plus";
 const AGENT_D_FIXED_MAX_OUTPUT_TOKENS = 65536;
+const GROUP_CHAT_VOLCENGINE_SUPPORTED_IMAGE_EXTENSIONS = new Set([
+  "jpg",
+  "jpeg",
+  "png",
+  "gif",
+  "webp",
+  "bmp",
+  "tiff",
+  "ico",
+  "icns",
+  "sgi",
+  "jp2",
+  "heic",
+  "heif",
+]);
+const GROUP_CHAT_VOLCENGINE_SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/bmp",
+  "image/tiff",
+  "image/x-icon",
+  "image/icns",
+  "image/sgi",
+  "image/jp2",
+  "image/heic",
+  "image/heif",
+]);
 
 const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   provider: "inherit",
@@ -176,6 +211,7 @@ const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   maxOutputTokens: 4096,
   maxReasoningTokens: 0,
   enableThinking: true,
+  thinkingEffort: "high",
   includeCurrentTime: false,
   preventPromptLeak: false,
   injectSafetyPrompt: false,
@@ -268,8 +304,8 @@ const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
     ],
     contextWindowTokens: 256000,
     maxInputTokens: 256000,
-    maxOutputTokens: 128000,
-    maxReasoningTokens: 128000,
+    maxOutputTokens: 131072,
+    maxReasoningTokens: 131072,
   },
   {
     id: "doubao-seed-2-0-lite-260215",
@@ -281,8 +317,8 @@ const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
     ],
     contextWindowTokens: 256000,
     maxInputTokens: 224000,
-    maxOutputTokens: 32000,
-    maxReasoningTokens: 32000,
+    maxOutputTokens: 32768,
+    maxReasoningTokens: 32768,
   },
   {
     id: "doubao-seed-2-0-mini-260215",
@@ -294,8 +330,8 @@ const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
     ],
     contextWindowTokens: 256000,
     maxInputTokens: 224000,
-    maxOutputTokens: 32000,
-    maxReasoningTokens: 32000,
+    maxOutputTokens: 32768,
+    maxReasoningTokens: 32768,
   },
   {
     id: "doubao-seed-1-8-251228",
@@ -547,6 +583,36 @@ const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
   },
 ]);
 const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = Object.freeze([
+  {
+    id: "doubao-seed-2-0-pro-260215",
+    aliases: [
+      "doubao-seed-2-0-pro-260215",
+      "doubao-seed-2-0-pro",
+      "doubao-seed-2.0-pro-260215",
+      "doubao-seed-2.0-pro",
+    ],
+    supportsThinking: true,
+  },
+  {
+    id: "doubao-seed-2-0-lite-260215",
+    aliases: [
+      "doubao-seed-2-0-lite-260215",
+      "doubao-seed-2-0-lite",
+      "doubao-seed-2.0-lite-260215",
+      "doubao-seed-2.0-lite",
+    ],
+    supportsThinking: true,
+  },
+  {
+    id: "doubao-seed-2-0-mini-260215",
+    aliases: [
+      "doubao-seed-2-0-mini-260215",
+      "doubao-seed-2-0-mini",
+      "doubao-seed-2.0-mini-260215",
+      "doubao-seed-2.0-mini",
+    ],
+    supportsThinking: true,
+  },
   {
     id: "doubao-seed-1-8-251228",
     aliases: ["doubao-seed-1-8-251228", "doubao-seed-1-8"],
@@ -844,6 +910,10 @@ const uploadedFileContextSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: "",
     },
+    preparedAttachmentTokens: {
+      type: [String],
+      default: () => [],
+    },
     ossFiles: {
       type: [
         new mongoose.Schema(
@@ -1024,6 +1094,32 @@ const groupChatMessageSchema = new mongoose.Schema(
           mimeType: { type: String, default: "" },
           fileName: { type: String, default: "" },
           size: { type: Number, default: 0 },
+          filesApi: {
+            type: new mongoose.Schema(
+              {
+                status: { type: String, default: "" },
+                fileId: { type: String, default: "" },
+                inputType: { type: String, default: "" },
+                uploadedAt: { type: Date, default: null },
+                expiresAt: { type: Date, default: null },
+              },
+              { _id: false },
+            ),
+            default: () => ({}),
+          },
+          oss: {
+            type: new mongoose.Schema(
+              {
+                uploaded: { type: Boolean, default: false },
+                ossKey: { type: String, default: "" },
+                ossBucket: { type: String, default: "" },
+                ossRegion: { type: String, default: "" },
+                fileUrl: { type: String, default: "" },
+              },
+              { _id: false },
+            ),
+            default: () => ({}),
+          },
         },
         { _id: false },
       ),
@@ -1037,6 +1133,34 @@ const groupChatMessageSchema = new mongoose.Schema(
           mimeType: { type: String, default: "" },
           size: { type: Number, default: 0 },
           expiresAt: { type: Date, default: null },
+          localParseOnly: { type: Boolean, default: false },
+          parseHint: { type: String, default: "" },
+          filesApi: {
+            type: new mongoose.Schema(
+              {
+                status: { type: String, default: "" },
+                fileId: { type: String, default: "" },
+                inputType: { type: String, default: "" },
+                uploadedAt: { type: Date, default: null },
+                expiresAt: { type: Date, default: null },
+              },
+              { _id: false },
+            ),
+            default: () => ({}),
+          },
+          oss: {
+            type: new mongoose.Schema(
+              {
+                uploaded: { type: Boolean, default: false },
+                ossKey: { type: String, default: "" },
+                ossBucket: { type: String, default: "" },
+                ossRegion: { type: String, default: "" },
+                fileUrl: { type: String, default: "" },
+              },
+              { _id: false },
+            ),
+            default: () => ({}),
+          },
         },
         { _id: false },
       ),
@@ -1108,6 +1232,10 @@ const runtimeConfigSchema = new mongoose.Schema(
     enableThinking: {
       type: Boolean,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.enableThinking,
+    },
+    thinkingEffort: {
+      type: String,
+      default: DEFAULT_AGENT_RUNTIME_CONFIG.thinkingEffort,
     },
     includeCurrentTime: {
       type: Boolean,
@@ -1864,6 +1992,8 @@ app.post(
   upload.array("files", MAX_FILES),
   async (req, res) => {
     const agentId = sanitizeAgent(req.body?.agentId || "A");
+    const sessionId = sanitizeId(req.body?.sessionId, `admin-debug-${agentId}`);
+    const adminUserId = sanitizeId(req.authAdmin?._id, "admin");
     const messages = readRequestMessages(req.body?.messages);
     const runtimeConfig = sanitizeSingleAgentRuntimeConfig(
       readJsonLikeField(req.body?.runtimeConfig, {}),
@@ -1873,6 +2003,9 @@ app.post(
     const volcengineFileRefs = readRequestVolcengineFileRefs(
       req.body?.volcengineFileRefs,
     );
+    const preparedAttachmentRefs = readRequestPreparedAttachmentRefs(
+      req.body?.preparedAttachmentRefs,
+    );
 
     await streamAgentResponse({
       res,
@@ -1880,8 +2013,11 @@ app.post(
       messages,
       files,
       volcengineFileRefs,
+      preparedAttachmentRefs,
       runtimeConfig,
-      attachUploadedFiles: files.length > 0,
+      chatUserId: adminUserId,
+      sessionId,
+      attachUploadedFiles: files.length > 0 || preparedAttachmentRefs.length > 0,
     });
   },
 );
@@ -1891,19 +2027,27 @@ app.post(
   requireAdminAuth,
   upload.array("files", MAX_FILES),
   async (req, res) => {
+    const sessionId = sanitizeId(req.body?.sessionId, "admin-debug-E");
+    const adminUserId = sanitizeId(req.authAdmin?._id, "admin");
     const messages = readRequestMessages(req.body?.messages);
     const files = Array.isArray(req.files) ? req.files : [];
     const runtimeOverride = readJsonLikeField(req.body?.runtimeOverride, null);
     const volcengineFileRefs = readRequestVolcengineFileRefs(
       req.body?.volcengineFileRefs,
     );
+    const preparedAttachmentRefs = readRequestPreparedAttachmentRefs(
+      req.body?.preparedAttachmentRefs,
+    );
     await streamAgentEResponse({
       res,
       messages,
       files,
       volcengineFileRefs,
+      preparedAttachmentRefs,
       runtimeOverride,
-      attachUploadedFiles: files.length > 0,
+      chatUserId: adminUserId,
+      sessionId,
+      attachUploadedFiles: files.length > 0 || preparedAttachmentRefs.length > 0,
     });
   },
 );
@@ -1947,16 +2091,25 @@ app.post(
         apiKey: providerConfig.apiKey,
         strictSupportedTypes: true,
       });
-      backupChatAttachmentsToOssInBackground({
+      const uploadedToOss = await uploadChatAttachmentsToOss({
         files: uploadedBundle.uploadedFiles,
         userId: "admin",
         sessionId: "",
         source: "admin-volcengine-files-api",
+        stopOnError: false,
+      });
+      const refsWithOss = uploadedBundle.uploadedRefs.map((item, idx) => {
+        const oss = uploadedToOss[idx] || null;
+        return {
+          ...item,
+          url: sanitizeGroupChatHttpUrl(oss?.fileUrl),
+          ossKey: sanitizeGroupChatOssObjectKey(oss?.ossKey),
+        };
       });
 
       res.json({
         ok: true,
-        files: uploadedBundle.uploadedRefs,
+        files: refsWithOss,
       });
     } catch (error) {
       const message = error?.message || "火山文件上传失败，请稍后重试。";
@@ -1965,6 +2118,118 @@ app.post(
         : 500;
       res.status(status).json({
         error: message,
+      });
+    }
+  },
+);
+
+app.post(
+  "/api/auth/admin/attachments/prepare",
+  requireAdminAuth,
+  upload.array("files", MAX_FILES),
+  async (req, res) => {
+    const agentId = sanitizeAgent(req.body?.agentId || "A");
+    const sessionId = sanitizeId(req.body?.sessionId, `admin-debug-${agentId}`);
+    const userId = sanitizeId(req.authAdmin?._id, "admin");
+    const files = Array.isArray(req.files) ? req.files.filter(Boolean) : [];
+    if (files.length === 0) {
+      res.json({ ok: true, files: [] });
+      return;
+    }
+
+    const runtimeConfig = await getResolvedAgentRuntimeConfig(agentId);
+    const provider = getProviderByAgent(agentId, runtimeConfig);
+    const model = getModelByAgent(agentId, runtimeConfig);
+    const protocol = resolveRequestProtocol(runtimeConfig.protocol, provider, model).value;
+    const aliyunFileProcessMode = sanitizeAliyunFileProcessMode(
+      runtimeConfig?.aliyunFileProcessMode,
+    );
+    if (provider !== "aliyun") {
+      res.status(400).json({ error: "当前智能体不需要 PDF 预处理。" });
+      return;
+    }
+
+    try {
+      const preparedFiles = [];
+      for (let idx = 0; idx < files.length; idx += 1) {
+        const file = files[idx];
+        const ext = getFileExtension(file?.originalname);
+        const mime = sanitizeGroupChatFileMimeType(file?.mimetype);
+        if (!isPdfFile(ext, mime)) {
+          throw new Error("仅支持 PDF 预处理，请重新选择文件。");
+        }
+        if (!Buffer.isBuffer(file?.buffer) || file.buffer.length === 0) {
+          throw new Error("PDF 文件内容为空，无法预处理。");
+        }
+
+        const converted = await buildAliyunDashScopePdfImageParts(file, {
+          userId,
+          sessionId,
+          ossScope: CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE,
+        });
+        let parts = Array.isArray(converted?.parts) ? converted.parts : [];
+        let fallbackApplied = false;
+        if (parts.length === 0) {
+          const fallback = await buildParsedFilePreviewTextPart(file, {
+            maxChars: ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS,
+          });
+          if (fallback) {
+            parts = [fallback];
+            fallbackApplied = true;
+          }
+        }
+        if (parts.length === 0) {
+          throw new Error(converted?.error || "PDF 转图片失败，请稍后重试。");
+        }
+
+        const fileName = sanitizeGroupChatFileName(file?.originalname);
+        const fileSize = sanitizeRuntimeInteger(
+          file?.size,
+          file?.buffer?.length,
+          0,
+          GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+        );
+        const token = savePreparedAttachmentToCache({
+          userId,
+          sessionId,
+          provider,
+          protocol,
+          agentId,
+          fileName,
+          mimeType: mime,
+          size: fileSize,
+          parts,
+          extra: {
+            pageCount: Math.max(0, Number(converted?.pageCount) || 0),
+            imageCount: parts.filter((item) => String(item?.type || "") === "image_url").length,
+            fallbackApplied,
+            aliyunFileProcessMode,
+            ossFiles: normalizeUploadedFileContextOssFiles(converted?.ossFiles),
+          },
+        });
+        if (!token) {
+          throw new Error("PDF 预处理缓存失败，请稍后重试。");
+        }
+        const imageCount = parts.filter((item) => String(item?.type || "") === "image_url").length;
+        preparedFiles.push({
+          token,
+          fileName,
+          mimeType: mime,
+          size: fileSize,
+          pageCount: Math.max(0, Number(converted?.pageCount) || 0),
+          imageCount,
+          fallbackApplied,
+          expiresInMs: CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS,
+        });
+      }
+
+      res.json({
+        ok: true,
+        files: preparedFiles,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "PDF 预处理失败，请稍后重试。",
       });
     }
   },
@@ -2010,16 +2275,25 @@ app.post(
         apiKey: providerConfig.apiKey,
         strictSupportedTypes: true,
       });
-      backupChatAttachmentsToOssInBackground({
+      const uploadedToOss = await uploadChatAttachmentsToOss({
         files: uploadedBundle.uploadedFiles,
         userId,
         sessionId: "",
         source: "chat-volcengine-files-api",
+        stopOnError: false,
+      });
+      const refsWithOss = uploadedBundle.uploadedRefs.map((item, idx) => {
+        const oss = uploadedToOss[idx] || null;
+        return {
+          ...item,
+          url: sanitizeGroupChatHttpUrl(oss?.fileUrl),
+          ossKey: sanitizeGroupChatOssObjectKey(oss?.ossKey),
+        };
       });
 
       res.json({
         ok: true,
-        files: uploadedBundle.uploadedRefs,
+        files: refsWithOss,
       });
     } catch (error) {
       const message = error?.message || "火山文件上传失败，请稍后重试。";
@@ -2028,6 +2302,123 @@ app.post(
         : 500;
       res.status(status).json({
         error: message,
+      });
+    }
+  },
+);
+
+app.post(
+  "/api/chat/attachments/prepare",
+  requireChatAuth,
+  upload.array("files", MAX_FILES),
+  async (req, res) => {
+    const agentId = sanitizeAgent(req.body?.agentId || "A");
+    const sessionId = sanitizeId(req.body?.sessionId, "");
+    const userId = sanitizeId(req.authUser?._id, "");
+    if (!userId) {
+      res.status(400).json({ error: "无效用户身份。" });
+      return;
+    }
+
+    const files = Array.isArray(req.files) ? req.files.filter(Boolean) : [];
+    if (files.length === 0) {
+      res.json({ ok: true, files: [] });
+      return;
+    }
+
+    const runtimeConfig = await getResolvedAgentRuntimeConfig(agentId);
+    const provider = getProviderByAgent(agentId, runtimeConfig);
+    const model = getModelByAgent(agentId, runtimeConfig);
+    const protocol = resolveRequestProtocol(runtimeConfig.protocol, provider, model).value;
+    const aliyunFileProcessMode = sanitizeAliyunFileProcessMode(
+      runtimeConfig?.aliyunFileProcessMode,
+    );
+    if (provider !== "aliyun") {
+      res.status(400).json({ error: "当前智能体不需要 PDF 预处理。" });
+      return;
+    }
+
+    try {
+      const preparedFiles = [];
+      for (let idx = 0; idx < files.length; idx += 1) {
+        const file = files[idx];
+        const ext = getFileExtension(file?.originalname);
+        const mime = sanitizeGroupChatFileMimeType(file?.mimetype);
+        if (!isPdfFile(ext, mime)) {
+          throw new Error("仅支持 PDF 预处理，请重新选择文件。");
+        }
+        if (!Buffer.isBuffer(file?.buffer) || file.buffer.length === 0) {
+          throw new Error("PDF 文件内容为空，无法预处理。");
+        }
+
+        const converted = await buildAliyunDashScopePdfImageParts(file, {
+          userId,
+          sessionId,
+          ossScope: CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE,
+        });
+        let parts = Array.isArray(converted?.parts) ? converted.parts : [];
+        let fallbackApplied = false;
+        if (parts.length === 0) {
+          const fallback = await buildParsedFilePreviewTextPart(file, {
+            maxChars: ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS,
+          });
+          if (fallback) {
+            parts = [fallback];
+            fallbackApplied = true;
+          }
+        }
+        if (parts.length === 0) {
+          throw new Error(converted?.error || "PDF 转图片失败，请稍后重试。");
+        }
+
+        const fileName = sanitizeGroupChatFileName(file?.originalname);
+        const fileSize = sanitizeRuntimeInteger(
+          file?.size,
+          file?.buffer?.length,
+          0,
+          GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+        );
+        const token = savePreparedAttachmentToCache({
+          userId,
+          sessionId,
+          provider,
+          protocol,
+          agentId,
+          fileName,
+          mimeType: mime,
+          size: fileSize,
+          parts,
+          extra: {
+            pageCount: Math.max(0, Number(converted?.pageCount) || 0),
+            imageCount: parts.filter((item) => String(item?.type || "") === "image_url").length,
+            fallbackApplied,
+            aliyunFileProcessMode,
+            ossFiles: normalizeUploadedFileContextOssFiles(converted?.ossFiles),
+          },
+        });
+        if (!token) {
+          throw new Error("PDF 预处理缓存失败，请稍后重试。");
+        }
+        const imageCount = parts.filter((item) => String(item?.type || "") === "image_url").length;
+        preparedFiles.push({
+          token,
+          fileName,
+          mimeType: mime,
+          size: fileSize,
+          pageCount: Math.max(0, Number(converted?.pageCount) || 0),
+          imageCount,
+          fallbackApplied,
+          expiresInMs: CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS,
+        });
+      }
+
+      res.json({
+        ok: true,
+        files: preparedFiles,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "PDF 预处理失败，请稍后重试。",
       });
     }
   },
@@ -2044,6 +2435,9 @@ app.post(
     const contextMode = sanitizeSmartContextMode(req.body?.contextMode);
     const volcengineFileRefs = readRequestVolcengineFileRefs(
       req.body?.volcengineFileRefs,
+    );
+    const preparedAttachmentRefs = readRequestPreparedAttachmentRefs(
+      req.body?.preparedAttachmentRefs,
     );
     let messages = [];
     try {
@@ -2064,6 +2458,7 @@ app.post(
       contextMode,
       attachUploadedFiles: true,
       volcengineFileRefs,
+      preparedAttachmentRefs,
     });
   },
 );
@@ -2078,6 +2473,9 @@ app.post(
     const contextMode = sanitizeSmartContextMode(req.body?.contextMode);
     const volcengineFileRefs = readRequestVolcengineFileRefs(
       req.body?.volcengineFileRefs,
+    );
+    const preparedAttachmentRefs = readRequestPreparedAttachmentRefs(
+      req.body?.preparedAttachmentRefs,
     );
     let messages = [];
     try {
@@ -2097,6 +2495,7 @@ app.post(
       contextMode,
       attachUploadedFiles: true,
       volcengineFileRefs,
+      preparedAttachmentRefs,
     });
   },
 );
@@ -2337,6 +2736,9 @@ app.get("/api/group-chat/bootstrap", requireChatAuth, async (req, res) => {
       me: {
         id: userId,
         name: buildGroupChatDisplayName(req.authUser),
+        role: sanitizeText(req.authUser?.role, "user", 20).toLowerCase() === "admin"
+          ? "admin"
+          : "user",
       },
       limits: {
         maxCreatedRoomsPerUser: GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER,
@@ -2732,6 +3134,49 @@ app.get("/api/group-chat/rooms/:roomId/messages", requireChatAuth, async (req, r
   }
 });
 
+app.get("/api/group-chat/rooms/:roomId/files", requireChatAuth, async (req, res) => {
+  const userId = sanitizeId(req.authUser?._id, "");
+  const roomId = sanitizeId(req.params?.roomId, "");
+  if (!userId || !roomId) {
+    res.status(400).json({ error: "无效参数。" });
+    return;
+  }
+  if (!isMongoObjectIdLike(roomId)) {
+    res.status(400).json({ error: "无效群聊 ID。" });
+    return;
+  }
+
+  try {
+    const room = await GroupChatRoom.findOne({ _id: roomId, memberUserIds: userId }).lean();
+    if (!room) {
+      res.status(403).json({ error: "你不在该群聊中，无法查看文件列表。" });
+      return;
+    }
+
+    const docs = await GroupChatMessage.find({
+      roomId,
+      type: { $in: ["file", "image"] },
+    })
+      .sort({ createdAt: -1 })
+      .limit(240)
+      .lean();
+    const items = docs
+      .map((item) => normalizeGroupChatRoomFileItemFromMessageDoc(item))
+      .filter(Boolean)
+      .sort((a, b) => toGroupChatDateTimestamp(b.createdAt) - toGroupChatDateTimestamp(a.createdAt));
+
+    res.json({
+      ok: true,
+      roomId,
+      files: items,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error?.message || "读取群聊文件列表失败，请稍后重试。",
+    });
+  }
+});
+
 app.post("/api/group-chat/rooms/:roomId/read", requireChatAuth, async (req, res) => {
   const userId = sanitizeId(req.authUser?._id, "");
   const roomId = sanitizeId(req.params?.roomId, "");
@@ -2861,12 +3306,13 @@ app.post(
       res.status(400).json({ error: "请选择图片后再发送。" });
       return;
     }
-    const mimeType = String(file.mimetype || "").trim().toLowerCase();
+    const fileName = sanitizeGroupChatImageFileName(req.body?.fileName || file.originalname);
+    const mimeType = sanitizeGroupChatFileMimeType(file.mimetype).toLowerCase();
     if (!mimeType.startsWith("image/")) {
       res.status(400).json({ error: "仅支持图片格式文件。" });
       return;
     }
-
+    let uploadedImageOssKey = "";
     try {
       const room = await GroupChatRoom.findOne({ _id: roomId, memberUserIds: userId }).lean();
       if (!room) {
@@ -2879,8 +3325,27 @@ app.post(
         rawReplyToMessageId: req.body?.replyToMessageId,
       });
       const senderName = buildGroupChatDisplayName(req.authUser);
-      const fileName = sanitizeGroupChatImageFileName(req.body?.fileName || file.originalname);
-      const dataUrl = `data:${mimeType};base64,${file.buffer.toString("base64")}`;
+      const uploadFile = normalizeMultipartUploadFile({
+        ...file,
+        originalname: fileName,
+        mimetype: mimeType,
+      });
+      if (!uploadFile || !Buffer.isBuffer(uploadFile.buffer) || uploadFile.buffer.length === 0) {
+        res.status(400).json({ error: "图片内容为空，无法发送。" });
+        return;
+      }
+      const ossUploadedList = await uploadChatAttachmentsToOss({
+        files: [uploadFile],
+        userId,
+        sessionId: roomId,
+        source: "group-chat-image-message",
+      });
+      const uploadedOss = ossUploadedList[0] || null;
+      uploadedImageOssKey = sanitizeGroupChatOssObjectKey(uploadedOss?.ossKey);
+      if (!uploadedOss || !uploadedImageOssKey) {
+        throw new Error("上传图片到 OSS 失败，请稍后重试。");
+      }
+      const dataUrl = `data:${mimeType};base64,${uploadFile.buffer.toString("base64")}`;
 
       const messageDoc = await GroupChatMessage.create({
         roomId,
@@ -2893,6 +3358,20 @@ app.post(
           mimeType,
           fileName,
           size: Number(file.size) || 0,
+          filesApi: {
+            status: "not_supported",
+            fileId: "",
+            inputType: "input_image",
+            uploadedAt: null,
+            expiresAt: null,
+          },
+          oss: {
+            uploaded: !!uploadedOss,
+            ossKey: sanitizeGroupChatOssObjectKey(uploadedOss?.ossKey),
+            ossBucket: sanitizeAliyunOssBucket(uploadedOss?.ossBucket),
+            ossRegion: sanitizeAliyunOssRegion(uploadedOss?.ossRegion),
+            fileUrl: sanitizeGroupChatHttpUrl(uploadedOss?.fileUrl),
+          },
         },
         replyToMessageId: replyMeta.replyToMessageId,
         replyPreviewText: replyMeta.replyPreviewText,
@@ -2917,6 +3396,9 @@ app.post(
         message: normalizedMessage,
       });
     } catch (error) {
+      if (uploadedImageOssKey) {
+        await deleteGroupChatOssObject(uploadedImageOssKey).catch(() => {});
+      }
       res.status(500).json({
         error: error?.message || "发送图片失败，请稍后重试。",
       });
@@ -2962,6 +3444,21 @@ app.post(
     let storedFileDoc = null;
     let createdMessageId = "";
     let uploadedOssKey = "";
+    const filesApiInputType = classifyGroupChatVolcengineSupportedInputType({
+      fileName,
+      mimeType,
+    });
+    const filesApiSupported =
+      filesApiInputType === "input_file" || filesApiInputType === "input_image";
+    const filesApiMeta = {
+      status: "not_supported",
+      fileId: "",
+      inputType: filesApiInputType || "",
+      uploadedAt: null,
+      expiresAt: null,
+    };
+    const localParseOnly = !filesApiSupported;
+    const parseHint = localParseOnly ? GROUP_CHAT_LOCAL_PARSE_HINT_TEXT : "";
 
     try {
       const room = await GroupChatRoom.findOne({ _id: roomId, memberUserIds: userId }).lean();
@@ -3018,6 +3515,16 @@ app.post(
           mimeType,
           size: fileSize,
           expiresAt,
+          localParseOnly,
+          parseHint,
+          filesApi: filesApiMeta,
+          oss: {
+            uploaded: sanitizeGroupChatFileStorageType(storagePayload?.storageType) === "oss",
+            ossKey: sanitizeGroupChatOssObjectKey(storagePayload?.ossKey),
+            ossBucket: sanitizeAliyunOssBucket(storagePayload?.ossBucket),
+            ossRegion: sanitizeAliyunOssRegion(storagePayload?.ossRegion),
+            fileUrl: sanitizeGroupChatHttpUrl(storagePayload?.fileUrl),
+          },
         },
         replyToMessageId: replyMeta.replyToMessageId,
         replyPreviewText: replyMeta.replyPreviewText,
@@ -3634,11 +4141,85 @@ function normalizeUploadedFileContextOssFiles(value) {
     .filter((item) => !!item.ossKey || !!item.fileUrl);
 }
 
+function resolveUploadedContextOssFileForInputFile(file, ossFiles = []) {
+  const safeList = Array.isArray(ossFiles) ? ossFiles : [];
+  if (safeList.length === 0) return null;
+
+  const fallbackName = sanitizeGroupChatFileName(file?.originalname);
+  const fallbackSize = Number(file?.size || 0);
+  const fallbackMime = sanitizeGroupChatFileMimeType(file?.mimetype || "");
+
+  return (
+    safeList.find((item) => {
+      const sameName =
+        sanitizeGroupChatFileName(item?.fileName) === fallbackName && !!fallbackName;
+      const sameSize =
+        Number(item?.size || 0) === fallbackSize && Number.isFinite(fallbackSize);
+      const sameMime =
+        sanitizeGroupChatFileMimeType(item?.mimeType || "") === fallbackMime &&
+        !!fallbackMime;
+      return sameName || (sameSize && sameMime);
+    }) || null
+  );
+}
+
+function dedupeUploadedFileContextOssFiles(value) {
+  const safeList = normalizeUploadedFileContextOssFiles(value);
+  if (safeList.length <= 1) return safeList;
+
+  const dedup = new Set();
+  const normalized = [];
+  safeList.forEach((item) => {
+    const key = `${sanitizeGroupChatOssObjectKey(item?.ossKey)}::${sanitizeGroupChatHttpUrl(
+      item?.fileUrl,
+    )}`;
+    if (dedup.has(key)) return;
+    dedup.add(key);
+    normalized.push(item);
+  });
+  return normalized;
+}
+
+async function buildUploadedAttachmentLinksForClient(ossFiles = []) {
+  const safeList = normalizeUploadedFileContextOssFiles(ossFiles);
+  if (safeList.length === 0) return [];
+
+  const links = [];
+  for (let idx = 0; idx < safeList.length; idx += 1) {
+    const item = safeList[idx];
+    const fileName = sanitizeGroupChatFileName(item?.fileName);
+    const directUrl = sanitizeGroupChatHttpUrl(item?.fileUrl);
+    const previewUrl =
+      groupChatOssConfig?.publicRead && directUrl
+        ? directUrl
+        : await resolveAliyunDashScopeAttachmentUrl({
+            ossFile: item,
+            fallbackFileName: fileName,
+          });
+    const safeUrl = sanitizeGroupChatHttpUrl(previewUrl || directUrl);
+    if (!safeUrl) continue;
+    links.push({
+      fileName,
+      mimeType: sanitizeGroupChatFileMimeType(item?.mimeType),
+      size: sanitizeRuntimeInteger(
+        item?.size,
+        0,
+        0,
+        GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+      ),
+      ossKey: sanitizeGroupChatOssObjectKey(item?.ossKey),
+      url: safeUrl,
+    });
+  }
+  return links;
+}
+
 async function saveUploadedFileContext({
   userId,
   sessionId,
   messageId,
   content,
+  preparedAttachmentTokens = [],
   ossFiles = [],
 }) {
   const identity = resolveUploadedFileContextIdentity({
@@ -3650,6 +4231,8 @@ async function saveUploadedFileContext({
   const normalized = normalizeMessageContent(content);
   if (!hasUsableMessageContent(normalized)) return;
   const clonedContent = cloneNormalizedMessageContent(normalized);
+  const safePreparedTokens = sanitizePreparedAttachmentTokens(preparedAttachmentTokens);
+  const safeOssFiles = dedupeUploadedFileContextOssFiles(ossFiles);
 
   try {
     await UploadedFileContext.findOneAndUpdate(
@@ -3661,7 +4244,8 @@ async function saveUploadedFileContext({
       {
         $set: {
           content: clonedContent,
-          ossFiles: normalizeUploadedFileContextOssFiles(ossFiles),
+          preparedAttachmentTokens: safePreparedTokens,
+          ossFiles: safeOssFiles,
           expiresAt: buildUploadedFileContextExpireAt(),
         },
         $setOnInsert: {
@@ -3801,6 +4385,7 @@ async function rehydrateUploadedFileContexts(
     sessionId,
     provider = "",
     protocol = "",
+    agentId = "",
     model = "",
     aliyunFileProcessMode = "local_parse",
   } = {},
@@ -3811,6 +4396,7 @@ async function rehydrateUploadedFileContexts(
   if (!safeUserId || !safeSessionId) return;
   const safeProvider = normalizeProvider(provider);
   const safeProtocol = sanitizeRuntimeProtocol(protocol);
+  const safeAgentId = sanitizeAgent(agentId);
   const safeAliyunFileProcessMode = sanitizeAliyunFileProcessMode(
     aliyunFileProcessMode,
   );
@@ -3847,7 +4433,7 @@ async function rehydrateUploadedFileContexts(
         messageId: { $in: messageIds },
         expiresAt: { $gt: new Date() },
       },
-      { messageId: 1, content: 1, ossFiles: 1 },
+      { messageId: 1, content: 1, ossFiles: 1, preparedAttachmentTokens: 1 },
     ).lean();
   } catch (error) {
     console.warn(
@@ -3872,6 +4458,31 @@ async function rehydrateUploadedFileContexts(
         doc?.ossFiles,
         { includeNativeDocuments: includeAliyunNativeDocuments },
       );
+    }
+    if (
+      safeProvider === "aliyun" &&
+      resolveAliyunProtocol(safeProtocol) === "dashscope" &&
+      Array.isArray(doc?.preparedAttachmentTokens) &&
+      doc.preparedAttachmentTokens.length > 0
+    ) {
+      const tokenRefs = doc.preparedAttachmentTokens.map((token) => ({ token }));
+      const preparedResolution = resolvePreparedAttachmentRefsFromCache({
+        refs: tokenRefs,
+        userId: safeUserId,
+        sessionId: safeSessionId,
+        provider: safeProvider,
+        protocol: safeProtocol,
+        agentId: safeAgentId,
+      });
+      const preparedParts = Array.isArray(preparedResolution?.entries)
+        ? preparedResolution.entries.flatMap((entry) =>
+            cloneNormalizedMessageContent(normalizeMessageContent(entry?.parts)),
+          )
+        : [];
+      if (preparedParts.length > 0) {
+        const textParts = extractTextPartsForAliyunContext(hydrated);
+        hydrated = [...textParts, ...preparedParts];
+      }
     }
     if (!hasUsableMessageContent(hydrated)) continue;
     contentByMessageId.set(messageId, hydrated);
@@ -3929,6 +4540,204 @@ function sanitizeVolcengineFileRefsPayload(input) {
     .filter(Boolean);
 }
 
+function sanitizePreparedAttachmentRefsPayload(input) {
+  const source = Array.isArray(input) ? input : [];
+  const dedup = new Set();
+  const list = [];
+  source.slice(0, CHAT_PREPARED_ATTACHMENT_MAX_REFS).forEach((item) => {
+    const token = sanitizePreparedAttachmentToken(item?.token || item?.preparedToken);
+    if (!token || dedup.has(token)) return;
+    dedup.add(token);
+    list.push({
+      token,
+      fileName: sanitizeGroupChatFileName(item?.fileName || item?.name),
+      mimeType: sanitizeGroupChatFileMimeType(item?.mimeType || item?.type),
+      size: sanitizeRuntimeInteger(
+        item?.size,
+        0,
+        0,
+        GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+      ),
+    });
+  });
+  return list;
+}
+
+function sanitizePreparedAttachmentTokens(input, maxCount = CHAT_PREPARED_ATTACHMENT_MAX_REFS) {
+  const source = Array.isArray(input) ? input : [];
+  const dedup = new Set();
+  const tokens = [];
+  source.slice(0, Math.max(0, Number(maxCount) || CHAT_PREPARED_ATTACHMENT_MAX_REFS)).forEach((item) => {
+    const token = sanitizePreparedAttachmentToken(item);
+    if (!token || dedup.has(token)) return;
+    dedup.add(token);
+    tokens.push(token);
+  });
+  return tokens;
+}
+
+function pruneExpiredChatPreparedAttachmentCache(now = Date.now()) {
+  const safeNow = Number.isFinite(now) ? now : Date.now();
+  if (chatPreparedAttachmentCache.size === 0) return;
+
+  for (const [token, entry] of chatPreparedAttachmentCache.entries()) {
+    const expireAtMs = Number(entry?.expireAtMs) || 0;
+    if (expireAtMs > safeNow) continue;
+    chatPreparedAttachmentCache.delete(token);
+  }
+}
+
+function trimChatPreparedAttachmentCache(maxItems = CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS) {
+  const safeLimit = Math.max(40, Number(maxItems) || CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS);
+  if (chatPreparedAttachmentCache.size <= safeLimit) return;
+
+  const sorted = Array.from(chatPreparedAttachmentCache.entries()).sort((a, b) => {
+    const aCreated = Number(a?.[1]?.createdAtMs) || 0;
+    const bCreated = Number(b?.[1]?.createdAtMs) || 0;
+    return aCreated - bCreated;
+  });
+  const removeCount = Math.max(0, sorted.length - safeLimit);
+  for (let idx = 0; idx < removeCount; idx += 1) {
+    const token = sorted[idx]?.[0];
+    if (!token) continue;
+    chatPreparedAttachmentCache.delete(token);
+  }
+}
+
+function createChatPreparedAttachmentToken() {
+  return sanitizePreparedAttachmentToken(crypto.randomBytes(20).toString("hex"));
+}
+
+function savePreparedAttachmentToCache({
+  userId = "",
+  sessionId = "",
+  provider = "",
+  protocol = "",
+  agentId = "",
+  fileName = "",
+  mimeType = "application/octet-stream",
+  size = 0,
+  parts = [],
+  extra = {},
+}) {
+  const safeUserId = sanitizeId(userId, "");
+  if (!safeUserId) return "";
+
+  const normalizedParts = cloneNormalizedMessageContent(normalizeMessageContent(parts));
+  if (!Array.isArray(normalizedParts) || normalizedParts.length === 0) return "";
+
+  pruneExpiredChatPreparedAttachmentCache();
+  trimChatPreparedAttachmentCache();
+
+  let token = createChatPreparedAttachmentToken();
+  for (let attempt = 0; attempt < 3 && (!token || chatPreparedAttachmentCache.has(token)); attempt += 1) {
+    token = createChatPreparedAttachmentToken();
+  }
+  if (!token || chatPreparedAttachmentCache.has(token)) return "";
+
+  const now = Date.now();
+  const expireAtMs = now + CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS;
+  const safeSessionId = sanitizeId(sessionId, "");
+  const safeAgentId = sanitizeAgent(agentId);
+  chatPreparedAttachmentCache.set(token, {
+    token,
+    userId: safeUserId,
+    sessionId: safeSessionId,
+    provider: normalizeProvider(provider),
+    protocol: sanitizeRuntimeProtocol(protocol),
+    agentId: safeAgentId,
+    fileName: sanitizeGroupChatFileName(fileName),
+    mimeType: sanitizeGroupChatFileMimeType(mimeType),
+    size: sanitizeRuntimeInteger(size, 0, 0, GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES),
+    parts: normalizedParts,
+    extra: extra && typeof extra === "object" ? extra : {},
+    createdAtMs: now,
+    expireAtMs,
+  });
+  trimChatPreparedAttachmentCache();
+  return token;
+}
+
+function resolvePreparedAttachmentRefsFromCache({
+  refs = [],
+  userId = "",
+  sessionId = "",
+  provider = "",
+  protocol = "",
+  agentId = "",
+}) {
+  const safeRefs = sanitizePreparedAttachmentRefsPayload(refs);
+  if (safeRefs.length === 0) {
+    return { entries: [], missing: [], mismatched: [] };
+  }
+
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  const safeProvider = normalizeProvider(provider);
+  const safeProtocol = sanitizeRuntimeProtocol(protocol);
+  const safeAgentId = sanitizeAgent(agentId);
+  pruneExpiredChatPreparedAttachmentCache();
+
+  const entries = [];
+  const missing = [];
+  const mismatched = [];
+  safeRefs.forEach((ref) => {
+    const token = sanitizePreparedAttachmentToken(ref?.token);
+    if (!token) return;
+    const cached = chatPreparedAttachmentCache.get(token);
+    if (!cached) {
+      missing.push(ref);
+      return;
+    }
+
+    if (sanitizeId(cached.userId, "") !== safeUserId) {
+      mismatched.push(ref);
+      return;
+    }
+    const cachedSessionId = sanitizeId(cached.sessionId, "");
+    if (safeSessionId && cachedSessionId && cachedSessionId !== safeSessionId) {
+      mismatched.push(ref);
+      return;
+    }
+    const cachedProvider = normalizeProvider(cached.provider || "");
+    if (cachedProvider && safeProvider && cachedProvider !== safeProvider) {
+      mismatched.push(ref);
+      return;
+    }
+    const cachedProtocol = sanitizeRuntimeProtocol(cached.protocol || "");
+    if (cachedProtocol && safeProtocol && cachedProtocol !== safeProtocol) {
+      mismatched.push(ref);
+      return;
+    }
+    const cachedAgentId = sanitizeAgent(cached.agentId || safeAgentId);
+    if (safeAgentId && cachedAgentId && cachedAgentId !== safeAgentId) {
+      mismatched.push(ref);
+      return;
+    }
+
+    const normalizedParts = cloneNormalizedMessageContent(normalizeMessageContent(cached.parts));
+    if (!Array.isArray(normalizedParts) || normalizedParts.length === 0) {
+      missing.push(ref);
+      return;
+    }
+    entries.push({
+      token,
+      fileName: sanitizeGroupChatFileName(cached.fileName || ref?.fileName),
+      mimeType: sanitizeGroupChatFileMimeType(cached.mimeType || ref?.mimeType),
+      size: sanitizeRuntimeInteger(
+        cached.size,
+        ref?.size,
+        0,
+        GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+      ),
+      parts: normalizedParts,
+      extra: cached.extra && typeof cached.extra === "object" ? cached.extra : {},
+    });
+  });
+
+  return { entries, missing, mismatched };
+}
+
 function attachVolcengineFileRefsToLatestUserMessage(messages, fileRefs) {
   const safeRefs = sanitizeVolcengineFileRefsPayload(fileRefs);
   if (safeRefs.length === 0 || !Array.isArray(messages) || messages.length === 0) return null;
@@ -3979,6 +4788,39 @@ function attachVolcengineFileRefsToLatestUserMessage(messages, fileRefs) {
   };
 }
 
+function attachPreparedAttachmentPartsToLatestUserMessage(messages, preparedEntries = []) {
+  const safeEntries = Array.isArray(preparedEntries) ? preparedEntries : [];
+  if (safeEntries.length === 0) return null;
+  const msg = resolveLatestUserMessage(messages);
+  if (!msg) return null;
+
+  const existing = normalizeMessageContent(msg.content);
+  const parts = Array.isArray(existing)
+    ? cloneNormalizedMessageContent(existing)
+    : existing
+      ? [{ type: "text", text: String(existing || "") }]
+      : [];
+  const usedTokens = [];
+
+  safeEntries.forEach((entry) => {
+    const token = sanitizePreparedAttachmentToken(entry?.token);
+    const normalizedParts = cloneNormalizedMessageContent(
+      normalizeMessageContent(entry?.parts),
+    );
+    if (!Array.isArray(normalizedParts) || normalizedParts.length === 0) return;
+    parts.push(...normalizedParts);
+    if (token) usedTokens.push(token);
+  });
+
+  if (parts.length === 0) return null;
+  msg.content = parts;
+  return {
+    messageId: sanitizeId(msg.id, ""),
+    content: cloneNormalizedMessageContent(parts),
+    usedTokens,
+  };
+}
+
 async function attachFilesToLatestUserMessage(
   messages,
   files,
@@ -3986,21 +4828,29 @@ async function attachFilesToLatestUserMessage(
     provider = "openrouter",
     protocol = "chat",
     ossFiles = [],
+    userId = "",
+    sessionId = "",
     aliyunFileProcessMode = "local_parse",
   } = {},
 ) {
   if (!files || files.length === 0) return null;
 
   if (provider === "openrouter" && protocol === "chat") {
-    return attachFilesToLatestUserMessageForOpenRouter(messages, files);
+    return attachFilesToLatestUserMessageForOpenRouter(messages, files, {
+      ossFiles,
+    });
   }
   if (provider === "aliyun" && protocol === "dashscope") {
     return attachFilesToLatestUserMessageForAliyunDashScope(messages, files, {
       ossFiles,
+      userId,
+      sessionId,
       aliyunFileProcessMode,
     });
   }
-  return attachFilesToLatestUserMessageByLocalParsing(messages, files);
+  return attachFilesToLatestUserMessageByLocalParsing(messages, files, {
+    ossFiles,
+  });
 }
 
 function stripAliyunDocumentUrlPartsFromMessages(messages) {
@@ -4115,7 +4965,7 @@ function resolveOpenRouterVideoMime({ mime, ext }) {
   return "";
 }
 
-function buildOpenRouterFileInputPart(file) {
+async function buildOpenRouterFileInputPart(file, { ossFile = null } = {}) {
   const safeBuffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from([]);
   if (safeBuffer.length === 0) return null;
 
@@ -4126,9 +4976,12 @@ function buildOpenRouterFileInputPart(file) {
   const safeName = sanitizeText(file?.originalname, "upload.bin", 180);
 
   if (mime.startsWith("image/")) {
-    const imageUrl = buildDataUrlForBuffer(safeBuffer, mime || "image/jpeg");
-    if (!imageUrl) return null;
-    return { type: "image_url", image_url: { url: imageUrl } };
+    const imageUrlFromOss = await resolveAliyunDashScopeAttachmentUrl({
+      ossFile,
+      fallbackFileName: safeName,
+    });
+    if (!imageUrlFromOss) return null;
+    return { type: "image_url", image_url: { url: imageUrlFromOss } };
   }
 
   if (isPdfFile(ext, mime)) {
@@ -4156,7 +5009,11 @@ function buildOpenRouterFileInputPart(file) {
 
   const videoMime = resolveOpenRouterVideoMime({ mime, ext });
   if (videoMime && OPENROUTER_VIDEO_EXTENSIONS.has(videoMime.replace("video/", ""))) {
-    const videoUrl = buildDataUrlForBuffer(safeBuffer, videoMime);
+    const videoUrlFromOss = await resolveAliyunDashScopeAttachmentUrl({
+      ossFile,
+      fallbackFileName: safeName,
+    });
+    const videoUrl = videoUrlFromOss || buildDataUrlForBuffer(safeBuffer, videoMime);
     if (!videoUrl) return null;
     return { type: "video_url", video_url: { url: videoUrl } };
   }
@@ -4315,10 +5172,25 @@ async function renderPdfToAliyunDashScopeImagesWithPython({
   }
 }
 
-async function buildAliyunDashScopePdfImageParts(file) {
+async function buildAliyunDashScopePdfImageParts(
+  file,
+  {
+    userId = "",
+    sessionId = "",
+    ossScope = CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE,
+  } = {},
+) {
   const safeBuffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from([]);
   if (safeBuffer.length === 0) {
-    return { parts: [], pageCount: 0, error: "empty pdf buffer" };
+    return { parts: [], pageCount: 0, error: "empty pdf buffer", ossFiles: [] };
+  }
+  if (!groupChatOssClient || !groupChatOssConfig) {
+    return {
+      parts: [],
+      pageCount: 0,
+      error: "OSS 未配置，无法处理 PDF 图片。",
+      ossFiles: [],
+    };
   }
   const safeName = sanitizeText(file?.originalname, "document.pdf", 180);
   let tempDir = "";
@@ -4336,18 +5208,54 @@ async function buildAliyunDashScopePdfImageParts(file) {
       dpi: ALIYUN_DASHSCOPE_PDF_RENDER_DPI,
     });
     const imageParts = [];
-    for (const renderedPath of rendered.renderedPaths) {
+    const imageOssFiles = [];
+    const baseName = safeName.replace(/\.[a-z0-9]+$/i, "") || "document";
+    for (let idx = 0; idx < rendered.renderedPaths.length; idx += 1) {
+      const renderedPath = rendered.renderedPaths[idx];
       const imageBuffer = await readFileAsync(renderedPath).catch(() => Buffer.from([]));
       if (!imageBuffer.length) continue;
-      const imageDataUrl = buildDataUrlForBuffer(imageBuffer, "image/jpeg");
-      if (!imageDataUrl) continue;
-      imageParts.push({ type: "image_url", image_url: { url: imageDataUrl } });
+
+      const uploaded = await uploadBufferToGroupChatOss({
+        scope: ossScope,
+        userId,
+        sessionId,
+        fileName: `${baseName}-page-${idx + 1}.jpg`,
+        mimeType: "image/jpeg",
+        dataBuffer: imageBuffer,
+        cacheControl: "private, no-store",
+      });
+      if (!uploaded) continue;
+
+      const ossFile = {
+        fileName: sanitizeGroupChatFileName(uploaded.fileName),
+        mimeType: sanitizeGroupChatFileMimeType(uploaded.mimeType),
+        size: sanitizeRuntimeInteger(
+          uploaded.size,
+          imageBuffer.length,
+          0,
+          GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+        ),
+        source: "prepared-pdf-image",
+        ossKey: sanitizeGroupChatOssObjectKey(uploaded.ossKey),
+        ossBucket: sanitizeAliyunOssBucket(uploaded.ossBucket),
+        ossRegion: sanitizeAliyunOssRegion(uploaded.ossRegion),
+        fileUrl: sanitizeGroupChatHttpUrl(uploaded.fileUrl),
+      };
+      const imageUrl = await resolveAliyunDashScopeAttachmentUrl({
+        ossFile,
+        fallbackFileName: ossFile.fileName,
+      });
+      if (!imageUrl) continue;
+
+      imageOssFiles.push(ossFile);
+      imageParts.push({ type: "image_url", image_url: { url: imageUrl } });
     }
     if (imageParts.length === 0) {
       return {
         parts: [],
         pageCount: rendered.pageCount,
         error: rendered.error || "pdf rendered with no pages",
+        ossFiles: [],
       };
     }
 
@@ -4364,12 +5272,14 @@ async function buildAliyunDashScopePdfImageParts(file) {
       parts: [{ type: "text", text: summaryLines.join("\n") }, ...imageParts],
       pageCount: rendered.pageCount,
       error: "",
+      ossFiles: imageOssFiles,
     };
   } catch (error) {
     return {
       parts: [],
       pageCount: 0,
       error: sanitizeText(error?.message, "pdf render failed", 600),
+      ossFiles: [],
     };
   } finally {
     if (tempDir) {
@@ -4380,7 +5290,12 @@ async function buildAliyunDashScopePdfImageParts(file) {
 
 async function buildAliyunDashScopeFileInputParts(
   file,
-  { ossFile = null, aliyunFileProcessMode = "local_parse" } = {},
+  {
+    ossFile = null,
+    userId = "",
+    sessionId = "",
+    aliyunFileProcessMode = "local_parse",
+  } = {},
 ) {
   const safeBuffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from([]);
   if (safeBuffer.length === 0) return [];
@@ -4399,10 +5314,7 @@ async function buildAliyunDashScopeFileInputParts(
     if (urlFromOss) {
       return [{ type: "image_url", image_url: { url: urlFromOss } }];
     }
-    const imageUrl = buildDataUrlForBuffer(safeBuffer, mime || "image/jpeg");
-    if (imageUrl) {
-      return [{ type: "image_url", image_url: { url: imageUrl } }];
-    }
+    return [];
   }
 
   const videoMime = resolveAliyunVideoMime({ mime, ext });
@@ -4421,7 +5333,11 @@ async function buildAliyunDashScopeFileInputParts(
   }
 
   if (isPdfFile(ext, mime)) {
-    const converted = await buildAliyunDashScopePdfImageParts(file);
+    const converted = await buildAliyunDashScopePdfImageParts(file, {
+      userId,
+      sessionId,
+      ossScope: CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE,
+    });
     if (converted.parts.length > 0) {
       return converted.parts;
     }
@@ -4490,16 +5406,29 @@ async function buildParsedFilePreviewTextPart(
   };
 }
 
-async function attachFilesToLatestUserMessageForOpenRouter(messages, files) {
+async function attachFilesToLatestUserMessageForOpenRouter(
+  messages,
+  files,
+  { ossFiles = [] } = {},
+) {
   const msg = resolveLatestUserMessage(messages);
   if (!msg) return null;
 
   const parts = buildInitialAttachmentParts(msg.content);
+  const safeOssFiles = Array.isArray(ossFiles) ? ossFiles : [];
   for (const file of files) {
-    const openRouterPart = buildOpenRouterFileInputPart(file);
+    const openRouterPart = await buildOpenRouterFileInputPart(file, {
+      ossFile: resolveUploadedContextOssFileForInputFile(file, safeOssFiles),
+    });
     if (openRouterPart) {
       parts.push(openRouterPart);
       continue;
+    }
+    const mime = String(file?.mimetype || "")
+      .trim()
+      .toLowerCase();
+    if (mime.startsWith("image/")) {
+      throw new Error("图片附件上传到 OSS 失败，请重试。");
     }
 
     const fallback = await buildParsedFilePreviewTextPart(file);
@@ -4517,7 +5446,12 @@ async function attachFilesToLatestUserMessageForOpenRouter(messages, files) {
 async function attachFilesToLatestUserMessageForAliyunDashScope(
   messages,
   files,
-  { ossFiles = [], aliyunFileProcessMode = "local_parse" } = {},
+  {
+    ossFiles = [],
+    userId = "",
+    sessionId = "",
+    aliyunFileProcessMode = "local_parse",
+  } = {},
 ) {
   const msg = resolveLatestUserMessage(messages);
   if (!msg) return null;
@@ -4526,29 +5460,23 @@ async function attachFilesToLatestUserMessageForAliyunDashScope(
   const safeOssFiles = Array.isArray(ossFiles) ? ossFiles : [];
   for (let idx = 0; idx < files.length; idx += 1) {
     const file = files[idx];
-    const fallbackName = sanitizeGroupChatFileName(file?.originalname);
-    const fallbackSize = Number(file?.size || 0);
-    const fallbackMime = sanitizeGroupChatFileMimeType(file?.mimetype || "");
     const ossFile =
-      safeOssFiles[idx] ||
-      safeOssFiles.find((item) => {
-        const sameName =
-          sanitizeGroupChatFileName(item?.fileName) === fallbackName && !!fallbackName;
-        const sameSize =
-          Number(item?.size || 0) === fallbackSize && Number.isFinite(fallbackSize);
-        const sameMime =
-          sanitizeGroupChatFileMimeType(item?.mimeType || "") === fallbackMime &&
-          !!fallbackMime;
-        return sameName || (sameSize && sameMime);
-      }) ||
-      null;
+      safeOssFiles[idx] || resolveUploadedContextOssFileForInputFile(file, safeOssFiles);
     const resolvedParts = await buildAliyunDashScopeFileInputParts(file, {
       ossFile,
+      userId,
+      sessionId,
       aliyunFileProcessMode,
     });
     if (Array.isArray(resolvedParts) && resolvedParts.length > 0) {
       parts.push(...resolvedParts);
       continue;
+    }
+    const mime = String(file?.mimetype || "")
+      .trim()
+      .toLowerCase();
+    if (mime.startsWith("image/")) {
+      throw new Error("图片附件上传到 OSS 失败，请重试。");
     }
     const fallback = await buildParsedFilePreviewTextPart(file, {
       maxChars: ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS,
@@ -4566,21 +5494,30 @@ async function attachFilesToLatestUserMessageForAliyunDashScope(
   };
 }
 
-async function attachFilesToLatestUserMessageByLocalParsing(messages, files) {
+async function attachFilesToLatestUserMessageByLocalParsing(
+  messages,
+  files,
+  { ossFiles = [] } = {},
+) {
   const msg = resolveLatestUserMessage(messages);
   if (!msg) return null;
 
   const parts = buildInitialAttachmentParts(msg.content);
+  const safeOssFiles = Array.isArray(ossFiles) ? ossFiles : [];
   for (const file of files) {
     const mime = String(file?.mimetype || "application/octet-stream")
       .trim()
       .toLowerCase();
 
     if (mime.startsWith("image/")) {
-      const imageUrl = buildDataUrlForBuffer(file?.buffer, mime);
-      if (imageUrl) {
-        parts.push({ type: "image_url", image_url: { url: imageUrl } });
+      const imageUrlFromOss = await resolveAliyunDashScopeAttachmentUrl({
+        ossFile: resolveUploadedContextOssFileForInputFile(file, safeOssFiles),
+        fallbackFileName: sanitizeText(file?.originalname, "image.jpg", 180),
+      });
+      if (!imageUrlFromOss) {
+        throw new Error("图片附件上传到 OSS 失败，请重试。");
       }
+      parts.push({ type: "image_url", image_url: { url: imageUrlFromOss } });
       continue;
     }
 
@@ -4604,6 +5541,7 @@ async function streamAgentEResponse({
   messages,
   files = [],
   volcengineFileRefs = [],
+  preparedAttachmentRefs = [],
   runtimeOverride = null,
   chatUserId = "",
   sessionId = "",
@@ -4645,6 +5583,7 @@ async function streamAgentEResponse({
     messages,
     files,
     volcengineFileRefs,
+    preparedAttachmentRefs,
     runtimeConfig: runtime,
     systemPromptOverride: composedSystemPrompt,
     providerOverride: effectiveProvider,
@@ -4673,6 +5612,7 @@ async function streamAgentResponse({
   messages,
   files = [],
   volcengineFileRefs = [],
+  preparedAttachmentRefs = [],
   runtimeConfig = null,
   systemPromptOverride = "",
   providerOverride = "",
@@ -4709,7 +5649,7 @@ async function streamAgentResponse({
   const shouldUsePersistentFileContext =
     (provider === "volcengine" && protocol === "responses") ||
     (provider === "openrouter" && protocol === "chat") ||
-    (provider === "aliyun" && protocol === "dashscope");
+    provider === "aliyun";
   const shouldKeepOnlyLatestAliyunFileContext =
     provider === "aliyun" && protocol === "dashscope";
   const providerConfig = getProviderConfig(provider);
@@ -4720,7 +5660,11 @@ async function streamAgentResponse({
     return;
   }
   const thinkingEnabled = sanitizeEnableThinking(config.enableThinking);
-  const reasoningEffortRequested = thinkingEnabled ? "high" : "none";
+  const configuredThinkingEffort = sanitizeReasoningEffort(
+    config?.thinkingEffort,
+    DEFAULT_AGENT_RUNTIME_CONFIG.thinkingEffort,
+  );
+  const reasoningEffortRequested = thinkingEnabled ? configuredThinkingEffort : "none";
   const reasoning = resolveReasoningPolicy(
     model,
     reasoningEffortRequested,
@@ -4747,6 +5691,54 @@ async function streamAgentResponse({
   let safeMessages = normalizeMessages(messages);
   let filesForLocalAttach = Array.isArray(files) ? files.filter(Boolean) : [];
   let effectiveVolcengineFileRefs = sanitizeVolcengineFileRefsPayload(volcengineFileRefs);
+  const effectivePreparedAttachmentRefs = sanitizePreparedAttachmentRefsPayload(
+    preparedAttachmentRefs,
+  );
+  const preparedAttachmentResolution =
+    attachUploadedFiles && effectivePreparedAttachmentRefs.length > 0
+      ? resolvePreparedAttachmentRefsFromCache({
+          refs: effectivePreparedAttachmentRefs,
+          userId: chatUserId,
+          sessionId,
+          provider,
+          protocol,
+          agentId,
+        })
+      : { entries: [], missing: [], mismatched: [] };
+  const preparedAttachmentEntries = Array.isArray(preparedAttachmentResolution?.entries)
+    ? preparedAttachmentResolution.entries
+    : [];
+  if (
+    attachUploadedFiles &&
+    effectivePreparedAttachmentRefs.length > 0 &&
+    (preparedAttachmentResolution.missing.length > 0 ||
+      preparedAttachmentResolution.mismatched.length > 0)
+  ) {
+    res.status(400).json({
+      error: "PDF 预处理结果已失效或与当前会话不匹配，请重新上传后再发送。",
+    });
+    return;
+  }
+  const hasPreparedAttachmentEntries = preparedAttachmentEntries.length > 0;
+  if (
+    provider === "volcengine" &&
+    protocol !== "responses" &&
+    attachUploadedFiles &&
+    (filesForLocalAttach.length > 0 || effectiveVolcengineFileRefs.length > 0)
+  ) {
+    res.status(400).json({
+      error: "火山引擎图片/文件仅支持 Responses 协议 Files API，请将 protocol 切换为 responses 后重试。",
+    });
+    return;
+  }
+  const hasLocalImageUpload =
+    attachUploadedFiles && filesForLocalAttach.some((file) => isImageUploadFile(file));
+  if (hasLocalImageUpload && !groupChatOssClient) {
+    res.status(500).json({
+      error: "图片附件需要先上传到阿里云 OSS，当前 OSS 未配置。",
+    });
+    return;
+  }
   if (
     provider === "aliyun" &&
     aliyunModelPolicy &&
@@ -4755,7 +5747,8 @@ async function streamAgentResponse({
     const hasImageInput =
       hasImageInputInMessages(safeMessages) ||
       filesForLocalAttach.some((file) => isImageUploadFile(file)) ||
-      effectiveVolcengineFileRefs.some((item) => item.inputType === "input_image");
+      effectiveVolcengineFileRefs.some((item) => item.inputType === "input_image") ||
+      preparedAttachmentEntries.some((item) => messageContainsImageInput(item?.parts));
     if (hasImageInput) {
       res.status(400).json({
         error: "当前阿里云 MiniMax 模型不支持图片输入，请仅发送文本内容。",
@@ -4766,7 +5759,7 @@ async function streamAgentResponse({
   if (
     safeMessages.length === 0 &&
     attachUploadedFiles &&
-    filesForLocalAttach.length > 0
+    (filesForLocalAttach.length > 0 || hasPreparedAttachmentEntries)
   ) {
     safeMessages = [{ role: "user", content: "请基于附件内容进行分析和回答。" }];
   }
@@ -4779,13 +5772,14 @@ async function streamAgentResponse({
   const shouldSkipPersistentFileContextRehydrate =
     shouldKeepOnlyLatestAliyunFileContext &&
     attachUploadedFiles &&
-    filesForLocalAttach.length > 0;
+    (filesForLocalAttach.length > 0 || hasPreparedAttachmentEntries);
   if (shouldUsePersistentFileContext && !shouldSkipPersistentFileContextRehydrate) {
     await rehydrateUploadedFileContexts(safeMessages, {
       userId: chatUserId,
       sessionId,
       provider,
       protocol,
+      agentId,
       model,
       aliyunFileProcessMode,
     });
@@ -4809,8 +5803,8 @@ async function streamAgentResponse({
     )
   ) {
     composedSystemPrompt = [
-      SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT,
       composedSystemPrompt,
+      SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -4849,7 +5843,7 @@ async function streamAgentResponse({
   let requestMessages = [...narrowedMessages];
   if (
     attachUploadedFiles &&
-    filesForLocalAttach.length > 0 &&
+    (filesForLocalAttach.length > 0 || hasPreparedAttachmentEntries) &&
     !requestMessages.some((item) => item?.role === "user")
   ) {
     requestMessages.push({
@@ -4871,6 +5865,7 @@ async function streamAgentResponse({
     provider === "aliyun" && protocol === "dashscope"
       ? normalizeMessages(requestMessages)
       : [];
+  let uploadedAttachmentOssFilesForMeta = [];
 
   if (
     attachUploadedFiles &&
@@ -4891,12 +5886,19 @@ async function streamAgentResponse({
         strictSupportedTypes: false,
       });
       filesForLocalAttach = uploadedBundle.fallbackFiles;
-      backupChatAttachmentsToOssInBackground({
+      const uploadedToOss = await uploadChatAttachmentsToOss({
         files: uploadedBundle.uploadedFiles,
         userId: chatUserId,
         sessionId,
         source: "stream-volcengine-files-api",
+        stopOnError: false,
       });
+      if (uploadedToOss.length > 0) {
+        uploadedAttachmentOssFilesForMeta = dedupeUploadedFileContextOssFiles([
+          ...uploadedAttachmentOssFilesForMeta,
+          ...uploadedToOss,
+        ]);
+      }
       effectiveVolcengineFileRefs = sanitizeVolcengineFileRefsPayload([
         ...effectiveVolcengineFileRefs,
         ...uploadedBundle.uploadedRefs,
@@ -4926,6 +5928,15 @@ async function streamAgentResponse({
       return;
     }
   }
+  if (uploadedContextOssFiles.length > 0) {
+    uploadedAttachmentOssFilesForMeta = dedupeUploadedFileContextOssFiles([
+      ...uploadedAttachmentOssFilesForMeta,
+      ...uploadedContextOssFiles,
+    ]);
+  }
+  const turnUploadedAttachmentOssFiles = normalizeUploadedFileContextOssFiles(
+    uploadedAttachmentOssFilesForMeta,
+  );
 
   let uploadedFileContextRecord = null;
   if (attachUploadedFiles && filesForLocalAttach.length > 0) {
@@ -4938,6 +5949,8 @@ async function streamAgentResponse({
           protocol,
           model,
           ossFiles: uploadedContextOssFiles,
+          userId: chatUserId,
+          sessionId,
           aliyunFileProcessMode,
         },
       );
@@ -4947,23 +5960,51 @@ async function streamAgentResponse({
       });
       return;
     }
-    if (shouldUsePersistentFileContext && uploadedFileContextRecord?.messageId) {
-      await saveUploadedFileContext({
-        userId: chatUserId,
-        sessionId,
-        messageId: uploadedFileContextRecord.messageId,
-        content: uploadedFileContextRecord.content,
-        ossFiles: uploadedContextOssFiles,
+  }
+  if (attachUploadedFiles && hasPreparedAttachmentEntries) {
+    const preparedContextRecord = attachPreparedAttachmentPartsToLatestUserMessage(
+      requestMessages,
+      preparedAttachmentEntries,
+    );
+    if (!preparedContextRecord) {
+      res.status(400).json({
+        error: "PDF 预处理内容不可用，请重新上传后再试。",
       });
-      if (shouldKeepOnlyLatestAliyunFileContext) {
-        await pruneUploadedFileContextsForSession({
-          userId: chatUserId,
-          sessionId,
-          keepMessageId: uploadedFileContextRecord.messageId,
-        });
-      }
+      return;
+    }
+    uploadedFileContextRecord = preparedContextRecord;
+    const preparedOssFiles = dedupeUploadedFileContextOssFiles(
+      preparedAttachmentEntries.flatMap((entry) =>
+        normalizeUploadedFileContextOssFiles(entry?.extra?.ossFiles),
+      ),
+    );
+    if (preparedOssFiles.length > 0) {
+      uploadedContextOssFiles = dedupeUploadedFileContextOssFiles([
+        ...uploadedContextOssFiles,
+        ...preparedOssFiles,
+      ]);
     }
   }
+  if (shouldUsePersistentFileContext && uploadedFileContextRecord?.messageId) {
+    await saveUploadedFileContext({
+      userId: chatUserId,
+      sessionId,
+      messageId: uploadedFileContextRecord.messageId,
+      content: uploadedFileContextRecord.content,
+      preparedAttachmentTokens: uploadedFileContextRecord.usedTokens,
+      ossFiles: uploadedContextOssFiles,
+    });
+    if (shouldKeepOnlyLatestAliyunFileContext) {
+      await pruneUploadedFileContextsForSession({
+        userId: chatUserId,
+        sessionId,
+        keepMessageId: uploadedFileContextRecord.messageId,
+      });
+    }
+  }
+  const uploadedAttachmentLinks = await buildUploadedAttachmentLinksForClient(
+    turnUploadedAttachmentOssFiles,
+  );
   if (
     shouldUsePersistentFileContext &&
     effectiveVolcengineFileRefs.length > 0
@@ -4974,6 +6015,12 @@ async function streamAgentResponse({
       requestMessages,
       effectiveVolcengineFileRefs,
     );
+  }
+  if (provider === "volcengine" && protocol === "responses") {
+    requestMessages = requestMessages.map((msg) => ({
+      ...msg,
+      content: keepVolcengineResponsesFileRefsOnly(msg?.content),
+    }));
   }
   if (smartContextRuntime.usePreviousResponseId) {
     requestMessages = extractSmartContextIncrementalMessages(requestMessages);
@@ -5135,6 +6182,7 @@ async function streamAgentResponse({
     promptLeakGuardEnabled,
     promptLeakDetected,
     runtimeConfig: config,
+    uploadedAttachmentLinks,
     ...safeMetaExtras,
   });
 
@@ -5150,22 +6198,38 @@ async function streamAgentResponse({
     const retryMessages = stripAliyunDocumentUrlPartsFromMessages(
       aliyunDashScopeFallbackBaseMessages,
     );
-    if (attachUploadedFiles && filesForLocalAttach.length > 0) {
+    if (
+      attachUploadedFiles &&
+      (filesForLocalAttach.length > 0 || hasPreparedAttachmentEntries)
+    ) {
       let retryUploadedContextRecord = null;
-      try {
-        retryUploadedContextRecord = await attachFilesToLatestUserMessage(
+      if (filesForLocalAttach.length > 0) {
+        try {
+          retryUploadedContextRecord = await attachFilesToLatestUserMessage(
+            retryMessages,
+            filesForLocalAttach,
+            {
+              provider,
+              protocol,
+              model,
+              ossFiles: uploadedContextOssFiles,
+              userId: chatUserId,
+              sessionId,
+              aliyunFileProcessMode: "local_parse",
+            },
+          );
+        } catch {
+          retryUploadedContextRecord = null;
+        }
+      }
+      if (hasPreparedAttachmentEntries) {
+        const retryPreparedRecord = attachPreparedAttachmentPartsToLatestUserMessage(
           retryMessages,
-          filesForLocalAttach,
-          {
-            provider,
-            protocol,
-            model,
-            ossFiles: uploadedContextOssFiles,
-            aliyunFileProcessMode: "local_parse",
-          },
+          preparedAttachmentEntries,
         );
-      } catch {
-        retryUploadedContextRecord = null;
+        if (retryPreparedRecord) {
+          retryUploadedContextRecord = retryPreparedRecord;
+        }
       }
       if (retryUploadedContextRecord) {
         uploadedFileContextRecord = retryUploadedContextRecord;
@@ -5176,6 +6240,7 @@ async function streamAgentResponse({
           sessionId,
           messageId: retryUploadedContextRecord.messageId,
           content: retryUploadedContextRecord.content,
+          preparedAttachmentTokens: retryUploadedContextRecord.usedTokens,
           ossFiles: uploadedContextOssFiles,
         });
         if (shouldKeepOnlyLatestAliyunFileContext) {
@@ -5231,7 +6296,7 @@ async function streamAgentResponse({
   };
 
   if (promptLeakDetected) {
-    writeEvent(res, "token", { text: "我只是你的助手" });
+    writeEvent(res, "token", { text: "稍等，我来啦" });
     writeEvent(res, "done", { ok: true });
     res.end();
     return;
@@ -6670,6 +7735,35 @@ function normalizeResponsesMessageContent(content) {
   return parts;
 }
 
+function keepVolcengineResponsesFileRefsOnly(content) {
+  if (typeof content === "string") return content;
+  const normalized = normalizeMessageContent(content);
+  if (!Array.isArray(normalized)) return "";
+
+  const parts = [];
+  normalized.forEach((part) => {
+    const type = String(part?.type || "")
+      .trim()
+      .toLowerCase();
+    if (type === "text" || type === "input_text" || type === "output_text") {
+      const text = String(part?.text || "");
+      if (text.trim()) {
+        parts.push({ type: "text", text });
+      }
+      return;
+    }
+    if (type === "input_image" || type === "input_file" || type === "input_video") {
+      const fileId = String(part?.file_id || part?.fileId || "").trim();
+      if (fileId) {
+        parts.push({ type, file_id: fileId });
+      }
+    }
+  });
+
+  if (parts.length === 0) return "";
+  return parts;
+}
+
 function extractInputImageUrl(part) {
   if (typeof part.image_url === "string") {
     const direct = part.image_url.trim();
@@ -6780,10 +7874,10 @@ function normalizeOpenRouterAudioPart(part) {
 }
 
 function mapReasoningEffortToResponses(effort) {
-  const key = String(effort || "")
-    .trim()
-    .toLowerCase();
+  const key = sanitizeReasoningEffort(effort, "high");
   if (key === "none") return "minimal";
+  if (key === "low") return "low";
+  if (key === "medium") return "medium";
   return "high";
 }
 
@@ -7101,16 +8195,16 @@ async function parseFileContent(file) {
     if (!isDocx) {
       return {
         text: "",
-        hint: "检测到 .doc（旧版 Word）。请另存为 .docx 后再上传，可获得更准确解析。",
+        hint: `${GROUP_CHAT_LOCAL_PARSE_HINT_TEXT}；检测到 .doc（旧版 Word），请另存为 .docx 后再上传。`,
       };
     }
     const text = await parseDocx(file.buffer);
-    return { text, hint: "Word 文档解析结果（.docx）。" };
+    return { text, hint: `Word 文档仅解析文字中的文本（.docx）。` };
   }
 
   if (isExcelFile(ext, mime)) {
     const text = parseExcel(file.buffer);
-    return { text, hint: "Excel 表格解析结果（按工作表展开）。" };
+    return { text, hint: "Excel 表格仅解析文字中的文本（按工作表展开）。" };
   }
 
   if (isPdfFile(ext, mime)) {
@@ -7121,11 +8215,11 @@ async function parseFileContent(file) {
   if (isTextLikeFile(ext, mime, file.buffer)) {
     return {
       text: decodeTextFile(file.buffer),
-      hint: "文本/代码文件解析结果。",
+      hint: "文本/代码文件仅解析文字中的文本。",
     };
   }
 
-  return { text: "", hint: "暂未支持该格式的结构化解析。" };
+  return { text: "", hint: `${GROUP_CHAT_LOCAL_PARSE_HINT_TEXT}。` };
 }
 
 function classifyVolcengineFileInputType(file) {
@@ -7657,6 +8751,9 @@ async function pipeResponsesSse(
 
     if (type === "response.completed") {
       responseId = sanitizeText(json?.response?.id || responseId, responseId, 160);
+      writeEvent(res, "usage", {
+        usage: extractResponsesTokenUsage(json?.response),
+      });
       if (!sawContent) {
         const completedText = extractResponsesOutputTextFromCompleted(json?.response);
         if (completedText) {
@@ -7743,6 +8840,36 @@ function extractResponsesReasoningTextFromCompleted(responseObj) {
   });
 
   return chunks.join("");
+}
+
+function extractResponsesTokenUsage(responseObj) {
+  const usage =
+    responseObj?.usage && typeof responseObj.usage === "object"
+      ? responseObj.usage
+      : {};
+  const promptTokens = sanitizeRuntimeInteger(
+    usage.input_tokens ?? usage.prompt_tokens,
+    0,
+    0,
+    10_000_000,
+  );
+  const completionTokens = sanitizeRuntimeInteger(
+    usage.output_tokens ?? usage.completion_tokens,
+    0,
+    0,
+    10_000_000,
+  );
+  const totalTokens = sanitizeRuntimeInteger(
+    usage.total_tokens,
+    promptTokens + completionTokens,
+    0,
+    10_000_000,
+  );
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: totalTokens,
+  };
 }
 
 function extractResponsesWebSearchUsage(responseObj) {
@@ -8196,6 +9323,10 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     source.enableThinking,
     defaults.enableThinking,
   );
+  const thinkingEffort = sanitizeReasoningEffort(
+    source.thinkingEffort,
+    defaults.thinkingEffort,
+  );
   const includeCurrentTime = sanitizeRuntimeBoolean(
     source.includeCurrentTime,
     defaults.includeCurrentTime,
@@ -8337,6 +9468,7 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     maxOutputTokens,
     maxReasoningTokens,
     enableThinking,
+    thinkingEffort,
     includeCurrentTime,
     preventPromptLeak,
     injectSafetyPrompt,
@@ -8411,14 +9543,9 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     next.model = AGENT_D_FIXED_MODEL;
     next.includeCurrentTime = true;
     next.maxOutputTokens = AGENT_D_FIXED_MAX_OUTPUT_TOKENS;
-    next.aliyunSearchEnableSource = false;
 
     if (shouldApplyBootDefaults) {
       next.protocol = "responses";
-      next.enableWebSearch = true;
-      next.aliyunSearchEnableSearchExtension = true;
-      next.aliyunResponsesEnableWebExtractor = true;
-      next.aliyunResponsesEnableCodeInterpreter = true;
     }
   }
 
@@ -8666,6 +9793,27 @@ function sanitizeRuntimeBoolean(value, fallback = false) {
   return fallback;
 }
 
+function sanitizeReasoningEffort(value, fallback = "high") {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "none" || key === "low" || key === "medium" || key === "high") {
+    return key;
+  }
+  const safeFallback = String(fallback || "")
+    .trim()
+    .toLowerCase();
+  if (
+    safeFallback === "none" ||
+    safeFallback === "low" ||
+    safeFallback === "medium" ||
+    safeFallback === "high"
+  ) {
+    return safeFallback;
+  }
+  return "high";
+}
+
 function sanitizeSmartContextMode(value) {
   const key = String(value || "")
     .trim()
@@ -8738,27 +9886,28 @@ function getProviderByAgent(agentId, runtimeConfig = null) {
 }
 
 function resolveReasoningPolicy(model, requested, provider) {
+  const requestedEffort = sanitizeReasoningEffort(requested, "high");
   const supports = modelSupportsReasoning(model);
   const requires = modelRequiresReasoning(model);
   const providerAllows = providerSupportsReasoning(provider);
 
   if (!providerAllows) {
-    return { enabled: false, effort: "none", forced: requested !== "none" };
+    return { enabled: false, effort: "none", forced: requestedEffort !== "none" };
   }
 
-  if (requires && requested === "none") {
+  if (requires && requestedEffort === "none") {
     return { enabled: true, effort: "high", forced: true };
   }
 
   if (!supports) {
-    return { enabled: false, effort: "none", forced: requested !== "none" };
+    return { enabled: false, effort: "none", forced: requestedEffort !== "none" };
   }
 
-  if (requested === "none") {
+  if (requestedEffort === "none") {
     return { enabled: false, effort: "none", forced: false };
   }
 
-  return { enabled: true, effort: "high", forced: false };
+  return { enabled: true, effort: requestedEffort, forced: false };
 }
 
 function modelSupportsReasoning(model) {
@@ -9204,6 +10353,11 @@ function readRequestVolcengineFileRefs(raw) {
   return Array.isArray(parsed) ? sanitizeVolcengineFileRefsPayload(parsed) : [];
 }
 
+function readRequestPreparedAttachmentRefs(raw) {
+  const parsed = readJsonLikeField(raw, []);
+  return Array.isArray(parsed) ? sanitizePreparedAttachmentRefsPayload(parsed) : [];
+}
+
 function defaultChatState() {
   return {
     activeId: "s1",
@@ -9461,6 +10615,8 @@ function sanitizeMessage(msg, idx) {
           inputType === "input_video"
             ? inputType
             : "";
+        const attachmentUrl = sanitizeGroupChatHttpUrl(a?.url || a?.fileUrl);
+        const ossKey = sanitizeGroupChatOssObjectKey(a?.ossKey);
 
         return {
           name: sanitizeText(a?.name, "文件", 120),
@@ -9468,6 +10624,8 @@ function sanitizeMessage(msg, idx) {
           size: Number.isFinite(Number(a?.size)) ? Number(a.size) : undefined,
           ...(fileId ? { fileId } : {}),
           ...(fileId && safeInputType ? { inputType: safeInputType } : {}),
+          ...(attachmentUrl ? { url: attachmentUrl } : {}),
+          ...(ossKey ? { ossKey } : {}),
         };
       })
     : [];
@@ -9584,6 +10742,15 @@ function sanitizeId(value, fallback = "") {
     .replace(/[.$]/g, "");
   if (!text) return fallback || "";
   return text.slice(0, 80);
+}
+
+function sanitizePreparedAttachmentToken(value) {
+  const text = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!text) return "";
+  if (!/^[a-z0-9]{20,96}$/.test(text)) return "";
+  return text;
 }
 
 function sanitizeText(value, fallback = "", maxLen = 200) {
@@ -9754,6 +10921,178 @@ function normalizeGroupChatRoomDoc(doc, options = {}) {
   return normalized;
 }
 
+function normalizeGroupChatFilesApiInputType(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "input_image" || key === "image") return "input_image";
+  if (key === "input_file" || key === "file") return "input_file";
+  if (key === "input_video" || key === "video") return "input_video";
+  return "";
+}
+
+function normalizeGroupChatFilesApiStatus(value, fallback = "") {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (
+    key === "uploaded" ||
+    key === "not_supported" ||
+    key === "expired" ||
+    key === "failed" ||
+    key === "missing"
+  ) {
+    return key;
+  }
+  return String(fallback || "")
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeGroupChatFilesApiMeta(raw, { defaultInputType = "" } = {}) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const fileId = sanitizeText(source.fileId, "", 180);
+  const inputType =
+    normalizeGroupChatFilesApiInputType(source.inputType) ||
+    normalizeGroupChatFilesApiInputType(defaultInputType);
+  const uploadedAt = sanitizeIsoDate(source.uploadedAt);
+  const expiresAt = sanitizeIsoDate(source.expiresAt);
+  const status = normalizeGroupChatFilesApiStatus(
+    source.status,
+    fileId ? "uploaded" : "missing",
+  );
+  return {
+    status: status || "missing",
+    fileId,
+    inputType,
+    uploadedAt,
+    expiresAt,
+  };
+}
+
+function normalizeGroupChatFileOssMeta(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const ossKey = sanitizeGroupChatOssObjectKey(source.ossKey);
+  const fileUrl = sanitizeGroupChatHttpUrl(source.fileUrl);
+  const uploaded =
+    sanitizeRuntimeBoolean(source.uploaded, false) || !!ossKey || !!fileUrl;
+  return {
+    uploaded,
+    ossKey,
+    ossBucket: sanitizeAliyunOssBucket(source.ossBucket),
+    ossRegion: sanitizeAliyunOssRegion(source.ossRegion),
+    fileUrl,
+  };
+}
+
+function isGroupChatFilesApiExpired(filesApiMeta, { nowMs = Date.now() } = {}) {
+  const expiresAt = sanitizeIsoDate(filesApiMeta?.expiresAt);
+  if (!expiresAt) return false;
+  return toGroupChatDateTimestamp(expiresAt) > 0 && toGroupChatDateTimestamp(expiresAt) <= nowMs;
+}
+
+function resolveGroupChatFileExtension(fileName, mimeType = "") {
+  const ext = getFileExtension(fileName);
+  if (ext) return ext.toLowerCase();
+  const mime = String(mimeType || "")
+    .trim()
+    .toLowerCase();
+  if (mime.startsWith("image/")) {
+    return mime.replace("image/", "").replace("jpeg", "jpg");
+  }
+  if (mime.includes("pdf")) return "pdf";
+  return "";
+}
+
+function classifyGroupChatVolcengineSupportedInputType({
+  fileName = "",
+  mimeType = "",
+  fallbackType = "",
+} = {}) {
+  const explicitInputType = normalizeGroupChatFilesApiInputType(fallbackType);
+  if (explicitInputType === "input_image" || explicitInputType === "input_file") {
+    return explicitInputType;
+  }
+
+  const ext = getFileExtension(fileName);
+  const mime = sanitizeGroupChatFileMimeType(mimeType).toLowerCase();
+
+  if (mime.includes("pdf") || ext === "pdf") {
+    return "input_file";
+  }
+
+  const normalizedExt = String(ext || "").trim().toLowerCase();
+  const imageByMime = GROUP_CHAT_VOLCENGINE_SUPPORTED_IMAGE_MIME_TYPES.has(mime);
+  const imageByExt = GROUP_CHAT_VOLCENGINE_SUPPORTED_IMAGE_EXTENSIONS.has(normalizedExt);
+  const mimeIsImage = mime.startsWith("image/");
+
+  if ((imageByMime || imageByExt) && (mimeIsImage || !mime || mime === "application/octet-stream")) {
+    return "input_image";
+  }
+  return "";
+}
+
+function normalizeGroupChatRoomFileItemFromMessageDoc(doc) {
+  const normalized = normalizeGroupChatMessageDoc(doc);
+  if (!normalized || (normalized.type !== "file" && normalized.type !== "image")) return null;
+  const nowMs = Date.now();
+  const isImage = normalized.type === "image";
+  const payload = isImage ? normalized.image : normalized.file;
+  if (!payload) return null;
+
+  const filesApiMeta = normalizeGroupChatFilesApiMeta(
+    payload?.filesApi,
+    { defaultInputType: isImage ? "input_image" : "input_file" },
+  );
+  const filesApiExpired = isGroupChatFilesApiExpired(filesApiMeta, { nowMs });
+  const filesApiStatus = filesApiExpired
+    ? "expired"
+    : normalizeGroupChatFilesApiStatus(filesApiMeta.status, filesApiMeta.fileId ? "uploaded" : "missing");
+  const ossMeta = normalizeGroupChatFileOssMeta(payload?.oss);
+  const fileName = isImage
+    ? sanitizeGroupChatImageFileName(payload?.fileName)
+    : sanitizeGroupChatFileName(payload?.fileName);
+  const mimeType = sanitizeGroupChatFileMimeType(payload?.mimeType);
+  const extension = resolveGroupChatFileExtension(fileName, mimeType);
+
+  return {
+    messageId: sanitizeId(normalized.id, ""),
+    roomId: sanitizeId(normalized.roomId, ""),
+    type: normalized.type,
+    senderUserId: sanitizeId(normalized.senderUserId, ""),
+    senderName: sanitizeText(normalized.senderName, "用户", 30),
+    fileName,
+    extension,
+    mimeType,
+    size: sanitizeRuntimeInteger(
+      payload?.size,
+      0,
+      0,
+      isImage ? GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES : GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+    ),
+    createdAt: sanitizeIsoDate(normalized.createdAt),
+    localParseOnly: isImage ? false : sanitizeRuntimeBoolean(payload?.localParseOnly, false),
+    parseHint: isImage
+      ? ""
+      : sanitizeText(payload?.parseHint, "", 120),
+    filesApi: {
+      status: filesApiStatus || "missing",
+      uploaded: filesApiStatus === "uploaded",
+      fileId: sanitizeText(filesApiMeta.fileId, "", 180),
+      inputType: normalizeGroupChatFilesApiInputType(filesApiMeta.inputType),
+      uploadedAt: sanitizeIsoDate(filesApiMeta.uploadedAt),
+      expiresAt: sanitizeIsoDate(filesApiMeta.expiresAt),
+    },
+    oss: {
+      uploaded: !!ossMeta.uploaded,
+      ossKey: sanitizeGroupChatOssObjectKey(ossMeta.ossKey),
+      ossBucket: sanitizeAliyunOssBucket(ossMeta.ossBucket),
+      ossRegion: sanitizeAliyunOssRegion(ossMeta.ossRegion),
+      fileUrl: sanitizeGroupChatHttpUrl(ossMeta.fileUrl),
+    },
+  };
+}
+
 function normalizeGroupChatMessageDoc(doc) {
   if (!doc) return null;
   const id = sanitizeId(doc?._id, "");
@@ -9798,6 +11137,10 @@ function normalizeGroupChatMessageDoc(doc) {
       mimeType: sanitizeText(image.mimeType, "image/png", 80).toLowerCase(),
       fileName: sanitizeGroupChatImageFileName(image.fileName),
       size: sanitizeRuntimeInteger(image.size, 0, 0, GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES),
+      filesApi: normalizeGroupChatFilesApiMeta(image.filesApi, {
+        defaultInputType: "input_image",
+      }),
+      oss: normalizeGroupChatFileOssMeta(image.oss),
     };
   } else {
     normalized.image = null;
@@ -9811,6 +11154,12 @@ function normalizeGroupChatMessageDoc(doc) {
       mimeType: sanitizeGroupChatFileMimeType(file.mimeType),
       size: sanitizeRuntimeInteger(file.size, 0, 0, GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES),
       expiresAt: sanitizeIsoDate(file.expiresAt),
+      localParseOnly: sanitizeRuntimeBoolean(file.localParseOnly, false),
+      parseHint: sanitizeText(file.parseHint, "", 120),
+      filesApi: normalizeGroupChatFilesApiMeta(file.filesApi, {
+        defaultInputType: "input_file",
+      }),
+      oss: normalizeGroupChatFileOssMeta(file.oss),
     };
   } else {
     normalized.file = null;
@@ -10564,14 +11913,7 @@ async function buildGroupChatStoredFileStoragePayload({
 }) {
   const safeBuffer = extractGeneratedImageDataBuffer(fileBuffer);
   if (!groupChatOssClient || !groupChatOssConfig) {
-    return {
-      storageType: "mongo",
-      ossKey: "",
-      ossBucket: "",
-      ossRegion: "",
-      fileUrl: "",
-      data: safeBuffer,
-    };
+    throw new Error("未配置阿里云 OSS，无法发送群聊文件。");
   }
   if (!safeBuffer.length) {
     throw new Error("文件内容为空，无法上传到 OSS。");

@@ -48,8 +48,8 @@ const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
     ],
     contextWindowTokens: 256000,
     maxInputTokens: 256000,
-    maxOutputTokens: 128000,
-    maxReasoningTokens: 128000,
+    maxOutputTokens: 131072,
+    maxReasoningTokens: 131072,
   },
   {
     id: "doubao-seed-2-0-lite-260215",
@@ -61,8 +61,8 @@ const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
     ],
     contextWindowTokens: 256000,
     maxInputTokens: 224000,
-    maxOutputTokens: 32000,
-    maxReasoningTokens: 32000,
+    maxOutputTokens: 32768,
+    maxReasoningTokens: 32768,
   },
   {
     id: "doubao-seed-2-0-mini-260215",
@@ -74,8 +74,8 @@ const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
     ],
     contextWindowTokens: 256000,
     maxInputTokens: 224000,
-    maxOutputTokens: 32000,
-    maxReasoningTokens: 32000,
+    maxOutputTokens: 32768,
+    maxReasoningTokens: 32768,
   },
   {
     id: "doubao-seed-1-8-251228",
@@ -342,6 +342,7 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   maxOutputTokens: 4096,
   maxReasoningTokens: 0,
   enableThinking: true,
+  thinkingEffort: "high",
   includeCurrentTime: false,
   preventPromptLeak: false,
   injectSafetyPrompt: false,
@@ -658,6 +659,10 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
       source.enableThinking,
       defaults.enableThinking,
     ),
+    thinkingEffort: sanitizeThinkingEffort(
+      source.thinkingEffort,
+      defaults.thinkingEffort,
+    ),
     includeCurrentTime: sanitizeBoolean(
       source.includeCurrentTime,
       defaults.includeCurrentTime,
@@ -824,14 +829,9 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
     next.model = AGENT_D_FIXED_MODEL;
     next.includeCurrentTime = true;
     next.maxOutputTokens = AGENT_D_FIXED_MAX_OUTPUT_TOKENS;
-    next.aliyunSearchEnableSource = false;
 
     if (shouldApplyBootDefaults) {
       next.protocol = "responses";
-      next.enableWebSearch = true;
-      next.aliyunSearchEnableSearchExtension = true;
-      next.aliyunResponsesEnableWebExtractor = true;
-      next.aliyunResponsesEnableCodeInterpreter = true;
     }
   }
 
@@ -1000,6 +1000,27 @@ function sanitizeCreativityMode(value) {
     return key;
   }
   return "balanced";
+}
+
+function sanitizeThinkingEffort(value, fallback = "high") {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "none" || key === "low" || key === "medium" || key === "high") {
+    return key;
+  }
+  const normalizedFallback = String(fallback || "")
+    .trim()
+    .toLowerCase();
+  if (
+    normalizedFallback === "none" ||
+    normalizedFallback === "low" ||
+    normalizedFallback === "medium" ||
+    normalizedFallback === "high"
+  ) {
+    return normalizedFallback;
+  }
+  return "high";
 }
 
 function sanitizeNumber(value, fallback, min, max) {

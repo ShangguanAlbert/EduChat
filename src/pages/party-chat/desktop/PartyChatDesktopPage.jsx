@@ -5,6 +5,7 @@ import {
   Download,
   File as FileIcon,
   FileUp,
+  Info,
   MoreHorizontal,
   ImagePlus,
   Loader2,
@@ -21,6 +22,10 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import MessageInput from "../../../components/MessageInput.jsx";
+import MessageList from "../../../components/MessageList.jsx";
+import { readErrorMessage, readSseStream } from "../../chat/chatHelpers.js";
+import { getAuthTokenHeader } from "../../chat/stateApi.js";
 import {
   createPartyRoom,
   deletePartyFileMessage,
@@ -37,11 +42,15 @@ import {
   togglePartyMessageReaction,
 } from "../../party/partyApi.js";
 import { createPartySocketClient } from "../../party/partySocket.js";
+import "../../../styles/chat.css";
 import "../../../styles/party-chat.css";
 
 const FALLBACK_SYNC_MS = 60 * 1000;
 const SOCKET_PING_MS = 20 * 1000;
 const PARTY_UPLOAD_FILE_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+const PARTY_AGENT_PANEL_AGENT_ID = "A";
+const PARTY_AGENT_PANEL_TEMPERATURE = 0.6;
+const PARTY_AGENT_PANEL_TOP_P = 1;
 const QUICK_REACTION_EMOJIS = Object.freeze(["👍", "👏", "🎉", "😄", "🤝"]);
 const COMPOSER_TOOL_EMOJIS = Object.freeze(["😀", "🤔", "👍", "🎯", "🎉", "🙏"]);
 
@@ -75,6 +84,7 @@ export default function PartyChatDesktopPage({
   const forceScrollToLatestRef = useRef(true);
   const readSyncTimerRef = useRef(0);
   const copyImageToastTimerRef = useRef(0);
+  const agentStreamControllersRef = useRef(new Map());
   const sideMenuRef = useRef(null);
   const messageMenuRef = useRef(null);
   const composerToolbarRef = useRef(null);
@@ -83,7 +93,7 @@ export default function PartyChatDesktopPage({
   const [bootstrapError, setBootstrapError] = useState("");
   const [actionError, setActionError] = useState("");
 
-  const [me, setMe] = useState({ id: "", name: "我" });
+  const [me, setMe] = useState({ id: "", name: "我", role: "user" });
   const [limits, setLimits] = useState(DEFAULT_LIMITS);
   const [counts, setCounts] = useState(DEFAULT_COUNTS);
   const [usersById, setUsersById] = useState({});
@@ -93,6 +103,9 @@ export default function PartyChatDesktopPage({
   const [messagesByRoom, setMessagesByRoom] = useState({});
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesError, setMessagesError] = useState("");
+  const [agentMessagesByRoom, setAgentMessagesByRoom] = useState({});
+  const [agentStreamingByRoom, setAgentStreamingByRoom] = useState({});
+  const [agentErrorByRoom, setAgentErrorByRoom] = useState({});
 
   const [createRoomName, setCreateRoomName] = useState("");
   const [createSubmitting, setCreateSubmitting] = useState(false);
@@ -142,6 +155,12 @@ export default function PartyChatDesktopPage({
     () => messagesByRoom[activeRoomId] || [],
     [messagesByRoom, activeRoomId],
   );
+  const activeAgentMessages = useMemo(
+    () => agentMessagesByRoom[activeRoomId] || [],
+    [agentMessagesByRoom, activeRoomId],
+  );
+  const activeAgentStreaming = !!agentStreamingByRoom[activeRoomId];
+  const activeAgentError = String(agentErrorByRoom[activeRoomId] || "");
   const activeMembers = useMemo(() => {
     if (!activeRoom) return [];
     return activeRoom.memberUserIds.map((userId) => {
@@ -184,6 +203,237 @@ export default function PartyChatDesktopPage({
     return map;
   }, [activeRoom, canManageActiveRoom]);
   const showSidebar = isMobileSidebarDrawer ? isSidebarDrawerOpen : isSidebarExpanded;
+
+  const setAgentRoomMessages = useCallback((roomId, updater) => {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId || typeof updater !== "function") return;
+    setAgentMessagesByRoom((prev) => {
+      const current = Array.isArray(prev[safeRoomId]) ? prev[safeRoomId] : [];
+      const next = updater(current);
+      if (!Array.isArray(next)) return prev;
+      if (next === current) return prev;
+      return {
+        ...prev,
+        [safeRoomId]: next,
+      };
+    });
+  }, []);
+
+  const setAgentRoomStreaming = useCallback((roomId, streaming) => {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId) return;
+    const nextStreaming = !!streaming;
+    setAgentStreamingByRoom((prev) => {
+      if (prev[safeRoomId] === nextStreaming) return prev;
+      return {
+        ...prev,
+        [safeRoomId]: nextStreaming,
+      };
+    });
+  }, []);
+
+  const setAgentRoomError = useCallback((roomId, message) => {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId) return;
+    const nextMessage = String(message || "");
+    setAgentErrorByRoom((prev) => {
+      if (String(prev[safeRoomId] || "") === nextMessage) return prev;
+      return {
+        ...prev,
+        [safeRoomId]: nextMessage,
+      };
+    });
+  }, []);
+
+  const patchAgentMessageById = useCallback(
+    (roomId, messageId, updater) => {
+      const safeRoomId = String(roomId || "").trim();
+      const safeMessageId = String(messageId || "").trim();
+      if (!safeRoomId || !safeMessageId || typeof updater !== "function") return;
+      setAgentRoomMessages(safeRoomId, (list) => {
+        let changed = false;
+        const next = list.map((item) => {
+          if (String(item?.id || "") !== safeMessageId) return item;
+          const patched = updater(item);
+          if (!patched || patched === item) return item;
+          changed = true;
+          return patched;
+        });
+        return changed ? next : list;
+      });
+    },
+    [setAgentRoomMessages],
+  );
+
+  const onSendAgentPanelMessage = useCallback(
+    async (text, files = []) => {
+      const roomId = String(activeRoomId || "").trim();
+      if (!roomId || activeAgentStreaming) return;
+
+      const safeText = String(text || "");
+      const fileItems = Array.isArray(files) ? files.filter(Boolean) : [];
+      const localFiles = [];
+      const attachments = fileItems.map((item) => {
+        const localFile = resolvePartyAgentLocalFile(item);
+        if (localFile instanceof File) {
+          localFiles.push(localFile);
+          return {
+            name: String(localFile.name || "文件"),
+            type: String(localFile.type || ""),
+            size: Number(localFile.size || 0),
+          };
+        }
+        return {
+          name: String(item?.name || item?.filename || "文件"),
+          type: String(item?.mimeType || item?.type || ""),
+          size: Number(item?.size || 0),
+        };
+      });
+
+      const userMessageId = `party-agent-u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const assistantMessageId = `party-agent-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const userMessage = {
+        id: userMessageId,
+        role: "user",
+        content: safeText,
+        attachments,
+        askedAt: new Date().toISOString(),
+      };
+      const assistantMessage = {
+        id: assistantMessageId,
+        role: "assistant",
+        content: "",
+        reasoning: "",
+        feedback: null,
+        streaming: true,
+        startedAt: new Date().toISOString(),
+        firstTextAt: null,
+      };
+
+      const historyForApi = toPartyAgentApiMessages([...activeAgentMessages, userMessage]);
+      setAgentRoomMessages(roomId, (list) => [...list, userMessage, assistantMessage]);
+      setAgentRoomError(roomId, "");
+      setAgentRoomStreaming(roomId, true);
+
+      const previousController = agentStreamControllersRef.current.get(roomId);
+      if (previousController) {
+        previousController.abort();
+      }
+      const controller = new AbortController();
+      agentStreamControllersRef.current.set(roomId, controller);
+
+      const formData = new FormData();
+      formData.append("agentId", PARTY_AGENT_PANEL_AGENT_ID);
+      formData.append("temperature", String(PARTY_AGENT_PANEL_TEMPERATURE));
+      formData.append("topP", String(PARTY_AGENT_PANEL_TOP_P));
+      formData.append("sessionId", buildPartyAgentSessionId(roomId));
+      formData.append("smartContextEnabled", "false");
+      formData.append("contextMode", "append");
+      formData.append("messages", JSON.stringify(historyForApi));
+      localFiles.forEach((file) => {
+        formData.append("files", file);
+      });
+
+      try {
+        const resp = await fetch("/api/chat/stream", {
+          method: "POST",
+          headers: {
+            ...getAuthTokenHeader(),
+          },
+          body: formData,
+          signal: controller.signal,
+        });
+        if (!resp.ok || !resp.body) {
+          const message = await readErrorMessage(resp);
+          throw new Error(message || `HTTP ${resp.status}`);
+        }
+
+        await readSseStream(resp, {
+          onMeta: (meta) => {
+            const uploadedLinks = Array.isArray(meta?.uploadedAttachmentLinks)
+              ? meta.uploadedAttachmentLinks
+              : [];
+            if (uploadedLinks.length === 0) return;
+            patchAgentMessageById(roomId, userMessageId, (message) => {
+              const nextAttachments = mergePartyAgentAttachmentsWithUploadedLinks(
+                message?.attachments,
+                uploadedLinks,
+              );
+              if (nextAttachments === message?.attachments) return message;
+              return {
+                ...message,
+                attachments: nextAttachments,
+              };
+            });
+          },
+          onToken: (textChunk) => {
+            if (!textChunk) return;
+            patchAgentMessageById(roomId, assistantMessageId, (message) => ({
+              ...message,
+              content: `${String(message?.content || "")}${textChunk}`,
+              firstTextAt: message?.firstTextAt || new Date().toISOString(),
+            }));
+          },
+          onReasoningToken: (textChunk) => {
+            if (!textChunk) return;
+            patchAgentMessageById(roomId, assistantMessageId, (message) => ({
+              ...message,
+              reasoning: `${String(message?.reasoning || "")}${textChunk}`,
+            }));
+          },
+          onError: (message) => {
+            throw new Error(message || "stream error");
+          },
+        });
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          return;
+        }
+        const message = error?.message || "请求失败";
+        setAgentRoomError(roomId, message);
+        patchAgentMessageById(roomId, assistantMessageId, (assistant) => ({
+          ...assistant,
+          content: `${String(assistant?.content || "")}\n\n> 请求失败：${message}`,
+        }));
+      } finally {
+        const activeController = agentStreamControllersRef.current.get(roomId);
+        if (activeController === controller) {
+          agentStreamControllersRef.current.delete(roomId);
+        }
+        setAgentRoomStreaming(roomId, false);
+        patchAgentMessageById(roomId, assistantMessageId, (assistant) => ({
+          ...assistant,
+          streaming: false,
+        }));
+      }
+    },
+    [
+      activeAgentMessages,
+      activeAgentStreaming,
+      activeRoomId,
+      patchAgentMessageById,
+      setAgentRoomError,
+      setAgentRoomMessages,
+      setAgentRoomStreaming,
+    ],
+  );
+
+  const onClearAgentPanelMessages = useCallback(() => {
+    const roomId = String(activeRoomId || "").trim();
+    if (!roomId || activeAgentStreaming) return;
+    setAgentMessagesByRoom((prev) => {
+      if (!(roomId in prev)) return prev;
+      const next = { ...prev };
+      delete next[roomId];
+      return next;
+    });
+    setAgentErrorByRoom((prev) => {
+      if (!(roomId in prev)) return prev;
+      const next = { ...prev };
+      delete next[roomId];
+      return next;
+    });
+  }, [activeAgentStreaming, activeRoomId]);
 
   const resizeComposeTextarea = useCallback(() => {
     const textarea = composeTextareaRef.current;
@@ -301,8 +551,31 @@ export default function PartyChatDesktopPage({
   const removeRoom = useCallback((roomId) => {
     const safeRoomId = String(roomId || "").trim();
     if (!safeRoomId) return;
+    const controller = agentStreamControllersRef.current.get(safeRoomId);
+    if (controller) {
+      controller.abort();
+      agentStreamControllersRef.current.delete(safeRoomId);
+    }
     setRooms((prev) => prev.filter((room) => room.id !== safeRoomId));
     setMessagesByRoom((prev) => {
+      if (!(safeRoomId in prev)) return prev;
+      const next = { ...prev };
+      delete next[safeRoomId];
+      return next;
+    });
+    setAgentMessagesByRoom((prev) => {
+      if (!(safeRoomId in prev)) return prev;
+      const next = { ...prev };
+      delete next[safeRoomId];
+      return next;
+    });
+    setAgentStreamingByRoom((prev) => {
+      if (!(safeRoomId in prev)) return prev;
+      const next = { ...prev };
+      delete next[safeRoomId];
+      return next;
+    });
+    setAgentErrorByRoom((prev) => {
       if (!(safeRoomId in prev)) return prev;
       const next = { ...prev };
       delete next[safeRoomId];
@@ -443,8 +716,9 @@ export default function PartyChatDesktopPage({
       const nextUsers = normalizeUsers(result?.users);
 
       setMe({
-        id: String(result?.me?.id || ""),
+        id: String(result?.me?.id || "").trim(),
         name: String(result?.me?.name || "我"),
+        role: String(result?.me?.role || "user").toLowerCase() === "admin" ? "admin" : "user",
       });
       setLimits({
         maxCreatedRoomsPerUser:
@@ -520,6 +794,20 @@ export default function PartyChatDesktopPage({
   useEffect(() => {
     void loadBootstrap();
   }, [loadBootstrap]);
+
+  useEffect(() => {
+    const controllers = agentStreamControllersRef.current;
+    return () => {
+      Array.from(controllers.values()).forEach((controller) => {
+        try {
+          controller.abort();
+        } catch {
+          // ignore
+        }
+      });
+      controllers.clear();
+    };
+  }, []);
 
   useEffect(() => {
     const token = String(localStorage.getItem("token") || "").trim();
@@ -911,6 +1199,7 @@ export default function PartyChatDesktopPage({
       mergeMessages(activeRoomId, [message], { replace: false });
       touchRoom(activeRoomId, message.createdAt || new Date().toISOString());
     }
+    return { message };
   }
 
   async function dispatchImageMessage(file, replyToMessageId = "") {
@@ -924,6 +1213,7 @@ export default function PartyChatDesktopPage({
       mergeMessages(activeRoomId, [message], { replace: false });
       touchRoom(activeRoomId, message.createdAt || new Date().toISOString());
     }
+    return message;
   }
 
   async function dispatchFileMessage(file, replyToMessageId = "") {
@@ -936,6 +1226,7 @@ export default function PartyChatDesktopPage({
       mergeMessages(activeRoomId, [message], { replace: false });
       touchRoom(activeRoomId, message.createdAt || new Date().toISOString());
     }
+    return message;
   }
 
   async function handleSendComposer() {
@@ -947,27 +1238,31 @@ export default function PartyChatDesktopPage({
     if (!textPayload && imageFiles.length === 0 && uploadFiles.length === 0) return;
 
     const replyToMessageId = replyTarget?.id || "";
+    let replyLinked = false;
+    const takeReplyTarget = () => {
+      if (replyLinked || !replyToMessageId) return "";
+      replyLinked = true;
+      return replyToMessageId;
+    };
     setSendingText(!!textPayload);
     setSendingImage(imageFiles.length > 0);
     setSendingFile(uploadFiles.length > 0);
     forceScrollToLatestRef.current = true;
     try {
-      if (textPayload) {
-        await dispatchTextMessage(textPayload, replyToMessageId);
+      if (uploadFiles.length > 0) {
+        for (let index = 0; index < uploadFiles.length; index += 1) {
+          const fileReplyTo = index === 0 ? takeReplyTarget() : "";
+          await dispatchFileMessage(uploadFiles[index], fileReplyTo);
+        }
       }
       if (imageFiles.length > 0) {
         for (let index = 0; index < imageFiles.length; index += 1) {
-          const imageReplyTo = textPayload ? "" : index === 0 ? replyToMessageId : "";
+          const imageReplyTo = index === 0 ? takeReplyTarget() : "";
           await dispatchImageMessage(imageFiles[index], imageReplyTo);
         }
       }
-      if (uploadFiles.length > 0) {
-        for (let index = 0; index < uploadFiles.length; index += 1) {
-          const fileReplyTo = !textPayload && imageFiles.length === 0 && index === 0
-            ? replyToMessageId
-            : "";
-          await dispatchFileMessage(uploadFiles[index], fileReplyTo);
-        }
+      if (textPayload) {
+        await dispatchTextMessage(textPayload, takeReplyTarget());
       }
 
       setComposeText("");
@@ -1707,450 +2002,501 @@ export default function PartyChatDesktopPage({
                 ) : null}
               </header>
 
-              <div className="party-messages-wrap">
-                <section className="party-messages" ref={messagesViewportRef} onScroll={onMessagesScroll}>
-                  {messagesLoading && activeMessages.length === 0 ? (
-                    <p className="party-tip">正在加载消息...</p>
-                  ) : activeMessages.length === 0 ? (
-                    <p className="party-tip">还没有消息，发一条开始协作讨论。</p>
-                  ) : (
-                    activeMessages.map((message) => {
-                      const isMine = message.senderUserId === me.id;
-                      const isMenuOpen = messageMenuState.messageId === message.id;
-                      const showReactions = isMenuOpen && messageMenuState.showReactions;
-                      const messageReactions = Array.isArray(message.reactions) ? message.reactions : [];
-                      const readReceipt = buildMessageReadReceipt(message);
+              <div className="party-room-body">
+                <div className="party-room-main">
+                  <div className="party-messages-wrap">
+                    <section className="party-messages" ref={messagesViewportRef} onScroll={onMessagesScroll}>
+                      {messagesLoading && activeMessages.length === 0 ? (
+                        <p className="party-tip">正在加载消息...</p>
+                      ) : activeMessages.length === 0 ? (
+                        <p className="party-tip">还没有消息，发一条开始协作讨论。</p>
+                      ) : (
+                        activeMessages.map((message) => {
+                          const isMine = message.senderUserId === me.id;
+                          const isMenuOpen = messageMenuState.messageId === message.id;
+                          const showReactions = isMenuOpen && messageMenuState.showReactions;
+                          const messageReactions = Array.isArray(message.reactions) ? message.reactions : [];
+                          const readReceipt = buildMessageReadReceipt(message);
 
-                      return (
-                        <article
-                          key={message.id}
-                          className={`party-message ${isMine ? "mine" : ""} ${
-                            message.type === "system" ? "system" : ""
-                          }`}
-                        >
-                          {message.type === "system" ? (
-                            <p className="party-system-text">{message.content}</p>
-                          ) : (
-                            <div className="party-message-row">
-                              <NameAvatar name={message.senderName} />
-                              <div className="party-message-main">
-                                <div className="party-message-head">
-                                  <span className="party-message-sender">{message.senderName}</span>
-                                  <time className="party-message-time">{formatTime(message.createdAt)}</time>
-                                </div>
+                          return (
+                            <article
+                              key={message.id}
+                              className={`party-message type-${message.type} ${isMine ? "mine" : ""} ${
+                                message.type === "system" ? "system" : ""
+                              }`}
+                            >
+                              {message.type === "system" ? (
+                                <p className="party-system-text">{message.content}</p>
+                              ) : (
+                                <div className="party-message-row">
+                                  <NameAvatar name={message.senderName} />
+                                  <div className="party-message-main">
+                                    <div className="party-message-head">
+                                      <span className="party-message-sender">{message.senderName}</span>
+                                      <time className="party-message-time">{formatTime(message.createdAt)}</time>
+                                    </div>
 
-                                <div className={`party-message-bubble-wrap${isMine ? " mine" : ""}`}>
-                                  <div className={`party-message-bubble${message.type !== "text" ? " is-media" : ""}`}>
-                                    {message.replyToMessageId ? (
-                                      <div className="party-reply-ref">
-                                        <span className="party-reply-ref-name">{message.replySenderName}</span>
-                                        <span className="party-reply-ref-text">{message.replyPreviewText}</span>
-                                      </div>
-                                    ) : null}
+                                    <div className={`party-message-bubble-wrap${isMine ? " mine" : ""}`}>
+                                      <div className={`party-message-bubble${message.type !== "text" ? " is-media" : ""}`}>
+                                        {message.replyToMessageId ? (
+                                          <div className="party-reply-ref">
+                                            <span className="party-reply-ref-name">{message.replySenderName}</span>
+                                            <span className="party-reply-ref-text">{message.replyPreviewText}</span>
+                                          </div>
+                                        ) : null}
 
-                                    {message.type === "text" ? (
-                                      <div className="party-message-text">{renderTextWithMentions(message.content)}</div>
-                                    ) : message.type === "image" ? (
-                                      <button
-                                        type="button"
-                                        className="party-image-thumb-btn"
-                                        onClick={() => setPreviewImage(message.image)}
-                                      >
-                                        <img
-                                          src={message.image?.dataUrl}
-                                          alt={message.image?.fileName || "派图片"}
-                                          className="party-image-thumb"
-                                          onLoad={onMessageImageLoaded}
-                                          onError={onMessageImageLoaded}
-                                        />
-                                      </button>
-                                    ) : (
-                                      <button
-                                        type="button"
-                                        className="party-file-msg-btn"
-                                        onClick={() => void handleDownloadFileMessage(message)}
-                                        disabled={downloadingFileMessageId === message.id}
-                                      >
-                                        <div className="party-file-msg-icon">
-                                          {downloadingFileMessageId === message.id ? (
-                                            <Loader2 size={15} className="spin" />
-                                          ) : (
-                                            <FileIcon size={15} />
-                                          )}
-                                        </div>
-                                        <div className="party-file-msg-main">
-                                          <span className="party-file-msg-name">
-                                            {message?.file?.fileName || "文件"}
-                                          </span>
-                                          <span className="party-file-msg-meta">
-                                            {`${formatFileSize(message?.file?.size)} · 点击下载`}
-                                          </span>
-                                        </div>
-                                        <Download size={14} />
-                                      </button>
-                                    )}
-
-                                    {messageReactions.length > 0 ? (
-                                      <div className="party-message-emoji-replies">
-                                        {messageReactions.map((item, index) => {
-                                          const canCancel = item.userId === me.id;
-                                          return (
-                                            <span
-                                              key={`${message.id}-${item.userId}-${item.emoji}-${index}`}
-                                              className={`party-message-emoji-chip${canCancel ? " mine" : ""}`}
-                                            >
-                                              <span>{item.emoji}</span>
-                                              {canCancel ? (
-                                                <button
-                                                  type="button"
-                                                  className="party-message-emoji-name-btn"
-                                                  title="点击取消我的表情回复"
-                                                  onClick={() => void handleQuickReaction(message, item.emoji)}
-                                                >
-                                                  {item.userName}
-                                                </button>
-                                              ) : (
-                                                <span className="party-message-emoji-name">{item.userName}</span>
-                                              )}
-                                            </span>
-                                          );
-                                        })}
-                                      </div>
-                                    ) : null}
-                                  </div>
-
-                                  <div
-                                    className={`party-msg-menu-wrap${isMine ? " mine" : ""}`}
-                                    ref={isMenuOpen ? messageMenuRef : null}
-                                  >
-                                    <button
-                                      type="button"
-                                      className="party-msg-menu-trigger"
-                                      title="更多操作"
-                                      onClick={() => toggleMessageMenu(message.id)}
-                                    >
-                                      <MoreHorizontal size={16} />
-                                    </button>
-
-                                    {isMenuOpen ? (
-                                      <div
-                                        className={`party-msg-menu-panel${isMine ? " align-left" : " align-right"}`}
-                                        role="menu"
-                                      >
                                         {message.type === "text" ? (
+                                          <div className="party-message-text">{renderTextWithMentions(message.content)}</div>
+                                        ) : message.type === "image" ? (
                                           <button
                                             type="button"
-                                            className="party-msg-menu-item"
-                                            onClick={() => void handleCopyMessage(message)}
+                                            className="party-image-thumb-btn"
+                                            onClick={() => setPreviewImage(message.image)}
                                           >
-                                            <Copy size={15} />
-                                            复制
+                                            <img
+                                              src={message.image?.dataUrl}
+                                              alt={message.image?.fileName || "派图片"}
+                                              className="party-image-thumb"
+                                              onLoad={onMessageImageLoaded}
+                                              onError={onMessageImageLoaded}
+                                            />
                                           </button>
-                                        ) : null}
-
-                                        {message.type === "image" ? (
+                                        ) : (
                                           <button
                                             type="button"
-                                            className="party-msg-menu-item"
-                                            onClick={() => void handleCopyImageMessage(message)}
+                                            className="party-file-msg-btn"
+                                            onClick={() => void handleDownloadFileMessage(message)}
+                                            disabled={downloadingFileMessageId === message.id}
                                           >
-                                            <Copy size={15} />
-                                            复制图片
+                                            <div className="party-file-msg-icon">
+                                              {downloadingFileMessageId === message.id ? (
+                                                <Loader2 size={15} className="spin" />
+                                              ) : (
+                                                <FileIcon size={15} />
+                                              )}
+                                            </div>
+                                            <div className="party-file-msg-main">
+                                              <span className="party-file-msg-name">
+                                                {message?.file?.fileName || "文件"}
+                                              </span>
+                                              <span className="party-file-msg-meta">
+                                                {`${formatFileSize(message?.file?.size)} · 点击下载`}
+                                              </span>
+                                              {message?.file?.localParseOnly && message?.file?.parseHint ? (
+                                                <span className="party-file-msg-hint">{message.file.parseHint}</span>
+                                              ) : null}
+                                            </div>
+                                            <Download size={14} />
                                           </button>
-                                        ) : null}
+                                        )}
 
-                                        <button
-                                          type="button"
-                                          className="party-msg-menu-item"
-                                          onClick={() => handleQuoteMessage(message)}
-                                        >
-                                          <MessageSquareQuote size={15} />
-                                          引用
-                                        </button>
-
-                                        <button
-                                          type="button"
-                                          className="party-msg-menu-item"
-                                          onClick={() => toggleReactionPanel(message.id)}
-                                        >
-                                          <SmilePlus size={15} />
-                                          表情回复
-                                        </button>
-
-                                        {message.type === "file" && (isMine || canManageActiveRoom) ? (
-                                          <button
-                                            type="button"
-                                            className="party-msg-menu-item danger"
-                                            onClick={() => void handleDeleteFileMessage(message)}
-                                          >
-                                            <Trash2 size={15} />
-                                            删除文件
-                                          </button>
-                                        ) : null}
-
-                                        {showReactions ? (
-                                          <div className="party-msg-reaction-row">
-                                            {QUICK_REACTION_EMOJIS.map((emoji) => (
-                                              <button
-                                                key={`${message.id}-${emoji}`}
-                                                type="button"
-                                                className="party-msg-reaction-btn"
-                                                onClick={() => void handleQuickReaction(message, emoji)}
-                                              >
-                                                {emoji}
-                                              </button>
-                                            ))}
+                                        {messageReactions.length > 0 ? (
+                                          <div className="party-message-emoji-replies">
+                                            {messageReactions.map((item, index) => {
+                                              const canCancel = item.userId === me.id;
+                                              return (
+                                                <span
+                                                  key={`${message.id}-${item.userId}-${item.emoji}-${index}`}
+                                                  className={`party-message-emoji-chip${canCancel ? " mine" : ""}`}
+                                                >
+                                                  <span>{item.emoji}</span>
+                                                  {canCancel ? (
+                                                    <button
+                                                      type="button"
+                                                      className="party-message-emoji-name-btn"
+                                                      title="点击取消我的表情回复"
+                                                      onClick={() => void handleQuickReaction(message, item.emoji)}
+                                                    >
+                                                      {item.userName}
+                                                    </button>
+                                                  ) : (
+                                                    <span className="party-message-emoji-name">{item.userName}</span>
+                                                  )}
+                                                </span>
+                                              );
+                                            })}
                                           </div>
                                         ) : null}
                                       </div>
+
+                                      <div
+                                        className={`party-msg-menu-wrap${isMine ? " mine" : ""}`}
+                                        ref={isMenuOpen ? messageMenuRef : null}
+                                      >
+                                        <button
+                                          type="button"
+                                          className="party-msg-menu-trigger"
+                                          title="更多操作"
+                                          onClick={() => toggleMessageMenu(message.id)}
+                                        >
+                                          <MoreHorizontal size={16} />
+                                        </button>
+
+                                        {isMenuOpen ? (
+                                          <div
+                                            className={`party-msg-menu-panel${isMine ? " align-left" : " align-right"}`}
+                                            role="menu"
+                                          >
+                                            {message.type === "text" ? (
+                                              <button
+                                                type="button"
+                                                className="party-msg-menu-item"
+                                                onClick={() => void handleCopyMessage(message)}
+                                              >
+                                                <Copy size={15} />
+                                                复制
+                                              </button>
+                                            ) : null}
+
+                                            {message.type === "image" ? (
+                                              <button
+                                                type="button"
+                                                className="party-msg-menu-item"
+                                                onClick={() => void handleCopyImageMessage(message)}
+                                              >
+                                                <Copy size={15} />
+                                                复制图片
+                                              </button>
+                                            ) : null}
+
+                                            <button
+                                              type="button"
+                                              className="party-msg-menu-item"
+                                              onClick={() => handleQuoteMessage(message)}
+                                            >
+                                              <MessageSquareQuote size={15} />
+                                              引用
+                                            </button>
+
+                                            <button
+                                              type="button"
+                                              className="party-msg-menu-item"
+                                              onClick={() => toggleReactionPanel(message.id)}
+                                            >
+                                              <SmilePlus size={15} />
+                                              表情回复
+                                            </button>
+
+                                            {message.type === "file" && (isMine || canManageActiveRoom) ? (
+                                              <button
+                                                type="button"
+                                                className="party-msg-menu-item danger"
+                                                onClick={() => void handleDeleteFileMessage(message)}
+                                              >
+                                                <Trash2 size={15} />
+                                                删除文件
+                                              </button>
+                                            ) : null}
+
+                                            {showReactions ? (
+                                              <div className="party-msg-reaction-row">
+                                                {QUICK_REACTION_EMOJIS.map((emoji) => (
+                                                  <button
+                                                    key={`${message.id}-${emoji}`}
+                                                    type="button"
+                                                    className="party-msg-reaction-btn"
+                                                    onClick={() => void handleQuickReaction(message, emoji)}
+                                                  >
+                                                    {emoji}
+                                                  </button>
+                                                ))}
+                                              </div>
+                                            ) : null}
+                                          </div>
+                                        ) : null}
+                                      </div>
+
+                                    </div>
+                                    {readReceipt ? (
+                                      <button
+                                        type="button"
+                                        className={`party-read-receipt-btn${isMine ? " mine" : " other"}`}
+                                        onClick={() => openReadReceiptModal(message)}
+                                      >
+                                        {readReceipt.label}
+                                      </button>
                                     ) : null}
                                   </div>
-
                                 </div>
-                                {readReceipt ? (
-                                  <button
-                                    type="button"
-                                    className={`party-read-receipt-btn${isMine ? " mine" : " other"}`}
-                                    onClick={() => openReadReceiptModal(message)}
-                                  >
-                                    {readReceipt.label}
-                                  </button>
-                                ) : null}
-                              </div>
-                            </div>
-                          )}
-                        </article>
-                      );
-                    })
-                  )}
-                </section>
-                {activeMessages.length > 0 ? (
-                  <div
-                    className={`party-jump-latest-wrap${isAtLatest ? " is-hidden" : " is-visible"}`}
-                  >
-                    <button
-                      type="button"
-                      className="party-jump-latest-btn"
-                      onClick={() => scrollToLatestMessages("auto")}
-                      disabled={isAtLatest}
-                      tabIndex={isAtLatest ? -1 : 0}
-                    >
-                      跳转到最新消息
-                    </button>
-                  </div>
-                ) : null}
-                {showCopyImageToast ? (
-                  <div className="party-copy-image-toast" role="status" aria-live="polite">
-                    图片已复制
-                  </div>
-                ) : null}
-              </div>
-
-              <section className="party-composer">
-                {replyTarget ? (
-                  <div className="party-reply-bar">
-                    <span className="party-reply-label">引用 {replyTarget.senderName}</span>
-                    <span className="party-reply-text">{replyTarget.previewText}</span>
-                    <button
-                      type="button"
-                      className="party-clear-reply-btn"
-                      onClick={() => setReplyTarget(null)}
-                      title="取消引用"
-                    >
-                      <X size={14} />
-                    </button>
-                  </div>
-                ) : null}
-
-                <div className="party-compose-editor">
-                  <input
-                    ref={imageInputRef}
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    onChange={onPickImageFile}
-                    className="party-file-input"
-                  />
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    onChange={onPickUploadFile}
-                    className="party-file-input"
-                  />
-
-                  <div className="party-compose-toolbar" ref={composerToolbarRef}>
-                    <button
-                      type="button"
-                      className={`party-tool-btn${showComposerEmojiPanel ? " active" : ""}`}
-                      title="表情"
-                      onClick={() => {
-                        setShowMentionPicker(false);
-                        setShowComposerEmojiPanel((prev) => !prev);
-                      }}
-                    >
-                      <Smile size={17} />
-                    </button>
-                    <button
-                      type="button"
-                      className={`party-tool-btn${showMentionPicker ? " active" : ""}`}
-                      title="@成员"
-                      onClick={toggleMentionPicker}
-                    >
-                      <AtSign size={17} />
-                    </button>
-                    <button
-                      type="button"
-                      className="party-tool-btn"
-                      title="发送图片"
-                      onClick={openImagePicker}
-                    >
-                      <ImagePlus size={17} />
-                    </button>
-                    <button
-                      type="button"
-                      className="party-tool-btn"
-                      title="发送文件"
-                      onClick={openFilePicker}
-                    >
-                      <FileUp size={17} />
-                    </button>
-
-                    {showComposerEmojiPanel ? (
-                      <div className="party-compose-emoji-panel">
-                        {COMPOSER_TOOL_EMOJIS.map((emoji) => (
-                          <button
-                            key={`compose-emoji-${emoji}`}
-                            type="button"
-                            className="party-compose-emoji-btn"
-                            onClick={() => onComposerEmojiSelect(emoji)}
-                          >
-                            {emoji}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-
-                    {showMentionPicker ? (
-                      <div className="party-mention-picker" role="dialog" aria-label="成员">
-                        <div className="party-mention-picker-head">
-                          <span className="party-mention-picker-title">成员</span>
-                        </div>
-                        <div className="party-mention-picker-list">
-                          <button
-                            type="button"
-                            className="party-mention-picker-item is-all"
-                            onClick={() => pickMention("所有人")}
-                          >
-                            <span className="party-mention-picker-at">@</span>
-                            <span className="party-mention-picker-name">所有人 ({activeMembers.length})</span>
-                          </button>
-                          {activeMembers.map((member) => (
-                            <button
-                              key={`mention-${member.id}`}
-                              type="button"
-                              className="party-mention-picker-item"
-                              onClick={() => pickMention(member.name)}
-                            >
-                              <NameAvatar name={member.name} small />
-                              <span className="party-mention-picker-name">{member.name}</span>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="party-compose-input-area">
-                    {selectedUploadFiles.length > 0 ? (
-                      <div className="party-compose-file-strip" aria-label="待发送文件列表">
-                        {selectedUploadFiles.map((file, index) => (
-                          <div
-                            key={`${file.name || "file"}-${file.size}-${file.lastModified}-${index}`}
-                            className="party-compose-file-chip"
-                          >
-                            <FileIcon size={14} />
-                            <span className="party-compose-file-name" title={file.name || "文件"}>
-                              {file.name || "文件"}
-                            </span>
-                            <button
-                              type="button"
-                              className="party-compose-file-remove"
-                              onClick={() => removeSelectedUploadFile(index)}
-                              title="移除文件"
-                            >
-                              <X size={12} />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-
-                    {selectedImageFiles.length > 0 ? (
-                      <div className="party-compose-image-strip" aria-label="待发送图片列表">
-                        {selectedImageFiles.map((file, index) => {
-                          const previewUrl = selectedImagePreviewUrls[index] || "";
-                          return (
-                            <div
-                              key={`${file.name || "image"}-${file.size}-${file.lastModified}-${index}`}
-                              className="party-compose-image-thumb-wrap"
-                            >
-                              {previewUrl ? (
-                                <img src={previewUrl} alt={file.name || "待发送图片"} />
-                              ) : (
-                                <span className="party-compose-image-fallback">图</span>
                               )}
+                            </article>
+                          );
+                        })
+                      )}
+                    </section>
+                    {activeMessages.length > 0 ? (
+                      <div
+                        className={`party-jump-latest-wrap${isAtLatest ? " is-hidden" : " is-visible"}`}
+                      >
+                        <button
+                          type="button"
+                          className="party-jump-latest-btn"
+                          onClick={() => scrollToLatestMessages("auto")}
+                          disabled={isAtLatest}
+                          tabIndex={isAtLatest ? -1 : 0}
+                        >
+                          跳转到最新消息
+                        </button>
+                      </div>
+                    ) : null}
+                    {showCopyImageToast ? (
+                      <div className="party-copy-image-toast" role="status" aria-live="polite">
+                        图片已复制
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <section className="party-composer">
+                    {replyTarget ? (
+                      <div className="party-reply-bar">
+                        <span className="party-reply-label">引用 {replyTarget.senderName}</span>
+                        <span className="party-reply-text">{replyTarget.previewText}</span>
+                        <button
+                          type="button"
+                          className="party-clear-reply-btn"
+                          onClick={() => setReplyTarget(null)}
+                          title="取消引用"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ) : null}
+
+                    <div className="party-compose-editor">
+                      <input
+                        ref={imageInputRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        onChange={onPickImageFile}
+                        className="party-file-input"
+                      />
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        onChange={onPickUploadFile}
+                        className="party-file-input"
+                      />
+
+                      <div className="party-compose-toolbar" ref={composerToolbarRef}>
+                        <button
+                          type="button"
+                          className={`party-tool-btn${showComposerEmojiPanel ? " active" : ""}`}
+                          title="表情"
+                          onClick={() => {
+                            setShowMentionPicker(false);
+                            setShowComposerEmojiPanel((prev) => !prev);
+                          }}
+                        >
+                          <Smile size={17} />
+                        </button>
+                        <button
+                          type="button"
+                          className={`party-tool-btn${showMentionPicker ? " active" : ""}`}
+                          title="@成员"
+                          onClick={toggleMentionPicker}
+                        >
+                          <AtSign size={17} />
+                        </button>
+                        <button
+                          type="button"
+                          className="party-tool-btn"
+                          title="发送图片"
+                          onClick={openImagePicker}
+                        >
+                          <ImagePlus size={17} />
+                        </button>
+                        <button
+                          type="button"
+                          className="party-tool-btn"
+                          title="发送文件"
+                          onClick={openFilePicker}
+                        >
+                          <FileUp size={17} />
+                        </button>
+
+                        {showComposerEmojiPanel ? (
+                          <div className="party-compose-emoji-panel">
+                            {COMPOSER_TOOL_EMOJIS.map((emoji) => (
+                              <button
+                                key={`compose-emoji-${emoji}`}
+                                type="button"
+                                className="party-compose-emoji-btn"
+                                onClick={() => onComposerEmojiSelect(emoji)}
+                              >
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+
+                        {showMentionPicker ? (
+                          <div className="party-mention-picker" role="dialog" aria-label="成员">
+                            <div className="party-mention-picker-head">
+                              <span className="party-mention-picker-title">成员</span>
+                            </div>
+                            <div className="party-mention-picker-list">
                               <button
                                 type="button"
-                                className="party-compose-image-remove"
-                                onClick={() => removeSelectedImage(index)}
-                                title="移除图片"
+                                className="party-mention-picker-item is-all"
+                                onClick={() => pickMention("所有人")}
                               >
-                                <X size={13} />
+                                <span className="party-mention-picker-at">@</span>
+                                <span className="party-mention-picker-name">所有人 ({activeMembers.length})</span>
                               </button>
+                              {activeMembers.map((member) => (
+                                <button
+                                  key={`mention-${member.id}`}
+                                  type="button"
+                                  className="party-mention-picker-item"
+                                  onClick={() => pickMention(member.name)}
+                                >
+                                  <NameAvatar name={member.name} small />
+                                  <span className="party-mention-picker-name">{member.name}</span>
+                                </button>
+                              ))}
                             </div>
-                          );
-                        })}
+                          </div>
+                        ) : null}
                       </div>
-                    ) : null}
 
-                    <textarea
-                      ref={composeTextareaRef}
-                      className="party-compose-textarea"
-                      placeholder="请输入消息"
-                      value={composeText}
-                      onChange={(event) => setComposeText(event.target.value)}
-                      onPaste={onComposerPaste}
-                      rows={isMobileSidebarDrawer ? 1 : 4}
-                      onFocus={() => {
-                        resizeComposeTextarea();
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key !== "Enter" || event.shiftKey) return;
-                        const composing =
-                          Boolean(event.nativeEvent?.isComposing) ||
-                          Number(event.nativeEvent?.keyCode) === 229;
-                        if (composing) return;
-                        event.preventDefault();
-                        void handleSendComposer();
-                      }}
-                    />
-                  </div>
+                      <div className="party-compose-input-area">
+                        {selectedUploadFiles.length > 0 ? (
+                          <div className="party-compose-file-strip" aria-label="待发送文件列表">
+                            {selectedUploadFiles.map((file, index) => (
+                              <div
+                                key={`${file.name || "file"}-${file.size}-${file.lastModified}-${index}`}
+                                className="party-compose-file-chip"
+                              >
+                                <FileIcon size={14} />
+                                <span className="party-compose-file-name" title={file.name || "文件"}>
+                                  {file.name || "文件"}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="party-compose-file-remove"
+                                  onClick={() => removeSelectedUploadFile(index)}
+                                  title="移除文件"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
 
-                  <div className="party-compose-footer">
-                    <span className="party-compose-hint">Enter 发送 / Shift+Enter 换行</span>
+                        {selectedImageFiles.length > 0 ? (
+                          <div className="party-compose-image-strip" aria-label="待发送图片列表">
+                            {selectedImageFiles.map((file, index) => {
+                              const previewUrl = selectedImagePreviewUrls[index] || "";
+                              return (
+                                <div
+                                  key={`${file.name || "image"}-${file.size}-${file.lastModified}-${index}`}
+                                  className="party-compose-image-thumb-wrap"
+                                >
+                                  {previewUrl ? (
+                                    <img src={previewUrl} alt={file.name || "待发送图片"} />
+                                  ) : (
+                                    <span className="party-compose-image-fallback">图</span>
+                                  )}
+                                  <button
+                                    type="button"
+                                    className="party-compose-image-remove"
+                                    onClick={() => removeSelectedImage(index)}
+                                    title="移除图片"
+                                  >
+                                    <X size={13} />
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+
+                        <textarea
+                          ref={composeTextareaRef}
+                          className="party-compose-textarea"
+                          placeholder="请输入消息"
+                          value={composeText}
+                          onChange={(event) => setComposeText(event.target.value)}
+                          onPaste={onComposerPaste}
+                          rows={isMobileSidebarDrawer ? 1 : 4}
+                          onFocus={() => {
+                            resizeComposeTextarea();
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter" || event.shiftKey) return;
+                            const composing =
+                              Boolean(event.nativeEvent?.isComposing) ||
+                              Number(event.nativeEvent?.keyCode) === 229;
+                            if (composing) return;
+                            event.preventDefault();
+                            void handleSendComposer();
+                          }}
+                        />
+                      </div>
+
+                      <div className="party-compose-footer">
+                        <span className="party-compose-hint">Enter 发送 / Shift+Enter 换行</span>
+                        <button
+                          type="button"
+                          className="party-send-btn"
+                          disabled={!canSendComposer}
+                          onClick={() => void handleSendComposer()}
+                        >
+                          {composerSending ? <Loader2 size={16} className="spin" /> : <SendHorizonal size={16} />}
+                          发送
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+
+                <aside className="party-agent-panel" aria-label="智能体问答">
+                  <div className="party-agent-panel-head">
+                    <div className="party-agent-panel-head-title">
+                      <h3>预览与调试</h3>
+                      <Info size={18} aria-hidden="true" title="仅用于群聊内临时问答，不写入群消息。" />
+                    </div>
                     <button
                       type="button"
-                      className="party-send-btn"
-                      disabled={!canSendComposer}
-                      onClick={() => void handleSendComposer()}
+                      className="party-agent-clear-btn"
+                      onClick={onClearAgentPanelMessages}
+                      disabled={activeAgentStreaming || !activeRoomId}
                     >
-                      {composerSending ? <Loader2 size={16} className="spin" /> : <SendHorizonal size={16} />}
-                      发送
+                      清空
                     </button>
                   </div>
-                </div>
-              </section>
+
+                  <div className="party-agent-chat">
+                    <MessageList
+                      activeSessionId={buildPartyAgentSessionId(activeRoomId)}
+                      messages={activeAgentMessages}
+                      isStreaming={activeAgentStreaming}
+                      showAssistantActions={false}
+                    />
+                    <MessageInput
+                      onSend={onSendAgentPanelMessage}
+                      disabled={!activeRoomId || activeAgentStreaming}
+                    />
+                  </div>
+                  {activeAgentError ? (
+                    <div className="party-agent-error" role="alert">
+                      <span>{activeAgentError}</span>
+                      <button
+                        type="button"
+                        className="party-agent-error-close"
+                        onClick={() => setAgentRoomError(activeRoomId, "")}
+                        aria-label="关闭错误提示"
+                        title="关闭错误提示"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ) : null}
+                </aside>
+              </div>
             </>
           ) : (
             <section className="party-empty">
@@ -2630,6 +2976,42 @@ function normalizeMessages(rawMessages) {
   return rawMessages.map((message) => normalizeMessage(message)).filter(Boolean);
 }
 
+function normalizePartyFilesApiStatus(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "uploaded" || key === "expired" || key === "not_supported" || key === "failed") {
+    return key;
+  }
+  return "missing";
+}
+
+function normalizePartyFilesApiMeta(raw, defaultInputType = "") {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const fileId = String(source.fileId || "").trim();
+  const inputType = String(source.inputType || defaultInputType || "")
+    .trim()
+    .toLowerCase();
+  return {
+    status: normalizePartyFilesApiStatus(source.status),
+    fileId,
+    inputType: inputType === "input_image" || inputType === "input_file" ? inputType : "",
+    uploadedAt: String(source.uploadedAt || ""),
+    expiresAt: String(source.expiresAt || ""),
+  };
+}
+
+function normalizePartyOssMeta(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  return {
+    uploaded: Boolean(source.uploaded),
+    ossKey: String(source.ossKey || "").trim(),
+    ossBucket: String(source.ossBucket || "").trim(),
+    ossRegion: String(source.ossRegion || "").trim(),
+    fileUrl: String(source.fileUrl || "").trim(),
+  };
+}
+
 function normalizeMessage(raw) {
   const id = String(raw?.id || "").trim();
   if (!id) return null;
@@ -2638,7 +3020,11 @@ function normalizeMessage(raw) {
   const image = raw?.image && typeof raw.image === "object"
     ? {
         dataUrl: String(raw.image.dataUrl || "").trim(),
+        mimeType: String(raw.image.mimeType || "image/png").trim().toLowerCase(),
         fileName: String(raw.image.fileName || "group-image.png"),
+        size: Number(raw.image.size || 0),
+        filesApi: normalizePartyFilesApiMeta(raw.image.filesApi, "input_image"),
+        oss: normalizePartyOssMeta(raw.image.oss),
       }
     : null;
   const file = raw?.file && typeof raw.file === "object"
@@ -2648,20 +3034,24 @@ function normalizeMessage(raw) {
         mimeType: String(raw.file.mimeType || "application/octet-stream"),
         size: Number(raw.file.size || 0),
         expiresAt: String(raw.file.expiresAt || ""),
+        localParseOnly: Boolean(raw.file.localParseOnly),
+        parseHint: String(raw.file.parseHint || ""),
+        filesApi: normalizePartyFilesApiMeta(raw.file.filesApi, "input_file"),
+        oss: normalizePartyOssMeta(raw.file.oss),
       }
     : null;
 
   return {
     id,
-    roomId: String(raw?.roomId || ""),
+    roomId: String(raw?.roomId || "").trim(),
     type,
-    senderUserId: String(raw?.senderUserId || ""),
+    senderUserId: String(raw?.senderUserId || "").trim(),
     senderName: String(raw?.senderName || (type === "system" ? "系统" : "用户")),
     content:
       type === "system"
         ? normalizeSystemMessageContent(raw?.content)
         : String(raw?.content || ""),
-    replyToMessageId: String(raw?.replyToMessageId || ""),
+    replyToMessageId: String(raw?.replyToMessageId || "").trim(),
     replyPreviewText: String(raw?.replyPreviewText || ""),
     replySenderName: String(raw?.replySenderName || ""),
     createdAt: String(raw?.createdAt || ""),
@@ -2932,6 +3322,84 @@ function normalizeUrlHref(text) {
     return `http://${value}`;
   }
   return `https://${value}`;
+}
+
+function buildPartyAgentSessionId(roomId) {
+  const safeRoomId = String(roomId || "").trim();
+  if (!safeRoomId) return "party-agent";
+  return `party-agent-${safeRoomId}`;
+}
+
+function resolvePartyAgentLocalFile(item) {
+  if (item instanceof File) return item;
+  if (item?.file instanceof File) return item.file;
+  return null;
+}
+
+function toPartyAgentApiMessages(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  return list
+    .map((item) => ({
+      id: String(item?.id || ""),
+      role: String(item?.role || ""),
+      content: String(item?.content || ""),
+    }))
+    .filter((item) => {
+      if (item.role === "user") return true;
+      if (item.role === "assistant") return true;
+      return false;
+    });
+}
+
+function sanitizePartyAgentUploadedAttachmentLinks(raw) {
+  const source = Array.isArray(raw) ? raw : [];
+  return source
+    .map((item) => ({
+      name: String(item?.fileName || item?.name || "")
+        .trim()
+        .slice(0, 240),
+      type: String(item?.mimeType || item?.type || "")
+        .trim()
+        .toLowerCase(),
+      size: Number(item?.size || 0),
+      url: String(item?.url || "").trim(),
+      ossKey: String(item?.ossKey || "").trim(),
+    }))
+    .filter((item) => !!item.url);
+}
+
+function mergePartyAgentAttachmentsWithUploadedLinks(attachments, rawLinks) {
+  const list = Array.isArray(attachments) ? attachments : [];
+  const links = sanitizePartyAgentUploadedAttachmentLinks(rawLinks);
+  if (list.length === 0 || links.length === 0) return list;
+
+  const nextLinks = [...links];
+  let changed = false;
+  const nextList = list.map((attachment) => {
+    const normalizedName = String(attachment?.name || "").trim();
+    const normalizedType = String(attachment?.type || "")
+      .trim()
+      .toLowerCase();
+    const normalizedSize = Number(attachment?.size || 0);
+    const exactIndex = nextLinks.findIndex((item) => {
+      const sameName = item.name && normalizedName && item.name === normalizedName;
+      const sameType = item.type && normalizedType && item.type === normalizedType;
+      const sameSize = item.size > 0 && normalizedSize > 0 && item.size === normalizedSize;
+      return sameName || (sameType && sameSize);
+    });
+    const fallbackIndex = exactIndex >= 0 ? exactIndex : 0;
+    const matched = nextLinks[fallbackIndex] || null;
+    if (!matched) return attachment;
+    nextLinks.splice(fallbackIndex, 1);
+    changed = true;
+    return {
+      ...attachment,
+      url: matched.url,
+      ossKey: matched.ossKey || attachment?.ossKey || "",
+    };
+  });
+
+  return changed ? nextList : list;
 }
 
 function toTimestamp(value) {

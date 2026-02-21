@@ -18,7 +18,7 @@
   flex-direction: column;
   background: linear-gradient(180deg, #f3f6fb, #edf1f8);
   color: #0f172a;
-  font-family: "Segoe UI", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  font-family: var(--app-font-family);
 }
 
 .image-page-header {
@@ -946,7 +946,7 @@
   font-size: 13px;
   line-height: 1.68;
   color: #1f2937;
-  font-family: "Segoe UI", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  font-family: var(--app-font-family);
 }
 
 .image-terms-modal-footer {

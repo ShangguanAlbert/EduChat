@@ -393,6 +393,8 @@ const MessageItem = memo(function MessageItem({
   showAssistantActions,
 }) {
   const [copied, setCopied] = useState(false);
+  const [copiedAttachmentKey, setCopiedAttachmentKey] = useState("");
+  const [previewImage, setPreviewImage] = useState(null);
 
   async function copyContent() {
     const text = m.content?.trim() || "";
@@ -404,6 +406,17 @@ const MessageItem = memo(function MessageItem({
       setTimeout(() => setCopied(false), 1200);
     } catch {
       setCopied(false);
+    }
+  }
+
+  async function copyAttachmentUrl(url, key) {
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedAttachmentKey(String(key || ""));
+      setTimeout(() => setCopiedAttachmentKey(""), 1200);
+    } catch {
+      setCopiedAttachmentKey("");
     }
   }
 
@@ -435,20 +448,89 @@ const MessageItem = memo(function MessageItem({
 
         {m.attachments?.length > 0 && (
           <div className="msg-attachments">
-            {m.attachments.map((a, idx) => (
-              <div className="file-card" key={`${a.name}-${idx}`}>
-                <div className="file-icon">📄</div>
-                <div className="file-meta">
-                  <div className="file-name" title={a.name}>
-                    {a.name}
+            {m.attachments.map((a, idx) => {
+              const attachmentUrl = readAttachmentUrl(a);
+              const imageAttachment = isImageAttachment(a);
+              const attachmentKey = `${a?.name || "file"}-${idx}`;
+              const copiedLink = copiedAttachmentKey === attachmentKey;
+              if (imageAttachment && attachmentUrl) {
+                return (
+                  <div className="file-card file-card-image" key={attachmentKey}>
+                    <button
+                      type="button"
+                      className="file-image-btn"
+                      onClick={() =>
+                        setPreviewImage({
+                          url: attachmentUrl,
+                          name: a?.name || "图片附件",
+                        })
+                      }
+                      aria-label="预览图片附件"
+                      title="点击放大"
+                    >
+                      <img
+                        src={attachmentUrl}
+                        alt={a?.name || "图片附件"}
+                        className="file-image-thumb"
+                      />
+                    </button>
+                    <div className="file-meta">
+                      <div className="file-name" title={a?.name}>
+                        {a?.name || "图片附件"}
+                      </div>
+                      <div className="file-sub">
+                        {a?.type ? a.type : "image"}
+                        {typeof a?.size === "number" ? ` · ${formatBytes(a.size)}` : ""}
+                      </div>
+                    </div>
+                    <div className="file-inline-actions">
+                      <button
+                        type="button"
+                        className={`msg-action-btn ${copiedLink ? "active" : ""}`}
+                        title={copiedLink ? "已复制链接" : "复制链接"}
+                        aria-label="复制链接"
+                        onClick={() => copyAttachmentUrl(attachmentUrl, attachmentKey)}
+                      >
+                        <Copy size={14} />
+                      </button>
+                      <a
+                        href={attachmentUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="file-open-link"
+                      >
+                        打开
+                      </a>
+                    </div>
                   </div>
-                  <div className="file-sub">
-                    {a.type ? a.type : "file"}
-                    {typeof a.size === "number" ? ` · ${formatBytes(a.size)}` : ""}
+                );
+              }
+
+              return (
+                <div className="file-card" key={attachmentKey}>
+                  <div className="file-icon">📄</div>
+                  <div className="file-meta">
+                    <div className="file-name" title={a?.name}>
+                      {a?.name}
+                    </div>
+                    <div className="file-sub">
+                      {a?.type ? a.type : "file"}
+                      {typeof a?.size === "number" ? ` · ${formatBytes(a.size)}` : ""}
+                    </div>
                   </div>
+                  {attachmentUrl ? (
+                    <a
+                      href={attachmentUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="file-open-link"
+                    >
+                      打开
+                    </a>
+                  ) : null}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -514,6 +596,39 @@ const MessageItem = memo(function MessageItem({
           </div>
         )}
       </div>
+      {previewImage?.url ? (
+        <div
+          className="msg-image-lightbox"
+          onClick={() => setPreviewImage(null)}
+          role="presentation"
+        >
+          <div
+            className="msg-image-lightbox-content"
+            onClick={(event) => event.stopPropagation()}
+            role="presentation"
+          >
+            <img src={previewImage.url} alt={previewImage.name || "图片预览"} />
+            <div className="msg-image-lightbox-actions">
+              <button
+                type="button"
+                className="msg-action-btn"
+                onClick={() => copyAttachmentUrl(previewImage.url, "lightbox")}
+              >
+                <Copy size={14} />
+                <span>复制链接</span>
+              </button>
+              <a
+                href={previewImage.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="file-open-link"
+              >
+                打开原图
+              </a>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 });
@@ -554,4 +669,19 @@ function getElementFromNode(node) {
   if (!node) return null;
   if (node.nodeType === window.Node.ELEMENT_NODE) return node;
   return node.parentElement || null;
+}
+
+function readAttachmentUrl(attachment) {
+  return String(attachment?.url || attachment?.fileUrl || "").trim();
+}
+
+function isImageAttachment(attachment) {
+  const type = String(attachment?.type || "")
+    .trim()
+    .toLowerCase();
+  if (type.startsWith("image/")) return true;
+  const name = String(attachment?.name || "")
+    .trim()
+    .toLowerCase();
+  return /\.(png|jpg|jpeg|gif|webp|bmp|svg|heic|avif)$/i.test(name);
 }

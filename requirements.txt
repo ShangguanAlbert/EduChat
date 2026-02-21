@@ -1,0 +1,5 @@
+# Python dependencies for PDF -> image conversion used by:
+# scripts/aliyun_pdf_to_images.py
+
+pypdfium2>=4.30.0,<5.0.0
+Pillow>=10.0.0,<12.0.0
