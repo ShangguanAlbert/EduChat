@@ -105,15 +105,16 @@
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 316px minmax(0, 1fr);
+  grid-template-columns: 316px minmax(0, 1fr) minmax(380px, 460px);
   gap: 12px;
   padding: 12px;
   transition: grid-template-columns 0.22s ease, gap 0.22s ease;
 }
 
 .party-workspace.is-side-collapsed {
-  grid-template-columns: 0 minmax(0, 1fr);
-  gap: 0;
+  grid-template-columns: 0 minmax(0, 1fr) minmax(380px, 460px);
+  column-gap: 12px;
+  row-gap: 12px;
 }
 
 .party-side,
@@ -470,26 +471,34 @@
 }
 
 .party-content {
+  min-width: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .party-room-body {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   padding: 12px;
 }
 
 .party-room-main {
+  flex: 1;
   min-height: 0;
   border: 1px solid #e1eaf8;
   border-radius: 14px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.party-agent-column {
+  min-height: 0;
+  display: flex;
 }
 
 .party-agent-panel {
@@ -502,20 +511,24 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  overflow: hidden;
+  overflow: visible;
+  flex: 1;
 }
 
 .party-agent-panel-head {
+  position: relative;
+  z-index: 18;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
 }
 
 .party-agent-panel-head-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
   min-width: 0;
   color: #0f172a;
 }
@@ -525,29 +538,30 @@
   font-size: 17px;
 }
 
-.party-agent-panel-head-title svg {
-  color: #6c819e;
+.party-agent-panel-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
-.party-agent-clear-btn {
-  min-height: 32px;
-  padding: 7px 11px;
-  border: 1px solid #c9d7ea;
-  border-radius: 12px;
+.party-agent-panel-controls .smart-context-control {
+  min-height: 40px;
+  padding: 0 10px;
   background: #ffffff;
-  color: #334155;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 600;
 }
 
-.party-agent-clear-btn:hover {
-  background: #f4f7fc;
+.party-agent-panel-head .agent {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 20;
 }
 
-.party-agent-clear-btn:disabled {
-  opacity: 0.7;
-  cursor: not-allowed;
+.party-agent-panel-head .agent-popover {
+  left: auto;
+  right: 0;
+  z-index: 220;
 }
 
 .party-agent-chat {
@@ -593,7 +607,7 @@
   max-width: 100%;
   min-width: 0;
   margin: 0;
-  padding: 0 14px 0 0;
+  padding: 10px 14px 0 0;
   box-sizing: border-box;
 }
 
@@ -670,8 +684,12 @@
   height: auto;
 }
 
-.party-agent-chat .selection-ask-btn {
-  display: none;
+.party-agent-chat .msg-text,
+.party-agent-chat .msg-text *,
+.party-agent-chat .md-body,
+.party-agent-chat .md-body * {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .party-agent-chat .msg.user .msg-bubble {
@@ -708,8 +726,22 @@
   min-width: 0;
 }
 
-.party-agent-chat .file-name {
-  width: 100%;
+.party-agent-chat .file-meta {
+  flex: 1 1 auto;
+}
+
+.party-agent-chat .file-inline-actions {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.party-agent-chat .file-open-link {
+  flex: 0 0 auto;
+  min-width: 56px;
+  white-space: nowrap;
+  text-align: center;
+  padding: 5px 10px;
+  line-height: 1.2;
 }
 
 .party-agent-chat .composer,
@@ -738,6 +770,27 @@
   border-radius: 14px;
   border-color: #d4deed;
   box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+}
+
+.party-agent-chat .composer-quote {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.party-agent-chat .composer-quote-text {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .party-agent-chat .composer-text {
@@ -1025,6 +1078,22 @@
   font-size: 11px;
 }
 
+.party-message-delivery {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #74839a;
+}
+
+.party-message.mine .party-message-delivery {
+  order: 1;
+}
+
+.party-message-delivery.failed {
+  color: #be123c;
+  font-size: 11px;
+}
+
 .party-message-bubble {
   border: 1px solid #dce7f8;
   border-radius: 16px;
@@ -1067,6 +1136,10 @@
 .party-message-bubble-wrap.mine {
   flex-direction: row-reverse;
   margin-left: auto;
+}
+
+.party-messages > .party-message:first-child {
+  margin-top: 6px;
 }
 
 .party-read-receipt-btn {
@@ -1130,6 +1203,22 @@
   font-size: 14px;
 }
 
+.party-message-text.md-body.is-markdown {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.party-message-text.md-body.is-markdown p,
+.party-message-text.md-body.is-markdown li,
+.party-message-text.md-body.is-markdown blockquote,
+.party-message-text.md-body.is-markdown span,
+.party-message-text.md-body.is-markdown a {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 .party-page .party-message-text,
 .party-page .party-message-text * {
   -webkit-user-select: text;
@@ -1159,13 +1248,32 @@
   background: transparent;
   border-radius: 10px;
   overflow: hidden;
+  display: inline-flex;
+  width: auto;
+  max-width: 100%;
+  line-height: 0;
+  vertical-align: top;
+}
+
+.party-image-thumb-btn:focus,
+.party-image-thumb-btn:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .party-image-thumb {
   display: block;
-  width: min(280px, 100%);
-  max-height: 220px;
-  object-fit: cover;
+  width: auto;
+  max-width: min(360px, 100%);
+  height: auto;
+  max-height: 280px;
+  object-fit: contain;
+}
+
+.party-message.type-image .party-message-bubble.is-media {
+  display: inline-flex;
+  width: auto;
+  max-width: min(360px, 100%);
 }
 
 .party-file-msg-btn {
@@ -1941,13 +2049,30 @@
   }
 }
 
+@media (max-width: 1280px) {
+  .party-workspace {
+    grid-template-columns: 280px minmax(0, 1fr) minmax(340px, 400px);
+  }
+
+  .party-workspace.is-side-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr) minmax(340px, 400px);
+  }
+}
+
 @media (max-width: 980px) {
   .party-workspace {
     grid-template-columns: 280px minmax(0, 1fr);
   }
 
+  .party-workspace.is-side-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+
+  .party-agent-column {
+    display: none;
+  }
+
   .party-room-body {
-    grid-template-columns: minmax(0, 1fr);
     gap: 10px;
     padding: 10px;
   }

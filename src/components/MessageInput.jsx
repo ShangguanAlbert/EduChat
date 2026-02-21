@@ -77,6 +77,7 @@ export default function MessageInput({
   onSend,
   disabled = false,
   quoteText = "",
+  quotePreviewMaxChars = 0,
   onClearQuote,
   onConsumeQuote,
   onPrepareFiles,
@@ -89,7 +90,12 @@ export default function MessageInput({
   const fileRef = useRef(null);
   const textRef = useRef(null);
 
-  const hasQuote = quoteText.trim().length > 0;
+  const normalizedQuoteText = useMemo(() => normalizeQuoteText(quoteText), [quoteText]);
+  const hasQuote = normalizedQuoteText.length > 0;
+  const quotePreviewText = useMemo(
+    () => buildQuotePreviewText(normalizedQuoteText, quotePreviewMaxChars),
+    [normalizedQuoteText, quotePreviewMaxChars],
+  );
   const canSend = useMemo(() => {
     return text.trim().length > 0 || files.length > 0 || hasQuote;
   }, [text, files, hasQuote]);
@@ -97,7 +103,7 @@ export default function MessageInput({
   function submit() {
     if (!canSend || disabled || preparingFiles) return;
 
-    const t = buildFinalPrompt(text.trim(), quoteText.trim());
+    const t = buildFinalPrompt(text.trim(), normalizedQuoteText);
     onSend(t, files);
 
     setText("");
@@ -199,8 +205,8 @@ export default function MessageInput({
     <div className={`composer${disabled ? " is-disabled" : ""}`}>
       {hasQuote && (
         <div className="composer-quote">
-          <span className="composer-quote-text" title={quoteText}>
-            {quoteText}
+          <span className="composer-quote-text" title={normalizedQuoteText}>
+            {quotePreviewText}
           </span>
           <button
             type="button"
@@ -353,4 +359,19 @@ function buildFinalPrompt(text, quoteText) {
     return `请围绕这段内容继续解释或回答：\n「${quoteText}」`;
   }
   return `参考这段内容：\n「${quoteText}」\n\n我的问题：${text}`;
+}
+
+function normalizeQuoteText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function buildQuotePreviewText(value, maxChars) {
+  const normalized = normalizeQuoteText(value);
+  if (!normalized) return "";
+  const safeMax = Number(maxChars);
+  if (!Number.isFinite(safeMax) || safeMax <= 0) return normalized;
+  const max = Math.floor(safeMax);
+  const chars = Array.from(normalized);
+  if (chars.length <= max) return normalized;
+  return `${chars.slice(0, max).join("")}...`;
 }

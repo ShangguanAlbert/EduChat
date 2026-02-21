@@ -5,7 +5,6 @@ import {
   Download,
   File as FileIcon,
   FileUp,
-  Info,
   MoreHorizontal,
   ImagePlus,
   Loader2,
@@ -21,11 +20,20 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useNavigate } from "react-router-dom";
+import AgentSelect from "../../../components/AgentSelect.jsx";
 import MessageInput from "../../../components/MessageInput.jsx";
 import MessageList from "../../../components/MessageList.jsx";
+import { AGENT_META } from "../../chat/constants.js";
 import { readErrorMessage, readSseStream } from "../../chat/chatHelpers.js";
-import { getAuthTokenHeader } from "../../chat/stateApi.js";
+import {
+  fetchChatBootstrap,
+  getAuthTokenHeader,
+  saveChatSessionMessages,
+  saveChatStateMeta,
+} from "../../chat/stateApi.js";
 import {
   createPartyRoom,
   deletePartyFileMessage,
@@ -48,9 +56,13 @@ import "../../../styles/party-chat.css";
 const FALLBACK_SYNC_MS = 60 * 1000;
 const SOCKET_PING_MS = 20 * 1000;
 const PARTY_UPLOAD_FILE_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
-const PARTY_AGENT_PANEL_AGENT_ID = "A";
 const PARTY_AGENT_PANEL_TEMPERATURE = 0.6;
 const PARTY_AGENT_PANEL_TOP_P = 1;
+const PARTY_AGENT_DEFAULT_ID = "A";
+const PARTY_AGENT_CONTEXT_USER_ROUNDS = 10;
+const PARTY_AGENT_DRAFT_PERSIST_MS = 420;
+const CHAT_AGENT_IDS = Object.freeze(["A", "B", "C", "D", "E"]);
+const PARTY_MARKDOWN_FORWARD_PREFIX = "\u2063\u2063\u2063";
 const QUICK_REACTION_EMOJIS = Object.freeze(["👍", "👏", "🎉", "😄", "🤝"]);
 const COMPOSER_TOOL_EMOJIS = Object.freeze(["😀", "🤔", "👍", "🎯", "🎉", "🙏"]);
 
@@ -64,6 +76,13 @@ const DEFAULT_COUNTS = Object.freeze({
   createdRooms: 0,
   joinedRooms: 0,
 });
+
+const PARTY_MESSAGE_MARKDOWN_COMPONENTS = {
+  a: ({ node, ...props }) => {
+    void node;
+    return <a {...props} target="_blank" rel="noopener noreferrer" />;
+  },
+};
 
 export default function PartyChatDesktopPage({
   isMobileSidebarDrawer = false,
@@ -85,6 +104,8 @@ export default function PartyChatDesktopPage({
   const readSyncTimerRef = useRef(0);
   const copyImageToastTimerRef = useRef(0);
   const agentStreamControllersRef = useRef(new Map());
+  const partyAgentDraftBySessionRef = useRef(new Map());
+  const partyAgentDraftPersistTimerRef = useRef(new Map());
   const sideMenuRef = useRef(null);
   const messageMenuRef = useRef(null);
   const composerToolbarRef = useRef(null);
@@ -103,9 +124,17 @@ export default function PartyChatDesktopPage({
   const [messagesByRoom, setMessagesByRoom] = useState({});
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [messagesError, setMessagesError] = useState("");
-  const [agentMessagesByRoom, setAgentMessagesByRoom] = useState({});
-  const [agentStreamingByRoom, setAgentStreamingByRoom] = useState({});
-  const [agentErrorByRoom, setAgentErrorByRoom] = useState({});
+  const [chatMetaState, setChatMetaState] = useState(() => ({
+    activeId: "",
+    groups: [],
+    sessions: [],
+    settings: {},
+  }));
+  const [chatMessagesBySession, setChatMessagesBySession] = useState({});
+  const [chatBootstrapError, setChatBootstrapError] = useState("");
+  const [partyAgentStreaming, setPartyAgentStreaming] = useState(false);
+  const [partyAgentError, setPartyAgentError] = useState("");
+  const [partyAgentSelectedAskText, setPartyAgentSelectedAskText] = useState("");
 
   const [createRoomName, setCreateRoomName] = useState("");
   const [createSubmitting, setCreateSubmitting] = useState(false);
@@ -155,12 +184,36 @@ export default function PartyChatDesktopPage({
     () => messagesByRoom[activeRoomId] || [],
     [messagesByRoom, activeRoomId],
   );
-  const activeAgentMessages = useMemo(
-    () => agentMessagesByRoom[activeRoomId] || [],
-    [agentMessagesByRoom, activeRoomId],
+  const linkedChatSessionId = useMemo(
+    () => sanitizePartyAgentSessionId(chatMetaState.activeId),
+    [chatMetaState.activeId],
   );
-  const activeAgentStreaming = !!agentStreamingByRoom[activeRoomId];
-  const activeAgentError = String(agentErrorByRoom[activeRoomId] || "");
+  const linkedChatMessages = useMemo(() => {
+    if (!linkedChatSessionId) return [];
+    return Array.isArray(chatMessagesBySession[linkedChatSessionId])
+      ? chatMessagesBySession[linkedChatSessionId]
+      : [];
+  }, [chatMessagesBySession, linkedChatSessionId]);
+  const linkedChatAgentId = useMemo(() => {
+    return readPartyAgentBySession(
+      chatMetaState.settings?.agentBySession,
+      linkedChatSessionId,
+      chatMetaState.settings?.agent || PARTY_AGENT_DEFAULT_ID,
+    );
+  }, [chatMetaState.settings?.agent, chatMetaState.settings?.agentBySession, linkedChatSessionId]);
+  const linkedChatSmartContextEnabled = useMemo(() => {
+    return readPartyAgentSmartContextEnabledBySessionAgent(
+      chatMetaState.settings?.smartContextEnabledBySessionAgent,
+      linkedChatSessionId,
+      linkedChatAgentId,
+    );
+  }, [
+    chatMetaState.settings?.smartContextEnabledBySessionAgent,
+    linkedChatSessionId,
+    linkedChatAgentId,
+  ]);
+  const partyAgentSwitchLocked = !!linkedChatSmartContextEnabled;
+  const partyAgentSmartContextToggleDisabled = !linkedChatSessionId || partyAgentStreaming;
   const activeMembers = useMemo(() => {
     if (!activeRoom) return [];
     return activeRoom.memberUserIds.map((userId) => {
@@ -186,7 +239,7 @@ export default function PartyChatDesktopPage({
     (composeText.trim().length > 0 || selectedImageFiles.length > 0 || selectedUploadFiles.length > 0) &&
     !composerSending;
   const canManageActiveRoom = !!activeRoom && activeRoom.ownerUserId === me.id;
-  const bannerMessage = actionError || messagesError || bootstrapError;
+  const bannerMessage = actionError || messagesError || bootstrapError || chatBootstrapError;
   const activeReadStateMap = useMemo(() => {
     const map = new Map();
     if (!canManageActiveRoom) return map;
@@ -204,53 +257,26 @@ export default function PartyChatDesktopPage({
   }, [activeRoom, canManageActiveRoom]);
   const showSidebar = isMobileSidebarDrawer ? isSidebarDrawerOpen : isSidebarExpanded;
 
-  const setAgentRoomMessages = useCallback((roomId, updater) => {
-    const safeRoomId = String(roomId || "").trim();
-    if (!safeRoomId || typeof updater !== "function") return;
-    setAgentMessagesByRoom((prev) => {
-      const current = Array.isArray(prev[safeRoomId]) ? prev[safeRoomId] : [];
+  const setChatSessionMessages = useCallback((sessionId, updater) => {
+    const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+    if (!safeSessionId || typeof updater !== "function") return;
+    setChatMessagesBySession((prev) => {
+      const current = Array.isArray(prev[safeSessionId]) ? prev[safeSessionId] : [];
       const next = updater(current);
-      if (!Array.isArray(next)) return prev;
-      if (next === current) return prev;
+      if (!Array.isArray(next) || next === current) return prev;
       return {
         ...prev,
-        [safeRoomId]: next,
+        [safeSessionId]: next,
       };
     });
   }, []);
 
-  const setAgentRoomStreaming = useCallback((roomId, streaming) => {
-    const safeRoomId = String(roomId || "").trim();
-    if (!safeRoomId) return;
-    const nextStreaming = !!streaming;
-    setAgentStreamingByRoom((prev) => {
-      if (prev[safeRoomId] === nextStreaming) return prev;
-      return {
-        ...prev,
-        [safeRoomId]: nextStreaming,
-      };
-    });
-  }, []);
-
-  const setAgentRoomError = useCallback((roomId, message) => {
-    const safeRoomId = String(roomId || "").trim();
-    if (!safeRoomId) return;
-    const nextMessage = String(message || "");
-    setAgentErrorByRoom((prev) => {
-      if (String(prev[safeRoomId] || "") === nextMessage) return prev;
-      return {
-        ...prev,
-        [safeRoomId]: nextMessage,
-      };
-    });
-  }, []);
-
-  const patchAgentMessageById = useCallback(
-    (roomId, messageId, updater) => {
-      const safeRoomId = String(roomId || "").trim();
+  const patchChatSessionMessageById = useCallback(
+    (sessionId, messageId, updater) => {
+      const safeSessionId = sanitizePartyAgentSessionId(sessionId);
       const safeMessageId = String(messageId || "").trim();
-      if (!safeRoomId || !safeMessageId || typeof updater !== "function") return;
-      setAgentRoomMessages(safeRoomId, (list) => {
+      if (!safeSessionId || !safeMessageId || typeof updater !== "function") return;
+      setChatSessionMessages(safeSessionId, (list) => {
         let changed = false;
         const next = list.map((item) => {
           if (String(item?.id || "") !== safeMessageId) return item;
@@ -262,13 +288,180 @@ export default function PartyChatDesktopPage({
         return changed ? next : list;
       });
     },
-    [setAgentRoomMessages],
+    [setChatSessionMessages],
+  );
+
+  const persistChatMessagesUpserts = useCallback(async (upserts) => {
+    const safeUpserts = Array.isArray(upserts)
+      ? upserts
+          .map((item) => ({
+            sessionId: sanitizePartyAgentSessionId(item?.sessionId),
+            message: item?.message,
+          }))
+          .filter((item) => !!item.sessionId && !!item.message?.id)
+      : [];
+    if (safeUpserts.length === 0) return;
+    try {
+      await saveChatSessionMessages({ upserts: safeUpserts });
+    } catch (error) {
+      setPartyAgentError(error?.message || "ChatPage 会话保存失败。");
+    }
+  }, []);
+
+  const setPartyAgentDraft = useCallback((sessionId, message) => {
+    const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+    const safeMessageId = String(message?.id || "").trim();
+    if (!safeSessionId || !safeMessageId) return;
+    partyAgentDraftBySessionRef.current.set(safeSessionId, message);
+  }, []);
+
+  const patchPartyAgentDraft = useCallback((sessionId, messageId, updater) => {
+    const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+    const safeMessageId = String(messageId || "").trim();
+    if (!safeSessionId || !safeMessageId || typeof updater !== "function") return;
+    const current = partyAgentDraftBySessionRef.current.get(safeSessionId);
+    if (!current || String(current?.id || "") !== safeMessageId) return;
+    const patched = updater(current);
+    if (!patched || String(patched?.id || "") !== safeMessageId) return;
+    partyAgentDraftBySessionRef.current.set(safeSessionId, patched);
+  }, []);
+
+  const clearPartyAgentDraftPersistTimer = useCallback((sessionId) => {
+    const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+    if (!safeSessionId) return;
+    const timers = partyAgentDraftPersistTimerRef.current;
+    const timerId = timers.get(safeSessionId);
+    if (!timerId) return;
+    clearTimeout(timerId);
+    timers.delete(safeSessionId);
+  }, []);
+
+  const schedulePersistPartyAgentDraft = useCallback(
+    (sessionId) => {
+      const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+      if (!safeSessionId) return;
+      const timers = partyAgentDraftPersistTimerRef.current;
+      if (timers.has(safeSessionId)) return;
+      const timerId = window.setTimeout(() => {
+        timers.delete(safeSessionId);
+        const draft = partyAgentDraftBySessionRef.current.get(safeSessionId);
+        if (!draft?.id) return;
+        void persistChatMessagesUpserts([{ sessionId: safeSessionId, message: draft }]);
+      }, PARTY_AGENT_DRAFT_PERSIST_MS);
+      timers.set(safeSessionId, timerId);
+    },
+    [persistChatMessagesUpserts],
+  );
+
+  const finalizePartyAgentDraft = useCallback(
+    (sessionId, messageId) => {
+      const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+      const safeMessageId = String(messageId || "").trim();
+      if (!safeSessionId || !safeMessageId) return null;
+      clearPartyAgentDraftPersistTimer(safeSessionId);
+      const draft = partyAgentDraftBySessionRef.current.get(safeSessionId);
+      if (!draft || String(draft?.id || "") !== safeMessageId) return null;
+      const finalized = {
+        ...draft,
+        streaming: false,
+      };
+      partyAgentDraftBySessionRef.current.set(safeSessionId, finalized);
+      void persistChatMessagesUpserts([{ sessionId: safeSessionId, message: finalized }]);
+      return finalized;
+    },
+    [clearPartyAgentDraftPersistTimer, persistChatMessagesUpserts],
+  );
+
+  const clearPartyAgentDraft = useCallback(
+    (sessionId, messageId = "") => {
+      const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+      const safeMessageId = String(messageId || "").trim();
+      if (!safeSessionId) return;
+      const current = partyAgentDraftBySessionRef.current.get(safeSessionId);
+      if (!current) return;
+      if (safeMessageId && String(current?.id || "") !== safeMessageId) return;
+      partyAgentDraftBySessionRef.current.delete(safeSessionId);
+      clearPartyAgentDraftPersistTimer(safeSessionId);
+    },
+    [clearPartyAgentDraftPersistTimer],
+  );
+
+  const persistPartyAgentMetaState = useCallback(async (metaState) => {
+    const safeMeta = metaState && typeof metaState === "object" ? metaState : {};
+    try {
+      await saveChatStateMeta({
+        activeId: sanitizePartyAgentSessionId(safeMeta.activeId),
+        groups: Array.isArray(safeMeta.groups) ? safeMeta.groups : [],
+        sessions: Array.isArray(safeMeta.sessions) ? safeMeta.sessions : [],
+        settings: safeMeta.settings && typeof safeMeta.settings === "object" ? safeMeta.settings : {},
+      });
+    } catch (error) {
+      setPartyAgentError(error?.message || "ChatPage 会话设置保存失败。");
+    }
+  }, []);
+
+  const onPartyAgentChange = useCallback(
+    (nextAgentId) => {
+      if (partyAgentSwitchLocked) return;
+      const safeSessionId = sanitizePartyAgentSessionId(linkedChatSessionId);
+      const safeAgentId = sanitizePartyAgentId(nextAgentId, linkedChatAgentId);
+      if (!safeSessionId || !safeAgentId) return;
+      setChatMetaState((prev) => {
+        const settings = prev?.settings && typeof prev.settings === "object" ? prev.settings : {};
+        const nextSettings = {
+          ...settings,
+          agent: safeAgentId,
+          agentBySession: patchPartyAgentBySession(
+            settings.agentBySession,
+            safeSessionId,
+            safeAgentId,
+            PARTY_AGENT_DEFAULT_ID,
+          ),
+        };
+        const nextState = {
+          ...prev,
+          settings: nextSettings,
+        };
+        void persistPartyAgentMetaState(nextState);
+        return nextState;
+      });
+    },
+    [linkedChatAgentId, linkedChatSessionId, partyAgentSwitchLocked, persistPartyAgentMetaState],
+  );
+
+  const onPartyAgentToggleSmartContext = useCallback(
+    (enabled) => {
+      const safeSessionId = sanitizePartyAgentSessionId(linkedChatSessionId);
+      const safeAgentId = sanitizePartyAgentId(linkedChatAgentId, PARTY_AGENT_DEFAULT_ID);
+      if (!safeSessionId || !safeAgentId) return;
+      const nextEnabled = !!enabled;
+      setChatMetaState((prev) => {
+        const settings = prev?.settings && typeof prev.settings === "object" ? prev.settings : {};
+        const nextSettings = {
+          ...settings,
+          smartContextEnabled: nextEnabled,
+          smartContextEnabledBySessionAgent: patchPartyAgentSmartContextEnabledBySessionAgent(
+            settings.smartContextEnabledBySessionAgent,
+            safeSessionId,
+            safeAgentId,
+            nextEnabled,
+          ),
+        };
+        const nextState = {
+          ...prev,
+          settings: nextSettings,
+        };
+        void persistPartyAgentMetaState(nextState);
+        return nextState;
+      });
+    },
+    [linkedChatAgentId, linkedChatSessionId, persistPartyAgentMetaState],
   );
 
   const onSendAgentPanelMessage = useCallback(
     async (text, files = []) => {
-      const roomId = String(activeRoomId || "").trim();
-      if (!roomId || activeAgentStreaming) return;
+      const sessionId = sanitizePartyAgentSessionId(linkedChatSessionId);
+      if (!sessionId || partyAgentStreaming) return;
 
       const safeText = String(text || "");
       const fileItems = Array.isArray(files) ? files.filter(Boolean) : [];
@@ -290,6 +483,8 @@ export default function PartyChatDesktopPage({
         };
       });
 
+      if (!safeText.trim() && attachments.length === 0) return;
+
       const userMessageId = `party-agent-u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const assistantMessageId = `party-agent-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const userMessage = {
@@ -308,26 +503,45 @@ export default function PartyChatDesktopPage({
         streaming: true,
         startedAt: new Date().toISOString(),
         firstTextAt: null,
+        runtime: {
+          agentId: linkedChatAgentId,
+          agentName: AGENT_META[linkedChatAgentId]?.name || `智能体 ${linkedChatAgentId}`,
+          temperature: PARTY_AGENT_PANEL_TEMPERATURE,
+          topP: PARTY_AGENT_PANEL_TOP_P,
+          reasoningRequested: "high",
+          reasoningApplied: "pending",
+          provider: "pending",
+          model: "pending",
+        },
       };
 
-      const historyForApi = toPartyAgentApiMessages([...activeAgentMessages, userMessage]);
-      setAgentRoomMessages(roomId, (list) => [...list, userMessage, assistantMessage]);
-      setAgentRoomError(roomId, "");
-      setAgentRoomStreaming(roomId, true);
+      const historyForApi = toPartyAgentApiMessages(
+        pickRecentPartyAgentRounds([...linkedChatMessages, userMessage], PARTY_AGENT_CONTEXT_USER_ROUNDS),
+      );
 
-      const previousController = agentStreamControllersRef.current.get(roomId);
+      setChatSessionMessages(sessionId, (list) => [...list, userMessage, assistantMessage]);
+      setPartyAgentDraft(sessionId, assistantMessage);
+      setPartyAgentError("");
+      setPartyAgentStreaming(true);
+      void persistChatMessagesUpserts([
+        { sessionId, message: userMessage },
+        { sessionId, message: assistantMessage },
+      ]);
+
+      const previousController = agentStreamControllersRef.current.get(sessionId);
       if (previousController) {
         previousController.abort();
       }
       const controller = new AbortController();
-      agentStreamControllersRef.current.set(roomId, controller);
+      agentStreamControllersRef.current.set(sessionId, controller);
 
       const formData = new FormData();
-      formData.append("agentId", PARTY_AGENT_PANEL_AGENT_ID);
+      const streamEndpoint = linkedChatAgentId === "E" ? "/api/chat/stream-e" : "/api/chat/stream";
+      formData.append("agentId", linkedChatAgentId);
       formData.append("temperature", String(PARTY_AGENT_PANEL_TEMPERATURE));
       formData.append("topP", String(PARTY_AGENT_PANEL_TOP_P));
-      formData.append("sessionId", buildPartyAgentSessionId(roomId));
-      formData.append("smartContextEnabled", "false");
+      formData.append("sessionId", sessionId);
+      formData.append("smartContextEnabled", String(linkedChatSmartContextEnabled));
       formData.append("contextMode", "append");
       formData.append("messages", JSON.stringify(historyForApi));
       localFiles.forEach((file) => {
@@ -335,7 +549,7 @@ export default function PartyChatDesktopPage({
       });
 
       try {
-        const resp = await fetch("/api/chat/stream", {
+        const resp = await fetch(streamEndpoint, {
           method: "POST",
           headers: {
             ...getAuthTokenHeader(),
@@ -353,33 +567,82 @@ export default function PartyChatDesktopPage({
             const uploadedLinks = Array.isArray(meta?.uploadedAttachmentLinks)
               ? meta.uploadedAttachmentLinks
               : [];
-            if (uploadedLinks.length === 0) return;
-            patchAgentMessageById(roomId, userMessageId, (message) => {
-              const nextAttachments = mergePartyAgentAttachmentsWithUploadedLinks(
-                message?.attachments,
-                uploadedLinks,
+            if (uploadedLinks.length > 0) {
+              let changedMessage = null;
+              setChatSessionMessages(sessionId, (list) =>
+                list.map((item) => {
+                  if (String(item?.id || "") !== userMessageId) return item;
+                  const nextAttachments = mergePartyAgentAttachmentsWithUploadedLinks(
+                    item?.attachments,
+                    uploadedLinks,
+                  );
+                  if (nextAttachments === item?.attachments) return item;
+                  changedMessage = {
+                    ...item,
+                    attachments: nextAttachments,
+                  };
+                  return changedMessage;
+                }),
               );
-              if (nextAttachments === message?.attachments) return message;
-              return {
-                ...message,
-                attachments: nextAttachments,
-              };
-            });
+              if (changedMessage) {
+                void persistChatMessagesUpserts([{ sessionId, message: changedMessage }]);
+              }
+            }
+            patchChatSessionMessageById(sessionId, assistantMessageId, (message) => ({
+              ...message,
+              runtime: {
+                ...(message?.runtime || {}),
+                provider: String(meta?.provider || message?.runtime?.provider || "pending"),
+                model: String(meta?.model || message?.runtime?.model || "pending"),
+                reasoningRequested: String(
+                  meta?.reasoningRequested || message?.runtime?.reasoningRequested || "high",
+                ),
+                reasoningApplied: String(
+                  meta?.reasoningApplied || message?.runtime?.reasoningApplied || "pending",
+                ),
+              },
+            }));
+            patchPartyAgentDraft(sessionId, assistantMessageId, (message) => ({
+              ...message,
+              runtime: {
+                ...(message?.runtime || {}),
+                provider: String(meta?.provider || message?.runtime?.provider || "pending"),
+                model: String(meta?.model || message?.runtime?.model || "pending"),
+                reasoningRequested: String(
+                  meta?.reasoningRequested || message?.runtime?.reasoningRequested || "high",
+                ),
+                reasoningApplied: String(
+                  meta?.reasoningApplied || message?.runtime?.reasoningApplied || "pending",
+                ),
+              },
+            }));
+            schedulePersistPartyAgentDraft(sessionId);
           },
           onToken: (textChunk) => {
             if (!textChunk) return;
-            patchAgentMessageById(roomId, assistantMessageId, (message) => ({
+            patchChatSessionMessageById(sessionId, assistantMessageId, (message) => ({
               ...message,
               content: `${String(message?.content || "")}${textChunk}`,
               firstTextAt: message?.firstTextAt || new Date().toISOString(),
             }));
+            patchPartyAgentDraft(sessionId, assistantMessageId, (message) => ({
+              ...message,
+              content: `${String(message?.content || "")}${textChunk}`,
+              firstTextAt: message?.firstTextAt || new Date().toISOString(),
+            }));
+            schedulePersistPartyAgentDraft(sessionId);
           },
           onReasoningToken: (textChunk) => {
             if (!textChunk) return;
-            patchAgentMessageById(roomId, assistantMessageId, (message) => ({
+            patchChatSessionMessageById(sessionId, assistantMessageId, (message) => ({
               ...message,
               reasoning: `${String(message?.reasoning || "")}${textChunk}`,
             }));
+            patchPartyAgentDraft(sessionId, assistantMessageId, (message) => ({
+              ...message,
+              reasoning: `${String(message?.reasoning || "")}${textChunk}`,
+            }));
+            schedulePersistPartyAgentDraft(sessionId);
           },
           onError: (message) => {
             throw new Error(message || "stream error");
@@ -390,50 +653,318 @@ export default function PartyChatDesktopPage({
           return;
         }
         const message = error?.message || "请求失败";
-        setAgentRoomError(roomId, message);
-        patchAgentMessageById(roomId, assistantMessageId, (assistant) => ({
+        setPartyAgentError(message);
+        patchChatSessionMessageById(sessionId, assistantMessageId, (assistant) => ({
           ...assistant,
           content: `${String(assistant?.content || "")}\n\n> 请求失败：${message}`,
         }));
-      } finally {
-        const activeController = agentStreamControllersRef.current.get(roomId);
-        if (activeController === controller) {
-          agentStreamControllersRef.current.delete(roomId);
-        }
-        setAgentRoomStreaming(roomId, false);
-        patchAgentMessageById(roomId, assistantMessageId, (assistant) => ({
+        patchPartyAgentDraft(sessionId, assistantMessageId, (assistant) => ({
           ...assistant,
-          streaming: false,
+          content: `${String(assistant?.content || "")}\n\n> 请求失败：${message}`,
         }));
+        schedulePersistPartyAgentDraft(sessionId);
+      } finally {
+        const activeController = agentStreamControllersRef.current.get(sessionId);
+        if (activeController === controller) {
+          agentStreamControllersRef.current.delete(sessionId);
+        }
+        setPartyAgentStreaming(false);
+        const finalizedAssistantMessage = finalizePartyAgentDraft(sessionId, assistantMessageId);
+        setChatSessionMessages(sessionId, (list) =>
+          list.map((item) => {
+            if (String(item?.id || "") !== assistantMessageId) return item;
+            if (finalizedAssistantMessage) return finalizedAssistantMessage;
+            return {
+              ...item,
+              streaming: false,
+            };
+          }),
+        );
+        clearPartyAgentDraft(sessionId, assistantMessageId);
       }
     },
     [
-      activeAgentMessages,
-      activeAgentStreaming,
-      activeRoomId,
-      patchAgentMessageById,
-      setAgentRoomError,
-      setAgentRoomMessages,
-      setAgentRoomStreaming,
+      clearPartyAgentDraft,
+      linkedChatAgentId,
+      linkedChatMessages,
+      linkedChatSessionId,
+      linkedChatSmartContextEnabled,
+      finalizePartyAgentDraft,
+      patchPartyAgentDraft,
+      partyAgentStreaming,
+      patchChatSessionMessageById,
+      persistChatMessagesUpserts,
+      schedulePersistPartyAgentDraft,
+      setPartyAgentDraft,
+      setChatSessionMessages,
     ],
   );
 
-  const onClearAgentPanelMessages = useCallback(() => {
+  const onPartyAgentFeedback = useCallback(
+    (messageId, feedback) => {
+      const sessionId = sanitizePartyAgentSessionId(linkedChatSessionId);
+      const safeMessageId = String(messageId || "").trim();
+      const safeFeedback = feedback === "up" || feedback === "down" ? feedback : "";
+      if (!sessionId || !safeMessageId || !safeFeedback) return;
+
+      let changedMessage = null;
+      setChatSessionMessages(sessionId, (list) => {
+        const next = list.map((item) => {
+          if (String(item?.id || "") !== safeMessageId) return item;
+          if (String(item?.role || "") !== "assistant") return item;
+          const nextFeedback = item?.feedback === safeFeedback ? null : safeFeedback;
+          changedMessage = {
+            ...item,
+            feedback: nextFeedback,
+          };
+          return changedMessage;
+        });
+        return changedMessage ? next : list;
+      });
+      if (changedMessage) {
+        void persistChatMessagesUpserts([{ sessionId, message: changedMessage }]);
+      }
+    },
+    [linkedChatSessionId, persistChatMessagesUpserts, setChatSessionMessages],
+  );
+
+  const onPartyAgentAskSelection = useCallback((text) => {
+    const trimmed = String(text || "").trim();
+    if (!trimmed) return;
+    setPartyAgentSelectedAskText(trimmed);
+  }, []);
+
+  async function onPartyAgentForwardToRoom(assistantMessageId) {
     const roomId = String(activeRoomId || "").trim();
-    if (!roomId || activeAgentStreaming) return;
-    setAgentMessagesByRoom((prev) => {
-      if (!(roomId in prev)) return prev;
-      const next = { ...prev };
-      delete next[roomId];
-      return next;
-    });
-    setAgentErrorByRoom((prev) => {
-      if (!(roomId in prev)) return prev;
-      const next = { ...prev };
-      delete next[roomId];
-      return next;
-    });
-  }, [activeAgentStreaming, activeRoomId]);
+    const safeMessageId = String(assistantMessageId || "").trim();
+    if (!roomId || !safeMessageId) {
+      setPartyAgentError("请先在左侧选择派会话后再转发。");
+      return;
+    }
+    const sourceMessage =
+      (Array.isArray(linkedChatMessages) ? linkedChatMessages : []).find(
+        (item) =>
+          String(item?.id || "") === safeMessageId &&
+          String(item?.role || "").toLowerCase() === "assistant",
+      ) || null;
+    const content = String(sourceMessage?.content || "");
+    if (!content.trim()) {
+      setPartyAgentError("该消息没有可转发的文本内容。");
+      return;
+    }
+
+    setPartyAgentError("");
+    try {
+      await dispatchTextMessage(roomId, encodePartyForwardMarkdown(content));
+    } catch (error) {
+      setActionError(error?.message || "转发失败，请稍后重试。");
+    }
+  }
+
+  const onPartyAgentRegenerate = useCallback(
+    async (assistantMessageId, promptMessageId) => {
+      const sessionId = sanitizePartyAgentSessionId(linkedChatSessionId);
+      const safeAssistantMessageId = String(assistantMessageId || "").trim();
+      const safePromptMessageId = String(promptMessageId || "").trim();
+      if (!sessionId || !safeAssistantMessageId || !safePromptMessageId || partyAgentStreaming) return;
+
+      const list = Array.isArray(chatMessagesBySession[sessionId]) ? chatMessagesBySession[sessionId] : [];
+      const assistantIndex = list.findIndex(
+        (item) => String(item?.id || "") === safeAssistantMessageId && String(item?.role || "") === "assistant",
+      );
+      if (assistantIndex < 0) return;
+      const promptIndex = list.findIndex(
+        (item) => String(item?.id || "") === safePromptMessageId && String(item?.role || "") === "user",
+      );
+      if (promptIndex < 0) return;
+
+      const promptMessage = list[promptIndex];
+      const previousAssistantMessage = list[assistantIndex];
+      const historyForApi = toPartyAgentApiMessages(
+        pickRecentPartyAgentRounds(list.slice(0, promptIndex + 1), PARTY_AGENT_CONTEXT_USER_ROUNDS),
+      );
+
+      const regeneratingAssistantMessage = {
+        ...previousAssistantMessage,
+        content: "",
+        reasoning: "",
+        feedback: null,
+        streaming: true,
+        startedAt: new Date().toISOString(),
+        firstTextAt: null,
+        regenerateOf: safeAssistantMessageId,
+        askedAt: promptMessage?.askedAt || null,
+        runtime: {
+          agentId: linkedChatAgentId,
+          agentName: AGENT_META[linkedChatAgentId]?.name || `智能体 ${linkedChatAgentId}`,
+          temperature: PARTY_AGENT_PANEL_TEMPERATURE,
+          topP: PARTY_AGENT_PANEL_TOP_P,
+          reasoningRequested: "high",
+          reasoningApplied: "pending",
+          provider: "pending",
+          model: "pending",
+        },
+      };
+
+      setChatSessionMessages(sessionId, (current) =>
+        current.map((item) => {
+          if (String(item?.id || "") !== safeAssistantMessageId) return item;
+          return regeneratingAssistantMessage;
+        }),
+      );
+      setPartyAgentDraft(sessionId, regeneratingAssistantMessage);
+      setPartyAgentError("");
+      setPartyAgentStreaming(true);
+      void persistChatMessagesUpserts([{ sessionId, message: regeneratingAssistantMessage }]);
+
+      const previousController = agentStreamControllersRef.current.get(sessionId);
+      if (previousController) {
+        previousController.abort();
+      }
+      const controller = new AbortController();
+      agentStreamControllersRef.current.set(sessionId, controller);
+
+      const formData = new FormData();
+      const streamEndpoint = linkedChatAgentId === "E" ? "/api/chat/stream-e" : "/api/chat/stream";
+      formData.append("agentId", linkedChatAgentId);
+      formData.append("temperature", String(PARTY_AGENT_PANEL_TEMPERATURE));
+      formData.append("topP", String(PARTY_AGENT_PANEL_TOP_P));
+      formData.append("sessionId", sessionId);
+      formData.append("smartContextEnabled", String(linkedChatSmartContextEnabled));
+      formData.append("contextMode", "regenerate");
+      formData.append("messages", JSON.stringify(historyForApi));
+
+      try {
+        const resp = await fetch(streamEndpoint, {
+          method: "POST",
+          headers: {
+            ...getAuthTokenHeader(),
+          },
+          body: formData,
+          signal: controller.signal,
+        });
+        if (!resp.ok || !resp.body) {
+          const message = await readErrorMessage(resp);
+          throw new Error(message || `HTTP ${resp.status}`);
+        }
+
+        await readSseStream(resp, {
+          onMeta: (meta) => {
+            patchChatSessionMessageById(sessionId, safeAssistantMessageId, (message) => ({
+              ...message,
+              runtime: {
+                ...(message?.runtime || {}),
+                provider: String(meta?.provider || message?.runtime?.provider || "pending"),
+                model: String(meta?.model || message?.runtime?.model || "pending"),
+                reasoningRequested: String(
+                  meta?.reasoningRequested || message?.runtime?.reasoningRequested || "high",
+                ),
+                reasoningApplied: String(
+                  meta?.reasoningApplied || message?.runtime?.reasoningApplied || "pending",
+                ),
+              },
+            }));
+            patchPartyAgentDraft(sessionId, safeAssistantMessageId, (message) => ({
+              ...message,
+              runtime: {
+                ...(message?.runtime || {}),
+                provider: String(meta?.provider || message?.runtime?.provider || "pending"),
+                model: String(meta?.model || message?.runtime?.model || "pending"),
+                reasoningRequested: String(
+                  meta?.reasoningRequested || message?.runtime?.reasoningRequested || "high",
+                ),
+                reasoningApplied: String(
+                  meta?.reasoningApplied || message?.runtime?.reasoningApplied || "pending",
+                ),
+              },
+            }));
+            schedulePersistPartyAgentDraft(sessionId);
+          },
+          onToken: (textChunk) => {
+            if (!textChunk) return;
+            patchChatSessionMessageById(sessionId, safeAssistantMessageId, (message) => ({
+              ...message,
+              content: `${String(message?.content || "")}${textChunk}`,
+              firstTextAt: message?.firstTextAt || new Date().toISOString(),
+            }));
+            patchPartyAgentDraft(sessionId, safeAssistantMessageId, (message) => ({
+              ...message,
+              content: `${String(message?.content || "")}${textChunk}`,
+              firstTextAt: message?.firstTextAt || new Date().toISOString(),
+            }));
+            schedulePersistPartyAgentDraft(sessionId);
+          },
+          onReasoningToken: (textChunk) => {
+            if (!textChunk) return;
+            patchChatSessionMessageById(sessionId, safeAssistantMessageId, (message) => ({
+              ...message,
+              reasoning: `${String(message?.reasoning || "")}${textChunk}`,
+            }));
+            patchPartyAgentDraft(sessionId, safeAssistantMessageId, (message) => ({
+              ...message,
+              reasoning: `${String(message?.reasoning || "")}${textChunk}`,
+            }));
+            schedulePersistPartyAgentDraft(sessionId);
+          },
+          onError: (message) => {
+            throw new Error(message || "stream error");
+          },
+        });
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          return;
+        }
+        const message = error?.message || "请求失败";
+        setPartyAgentError(message);
+        patchChatSessionMessageById(sessionId, safeAssistantMessageId, (assistant) => ({
+          ...assistant,
+          content: `${String(assistant?.content || "")}\n\n> 请求失败：${message}`,
+        }));
+        patchPartyAgentDraft(sessionId, safeAssistantMessageId, (assistant) => ({
+          ...assistant,
+          content: `${String(assistant?.content || "")}\n\n> 请求失败：${message}`,
+        }));
+        schedulePersistPartyAgentDraft(sessionId);
+      } finally {
+        const activeController = agentStreamControllersRef.current.get(sessionId);
+        if (activeController === controller) {
+          agentStreamControllersRef.current.delete(sessionId);
+        }
+        setPartyAgentStreaming(false);
+        const finalizedAssistantMessage = finalizePartyAgentDraft(sessionId, safeAssistantMessageId);
+        setChatSessionMessages(sessionId, (current) =>
+          current.map((item) => {
+            if (String(item?.id || "") !== safeAssistantMessageId) return item;
+            if (finalizedAssistantMessage) return finalizedAssistantMessage;
+            return {
+              ...item,
+              streaming: false,
+            };
+          }),
+        );
+        clearPartyAgentDraft(sessionId, safeAssistantMessageId);
+      }
+    },
+    [
+      chatMessagesBySession,
+      clearPartyAgentDraft,
+      finalizePartyAgentDraft,
+      linkedChatAgentId,
+      linkedChatSessionId,
+      linkedChatSmartContextEnabled,
+      patchPartyAgentDraft,
+      partyAgentStreaming,
+      patchChatSessionMessageById,
+      persistChatMessagesUpserts,
+      schedulePersistPartyAgentDraft,
+      setPartyAgentDraft,
+      setChatSessionMessages,
+    ],
+  );
+
+  useEffect(() => {
+    setPartyAgentSelectedAskText("");
+  }, [linkedChatSessionId]);
 
   const resizeComposeTextarea = useCallback(() => {
     const textarea = composeTextareaRef.current;
@@ -551,31 +1082,8 @@ export default function PartyChatDesktopPage({
   const removeRoom = useCallback((roomId) => {
     const safeRoomId = String(roomId || "").trim();
     if (!safeRoomId) return;
-    const controller = agentStreamControllersRef.current.get(safeRoomId);
-    if (controller) {
-      controller.abort();
-      agentStreamControllersRef.current.delete(safeRoomId);
-    }
     setRooms((prev) => prev.filter((room) => room.id !== safeRoomId));
     setMessagesByRoom((prev) => {
-      if (!(safeRoomId in prev)) return prev;
-      const next = { ...prev };
-      delete next[safeRoomId];
-      return next;
-    });
-    setAgentMessagesByRoom((prev) => {
-      if (!(safeRoomId in prev)) return prev;
-      const next = { ...prev };
-      delete next[safeRoomId];
-      return next;
-    });
-    setAgentStreamingByRoom((prev) => {
-      if (!(safeRoomId in prev)) return prev;
-      const next = { ...prev };
-      delete next[safeRoomId];
-      return next;
-    });
-    setAgentErrorByRoom((prev) => {
       if (!(safeRoomId in prev)) return prev;
       const next = { ...prev };
       delete next[safeRoomId];
@@ -796,8 +1304,65 @@ export default function PartyChatDesktopPage({
   }, [loadBootstrap]);
 
   useEffect(() => {
-    const controllers = agentStreamControllersRef.current;
+    let cancelled = false;
+
+    async function loadChatStateForAgentPanel() {
+      try {
+        const result = await fetchChatBootstrap();
+        if (cancelled) return;
+        const state = result?.state && typeof result.state === "object" ? result.state : {};
+        const sessions = Array.isArray(state.sessions) ? state.sessions : [];
+        const resolvedActiveId =
+          sanitizePartyAgentSessionId(state.activeId) ||
+          sanitizePartyAgentSessionId(sessions[0]?.id) ||
+          "";
+        const sessionMessages =
+          state.sessionMessages && typeof state.sessionMessages === "object"
+            ? state.sessionMessages
+            : {};
+        setChatMetaState({
+          activeId: resolvedActiveId,
+          groups: Array.isArray(state.groups) ? state.groups : [],
+          sessions,
+          settings: state.settings && typeof state.settings === "object" ? state.settings : {},
+        });
+        setChatMessagesBySession(sessionMessages);
+        setChatBootstrapError("");
+      } catch (error) {
+        if (cancelled) return;
+        setChatBootstrapError(error?.message || "ChatPage 会话加载失败。");
+      }
+    }
+
+    void loadChatStateForAgentPanel();
     return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const controllers = agentStreamControllersRef.current;
+    const draftTimers = partyAgentDraftPersistTimerRef.current;
+    const draftMessages = partyAgentDraftBySessionRef.current;
+    return () => {
+      Array.from(draftTimers.values()).forEach((timerId) => {
+        clearTimeout(timerId);
+      });
+      draftTimers.clear();
+      Array.from(draftMessages.entries()).forEach(([sessionId, message]) => {
+        const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+        if (!safeSessionId || !message?.id) return;
+        void persistChatMessagesUpserts([
+          {
+            sessionId: safeSessionId,
+            message: {
+              ...message,
+              streaming: false,
+            },
+          },
+        ]);
+      });
+      draftMessages.clear();
       Array.from(controllers.values()).forEach((controller) => {
         try {
           controller.abort();
@@ -807,7 +1372,7 @@ export default function PartyChatDesktopPage({
       });
       controllers.clear();
     };
-  }, []);
+  }, [persistChatMessagesUpserts]);
 
   useEffect(() => {
     const token = String(localStorage.getItem("token") || "").trim();
@@ -1189,48 +1754,254 @@ export default function PartyChatDesktopPage({
     }
   }
 
-  async function dispatchTextMessage(content, replyToMessageId = "") {
-    const result = await sendPartyTextMessage(activeRoomId, {
-      content,
-      replyToMessageId,
-    });
-    const message = normalizeMessage(result?.message);
-    if (message) {
-      mergeMessages(activeRoomId, [message], { replace: false });
-      touchRoom(activeRoomId, message.createdAt || new Date().toISOString());
+  function buildOptimisticReplyMeta(roomId, replyToMessageId) {
+    const safeRoomId = String(roomId || "").trim();
+    const safeReplyId = String(replyToMessageId || "").trim();
+    if (!safeRoomId || !safeReplyId) {
+      return {
+        replyToMessageId: "",
+        replyPreviewText: "",
+        replySenderName: "",
+      };
     }
-    return { message };
+    const roomMessages = Array.isArray(messagesByRoom[safeRoomId]) ? messagesByRoom[safeRoomId] : [];
+    const found = roomMessages.find((item) => String(item?.id || "") === safeReplyId) || null;
+    const preview = createReplyTarget(found);
+    return {
+      replyToMessageId: safeReplyId,
+      replyPreviewText: String(preview?.previewText || ""),
+      replySenderName: String(preview?.senderName || ""),
+    };
   }
 
-  async function dispatchImageMessage(file, replyToMessageId = "") {
-    const uploadFile = await compressPartyImageForUpload(file);
-    const result = await sendPartyImageMessage(activeRoomId, {
-      file: uploadFile,
-      replyToMessageId,
+  function setOptimisticRoomMessage(roomId, localMessageId, updater) {
+    const safeRoomId = String(roomId || "").trim();
+    const safeLocalMessageId = String(localMessageId || "").trim();
+    if (!safeRoomId || !safeLocalMessageId || typeof updater !== "function") return;
+    setMessagesByRoom((prev) => {
+      const current = Array.isArray(prev[safeRoomId]) ? prev[safeRoomId] : [];
+      let changed = false;
+      const next = current.map((item) => {
+        if (String(item?.id || "") !== safeLocalMessageId) return item;
+        const patched = updater(item);
+        if (!patched || patched === item) return item;
+        changed = true;
+        return patched;
+      });
+      if (!changed) return prev;
+      return {
+        ...prev,
+        [safeRoomId]: next,
+      };
     });
-    const message = normalizeMessage(result?.message);
-    if (message) {
-      mergeMessages(activeRoomId, [message], { replace: false });
-      touchRoom(activeRoomId, message.createdAt || new Date().toISOString());
-    }
-    return message;
   }
 
-  async function dispatchFileMessage(file, replyToMessageId = "") {
-    const result = await sendPartyFileMessage(activeRoomId, {
-      file,
-      replyToMessageId,
+  function finalizeOptimisticRoomMessage(roomId, localMessageId, serverMessage) {
+    const safeRoomId = String(roomId || "").trim();
+    const safeLocalMessageId = String(localMessageId || "").trim();
+    if (!safeRoomId || !safeLocalMessageId) return;
+    setMessagesByRoom((prev) => {
+      const current = Array.isArray(prev[safeRoomId]) ? prev[safeRoomId] : [];
+      const next = [];
+      let replaced = false;
+      current.forEach((item) => {
+        if (String(item?.id || "") === safeLocalMessageId) {
+          replaced = true;
+          if (serverMessage) {
+            next.push(serverMessage);
+          }
+          return;
+        }
+        next.push(item);
+      });
+      if (!replaced && serverMessage) {
+        next.push(serverMessage);
+      }
+      const dedupedMap = new Map();
+      next.forEach((item) => {
+        if (item?.id) {
+          dedupedMap.set(item.id, item);
+        }
+      });
+      const merged = Array.from(dedupedMap.values())
+        .sort((a, b) => toTimestamp(a.createdAt) - toTimestamp(b.createdAt))
+        .slice(-300);
+      return {
+        ...prev,
+        [safeRoomId]: merged,
+      };
     });
-    const message = normalizeMessage(result?.message);
-    if (message) {
-      mergeMessages(activeRoomId, [message], { replace: false });
-      touchRoom(activeRoomId, message.createdAt || new Date().toISOString());
+  }
+
+  async function dispatchTextMessage(roomId, content, replyToMessageId = "") {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId) return { message: null };
+    const createdAt = new Date().toISOString();
+    const localMessageId = `local-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const replyMeta = buildOptimisticReplyMeta(safeRoomId, replyToMessageId);
+    const localMessage = {
+      id: localMessageId,
+      roomId: safeRoomId,
+      type: "text",
+      senderUserId: String(me.id || "").trim(),
+      senderName: String(me.name || "我"),
+      content: String(content || ""),
+      replyToMessageId: replyMeta.replyToMessageId,
+      replyPreviewText: replyMeta.replyPreviewText,
+      replySenderName: replyMeta.replySenderName,
+      createdAt,
+      image: null,
+      file: null,
+      reactions: [],
+      deliveryStatus: "sending",
+    };
+    mergeMessages(safeRoomId, [localMessage], { replace: false });
+    touchRoom(safeRoomId, createdAt);
+
+    try {
+      const result = await sendPartyTextMessage(safeRoomId, {
+        content,
+        replyToMessageId: replyMeta.replyToMessageId,
+      });
+      const message = normalizeMessage(result?.message);
+      if (message) {
+        finalizeOptimisticRoomMessage(safeRoomId, localMessageId, message);
+        touchRoom(safeRoomId, message.createdAt || new Date().toISOString());
+      } else {
+        setOptimisticRoomMessage(safeRoomId, localMessageId, (current) => ({
+          ...current,
+          deliveryStatus: "sent",
+        }));
+      }
+      return { message };
+    } catch (error) {
+      setOptimisticRoomMessage(safeRoomId, localMessageId, (current) => ({
+        ...current,
+        deliveryStatus: "failed",
+      }));
+      throw error;
     }
-    return message;
+  }
+
+  async function dispatchImageMessage(roomId, file, replyToMessageId = "") {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId || !(file instanceof File)) return null;
+    const createdAt = new Date().toISOString();
+    const localMessageId = `local-image-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const replyMeta = buildOptimisticReplyMeta(safeRoomId, replyToMessageId);
+    const localPreviewUrl = URL.createObjectURL(file);
+    const localMessage = {
+      id: localMessageId,
+      roomId: safeRoomId,
+      type: "image",
+      senderUserId: String(me.id || "").trim(),
+      senderName: String(me.name || "我"),
+      content: "",
+      replyToMessageId: replyMeta.replyToMessageId,
+      replyPreviewText: replyMeta.replyPreviewText,
+      replySenderName: replyMeta.replySenderName,
+      createdAt,
+      image: {
+        dataUrl: localPreviewUrl,
+        mimeType: String(file.type || "image/png").trim().toLowerCase(),
+        fileName: String(file.name || "group-image.png"),
+        size: Number(file.size || 0),
+      },
+      file: null,
+      reactions: [],
+      deliveryStatus: "sending",
+    };
+    mergeMessages(safeRoomId, [localMessage], { replace: false });
+    touchRoom(safeRoomId, createdAt);
+
+    try {
+      const uploadFile = await compressPartyImageForUpload(file);
+      const result = await sendPartyImageMessage(safeRoomId, {
+        file: uploadFile,
+        replyToMessageId: replyMeta.replyToMessageId,
+      });
+      const message = normalizeMessage(result?.message);
+      if (message) {
+        finalizeOptimisticRoomMessage(safeRoomId, localMessageId, message);
+        touchRoom(safeRoomId, message.createdAt || new Date().toISOString());
+        URL.revokeObjectURL(localPreviewUrl);
+      } else {
+        setOptimisticRoomMessage(safeRoomId, localMessageId, (current) => ({
+          ...current,
+          deliveryStatus: "sent",
+        }));
+      }
+      return message;
+    } catch (error) {
+      setOptimisticRoomMessage(safeRoomId, localMessageId, (current) => ({
+        ...current,
+        deliveryStatus: "failed",
+      }));
+      throw error;
+    }
+  }
+
+  async function dispatchFileMessage(roomId, file, replyToMessageId = "") {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId || !(file instanceof File)) return null;
+    const createdAt = new Date().toISOString();
+    const localMessageId = `local-file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const replyMeta = buildOptimisticReplyMeta(safeRoomId, replyToMessageId);
+    const localMessage = {
+      id: localMessageId,
+      roomId: safeRoomId,
+      type: "file",
+      senderUserId: String(me.id || "").trim(),
+      senderName: String(me.name || "我"),
+      content: "",
+      replyToMessageId: replyMeta.replyToMessageId,
+      replyPreviewText: replyMeta.replyPreviewText,
+      replySenderName: replyMeta.replySenderName,
+      createdAt,
+      image: null,
+      file: {
+        fileId: "",
+        fileName: String(file.name || "group-file.bin"),
+        mimeType: String(file.type || "application/octet-stream"),
+        size: Number(file.size || 0),
+        expiresAt: "",
+        localParseOnly: false,
+        parseHint: "",
+      },
+      reactions: [],
+      deliveryStatus: "sending",
+    };
+    mergeMessages(safeRoomId, [localMessage], { replace: false });
+    touchRoom(safeRoomId, createdAt);
+
+    try {
+      const result = await sendPartyFileMessage(safeRoomId, {
+        file,
+        replyToMessageId: replyMeta.replyToMessageId,
+      });
+      const message = normalizeMessage(result?.message);
+      if (message) {
+        finalizeOptimisticRoomMessage(safeRoomId, localMessageId, message);
+        touchRoom(safeRoomId, message.createdAt || new Date().toISOString());
+      } else {
+        setOptimisticRoomMessage(safeRoomId, localMessageId, (current) => ({
+          ...current,
+          deliveryStatus: "sent",
+        }));
+      }
+      return message;
+    } catch (error) {
+      setOptimisticRoomMessage(safeRoomId, localMessageId, (current) => ({
+        ...current,
+        deliveryStatus: "failed",
+      }));
+      throw error;
+    }
   }
 
   async function handleSendComposer() {
-    if (!activeRoomId || composerSending) return;
+    const roomId = String(activeRoomId || "").trim();
+    if (!roomId || composerSending) return;
 
     const textPayload = composeText.trim();
     const imageFiles = [...selectedImageFiles];
@@ -1244,51 +2015,62 @@ export default function PartyChatDesktopPage({
       replyLinked = true;
       return replyToMessageId;
     };
+
+    // Optimistic UX: clear composer immediately, then send in background.
+    setComposeText("");
+    setSelectedImageFiles([]);
+    setSelectedImagePreviewUrls([]);
+    setSelectedUploadFiles([]);
+    setShowComposerEmojiPanel(false);
+    setShowMentionPicker(false);
+    setReplyTarget(null);
+    if (imageInputRef.current) {
+      imageInputRef.current.value = "";
+    }
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+    requestAnimationFrame(() => {
+      scrollToLatestMessages("auto");
+    });
+
     setSendingText(!!textPayload);
     setSendingImage(imageFiles.length > 0);
     setSendingFile(uploadFiles.length > 0);
     forceScrollToLatestRef.current = true;
-    try {
+
+    void (async () => {
+      const tasks = [];
       if (uploadFiles.length > 0) {
         for (let index = 0; index < uploadFiles.length; index += 1) {
           const fileReplyTo = index === 0 ? takeReplyTarget() : "";
-          await dispatchFileMessage(uploadFiles[index], fileReplyTo);
+          tasks.push(dispatchFileMessage(roomId, uploadFiles[index], fileReplyTo));
         }
       }
       if (imageFiles.length > 0) {
         for (let index = 0; index < imageFiles.length; index += 1) {
           const imageReplyTo = index === 0 ? takeReplyTarget() : "";
-          await dispatchImageMessage(imageFiles[index], imageReplyTo);
+          tasks.push(dispatchImageMessage(roomId, imageFiles[index], imageReplyTo));
         }
       }
       if (textPayload) {
-        await dispatchTextMessage(textPayload, takeReplyTarget());
+        tasks.push(dispatchTextMessage(roomId, textPayload, takeReplyTarget()));
       }
 
-      setComposeText("");
-      setSelectedImageFiles([]);
-      setSelectedImagePreviewUrls([]);
-      setSelectedUploadFiles([]);
-      setShowComposerEmojiPanel(false);
-      setShowMentionPicker(false);
-      setReplyTarget(null);
-      setActionError("");
-      if (imageInputRef.current) {
-        imageInputRef.current.value = "";
+      try {
+        const settled = await Promise.allSettled(tasks);
+        const failed = settled.find((item) => item.status === "rejected");
+        if (failed && failed.reason) {
+          setActionError(failed.reason?.message || "发送失败，请稍后重试。");
+        } else {
+          setActionError("");
+        }
+      } finally {
+        setSendingText(false);
+        setSendingImage(false);
+        setSendingFile(false);
       }
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
-      requestAnimationFrame(() => {
-        scrollToLatestMessages("auto");
-      });
-    } catch (error) {
-      setActionError(error?.message || "发送失败，请稍后重试。");
-    } finally {
-      setSendingText(false);
-      setSendingImage(false);
-      setSendingFile(false);
-    }
+    })();
   }
 
   function onPickImageFile(event) {
@@ -1549,6 +2331,10 @@ export default function PartyChatDesktopPage({
     }
     if (bootstrapError) {
       setBootstrapError("");
+      return;
+    }
+    if (chatBootstrapError) {
+      setChatBootstrapError("");
     }
   }
 
@@ -1564,8 +2350,11 @@ export default function PartyChatDesktopPage({
 
   async function copyMessage(message) {
     if (!message || !message.content) return;
+    const markdownText = decodePartyForwardMarkdown(message.content);
+    const content = markdownText !== null ? markdownText : String(message.content || "");
+    if (!content.trim()) return;
     try {
-      await navigator.clipboard.writeText(message.content);
+      await navigator.clipboard.writeText(content);
     } catch {
       // ignore
     }
@@ -1598,16 +2387,17 @@ export default function PartyChatDesktopPage({
     try {
       const response = await fetch(dataUrl);
       const blob = await response.blob();
-      const mimeType = String(blob?.type || "").startsWith("image/") ? blob.type : "image/png";
-      await navigator.clipboard.write([
-        new ClipboardItemCtor({
-          [mimeType]: blob,
-        }),
-      ]);
+      await writeImageBlobToClipboardWithFallback(blob);
       setActionError("");
       showImageCopiedNotice();
     } catch (error) {
-      setActionError(error?.message || "图片复制失败，请稍后重试。");
+      const rawMessage = String(error?.message || "").trim();
+      const normalizedMessage = rawMessage.toLowerCase();
+      if (normalizedMessage.includes("not supported") || normalizedMessage.includes("clipboard")) {
+        setActionError("当前浏览器对该图片格式的复制支持有限，已尝试转为 PNG；如仍失败请先下载图片。");
+        return;
+      }
+      setActionError(rawMessage || "图片复制失败，请稍后重试。");
     }
   }
 
@@ -2034,6 +2824,16 @@ export default function PartyChatDesktopPage({
                                     <div className="party-message-head">
                                       <span className="party-message-sender">{message.senderName}</span>
                                       <time className="party-message-time">{formatTime(message.createdAt)}</time>
+                                      {isMine && message.deliveryStatus === "sending" ? (
+                                        <span className="party-message-delivery sending" title="发送中">
+                                          <Loader2 size={11} className="spin" />
+                                        </span>
+                                      ) : null}
+                                      {isMine && message.deliveryStatus === "failed" ? (
+                                        <span className="party-message-delivery failed" title="发送失败">
+                                          发送失败
+                                        </span>
+                                      ) : null}
                                     </div>
 
                                     <div className={`party-message-bubble-wrap${isMine ? " mine" : ""}`}>
@@ -2046,7 +2846,7 @@ export default function PartyChatDesktopPage({
                                         ) : null}
 
                                         {message.type === "text" ? (
-                                          <div className="party-message-text">{renderTextWithMentions(message.content)}</div>
+                                          renderPartyMessageText(message.content)
                                         ) : message.type === "image" ? (
                                           <button
                                             type="button"
@@ -2453,49 +3253,6 @@ export default function PartyChatDesktopPage({
                   </section>
                 </div>
 
-                <aside className="party-agent-panel" aria-label="智能体问答">
-                  <div className="party-agent-panel-head">
-                    <div className="party-agent-panel-head-title">
-                      <h3>预览与调试</h3>
-                      <Info size={18} aria-hidden="true" title="仅用于群聊内临时问答，不写入群消息。" />
-                    </div>
-                    <button
-                      type="button"
-                      className="party-agent-clear-btn"
-                      onClick={onClearAgentPanelMessages}
-                      disabled={activeAgentStreaming || !activeRoomId}
-                    >
-                      清空
-                    </button>
-                  </div>
-
-                  <div className="party-agent-chat">
-                    <MessageList
-                      activeSessionId={buildPartyAgentSessionId(activeRoomId)}
-                      messages={activeAgentMessages}
-                      isStreaming={activeAgentStreaming}
-                      showAssistantActions={false}
-                    />
-                    <MessageInput
-                      onSend={onSendAgentPanelMessage}
-                      disabled={!activeRoomId || activeAgentStreaming}
-                    />
-                  </div>
-                  {activeAgentError ? (
-                    <div className="party-agent-error" role="alert">
-                      <span>{activeAgentError}</span>
-                      <button
-                        type="button"
-                        className="party-agent-error-close"
-                        onClick={() => setAgentRoomError(activeRoomId, "")}
-                        aria-label="关闭错误提示"
-                        title="关闭错误提示"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  ) : null}
-                </aside>
               </div>
             </>
           ) : (
@@ -2505,6 +3262,81 @@ export default function PartyChatDesktopPage({
             </section>
           )}
         </main>
+
+        <aside className="party-agent-column" aria-label="派Agent">
+          <div className="party-agent-panel">
+            <div className="party-agent-panel-head">
+              <div className="party-agent-panel-head-title">
+                <h3>派Agent</h3>
+              </div>
+              <div className="party-agent-panel-controls">
+                <AgentSelect
+                  value={linkedChatAgentId}
+                  onChange={onPartyAgentChange}
+                  disabled={!linkedChatSessionId || partyAgentStreaming || partyAgentSwitchLocked}
+                  disabledTitle={
+                    !linkedChatSessionId
+                      ? "暂无可同步的 ChatPage 会话"
+                      : partyAgentStreaming
+                        ? "生成中，请稍候再切换智能体"
+                        : "开启智能上下文管理后，需先关闭开关才能切换智能体。"
+                  }
+                />
+                <div
+                  className={`smart-context-control${!linkedChatSessionId ? " is-disabled" : ""}`}
+                  title="开启后将锁定当前智能体进行对话，不得切换智能体"
+                >
+                  <label className="smart-context-switch" htmlFor="party-agent-smart-context-toggle">
+                    <input
+                      id="party-agent-smart-context-toggle"
+                      type="checkbox"
+                      checked={linkedChatSmartContextEnabled}
+                      onChange={(event) => onPartyAgentToggleSmartContext(event.target.checked)}
+                      disabled={partyAgentSmartContextToggleDisabled}
+                    />
+                    <span className="smart-context-slider" aria-hidden="true" />
+                    <span className="smart-context-label">智能上下文管理</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <div className="party-agent-chat">
+              <MessageList
+                activeSessionId={linkedChatSessionId || "party-agent-empty"}
+                messages={linkedChatMessages}
+                isStreaming={partyAgentStreaming}
+                onAssistantFeedback={onPartyAgentFeedback}
+                onAssistantRegenerate={onPartyAgentRegenerate}
+                onAssistantForward={onPartyAgentForwardToRoom}
+                onAskSelection={onPartyAgentAskSelection}
+                showAssistantActions
+              />
+              <MessageInput
+                onSend={onSendAgentPanelMessage}
+                disabled={!linkedChatSessionId || partyAgentStreaming || !!chatBootstrapError}
+                quoteText={partyAgentSelectedAskText}
+                quotePreviewMaxChars={15}
+                onClearQuote={() => setPartyAgentSelectedAskText("")}
+                onConsumeQuote={() => setPartyAgentSelectedAskText("")}
+              />
+            </div>
+            {partyAgentError ? (
+              <div className="party-agent-error" role="alert">
+                <span>{partyAgentError}</span>
+                <button
+                  type="button"
+                  className="party-agent-error-close"
+                  onClick={() => setPartyAgentError("")}
+                  aria-label="关闭错误提示"
+                  title="关闭错误提示"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ) : null}
+          </div>
+        </aside>
       </div>
 
       {showCreateRoomModal ? (
@@ -2885,6 +3717,116 @@ function canvasToBlob(canvas, mimeType, quality) {
   });
 }
 
+async function writeImageBlobToClipboardWithFallback(blob) {
+  const imageBlob = blob instanceof Blob ? blob : null;
+  if (!imageBlob) {
+    throw new Error("图片复制失败，请稍后重试。");
+  }
+  const ClipboardItemCtor = typeof window !== "undefined" ? window.ClipboardItem : undefined;
+  if (!navigator.clipboard?.write || !ClipboardItemCtor) {
+    throw new Error("当前浏览器不支持复制图片。");
+  }
+
+  const candidates = [];
+  const sourceType = String(imageBlob.type || "").trim().toLowerCase();
+  if (sourceType.startsWith("image/")) {
+    candidates.push(imageBlob);
+  }
+  const pngBlob = await convertImageBlobToPng(imageBlob);
+  if (pngBlob) {
+    const exists = candidates.some(
+      (item) => item.type === pngBlob.type && Number(item.size || 0) === Number(pngBlob.size || 0),
+    );
+    if (!exists) {
+      candidates.push(pngBlob);
+    }
+  }
+  if (candidates.length === 0) {
+    throw new Error("图片复制失败，请稍后重试。");
+  }
+
+  let lastError = null;
+  for (const candidate of candidates) {
+    const mimeType = String(candidate?.type || "").trim().toLowerCase();
+    if (!mimeType.startsWith("image/")) continue;
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItemCtor({
+          [mimeType]: candidate,
+        }),
+      ]);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError && String(lastError?.message || "").trim()) {
+    throw lastError;
+  }
+  throw new Error("图片复制失败，请稍后重试。");
+}
+
+async function convertImageBlobToPng(blob) {
+  const imageBlob = blob instanceof Blob ? blob : null;
+  if (!imageBlob) return null;
+  try {
+    const source = await loadImageSourceFromBlob(imageBlob);
+    const width = Math.max(1, Number(source.width || 0));
+    const height = Math.max(1, Number(source.height || 0));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      source.release();
+      return null;
+    }
+    context.drawImage(source.node, 0, 0, width, height);
+    source.release();
+    return await canvasToBlob(canvas, "image/png", 1);
+  } catch {
+    return null;
+  }
+}
+
+async function loadImageSourceFromBlob(blob) {
+  const imageBlob = blob instanceof Blob ? blob : null;
+  if (!imageBlob) {
+    throw new Error("invalid image blob");
+  }
+
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(imageBlob);
+    return {
+      node: bitmap,
+      width: bitmap.width,
+      height: bitmap.height,
+      release: () => {
+        if (typeof bitmap.close === "function") {
+          bitmap.close();
+        }
+      },
+    };
+  }
+
+  const objectUrl = URL.createObjectURL(imageBlob);
+  try {
+    const image = await loadImageFromDataUrl(objectUrl);
+    return {
+      node: image,
+      width: image.naturalWidth || image.width,
+      height: image.naturalHeight || image.height,
+      release: () => {
+        URL.revokeObjectURL(objectUrl);
+      },
+    };
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
+}
+
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -3150,6 +4092,31 @@ function createReplyTarget(message) {
   };
 }
 
+function encodePartyForwardMarkdown(content) {
+  const text = String(content || "").replace(PARTY_MARKDOWN_FORWARD_PREFIX, "");
+  return `${PARTY_MARKDOWN_FORWARD_PREFIX}${text}`;
+}
+
+function decodePartyForwardMarkdown(content) {
+  const text = String(content || "");
+  if (!text.startsWith(PARTY_MARKDOWN_FORWARD_PREFIX)) return null;
+  return text.slice(PARTY_MARKDOWN_FORWARD_PREFIX.length);
+}
+
+function renderPartyMessageText(content) {
+  const markdownText = decodePartyForwardMarkdown(content);
+  if (markdownText !== null) {
+    return (
+      <div className="party-message-text md-body is-markdown">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={PARTY_MESSAGE_MARKDOWN_COMPONENTS}>
+          {markdownText}
+        </ReactMarkdown>
+      </div>
+    );
+  }
+  return <div className="party-message-text">{renderTextWithMentions(content)}</div>;
+}
+
 function renderTextWithMentions(text) {
   const rawText = String(text || "");
   if (!rawText) return null;
@@ -3324,10 +4291,142 @@ function normalizeUrlHref(text) {
   return `https://${value}`;
 }
 
-function buildPartyAgentSessionId(roomId) {
-  const safeRoomId = String(roomId || "").trim();
-  if (!safeRoomId) return "party-agent";
-  return `party-agent-${safeRoomId}`;
+function sanitizePartyAgentSessionId(value) {
+  const text = String(value || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[.$]/g, "");
+  if (!text) return "";
+  return text.slice(0, 80);
+}
+
+function sanitizePartyAgentId(value, fallback = PARTY_AGENT_DEFAULT_ID) {
+  const id = String(value || "")
+    .trim()
+    .toUpperCase();
+  if (CHAT_AGENT_IDS.includes(id)) return id;
+  const safeFallback = String(fallback || PARTY_AGENT_DEFAULT_ID)
+    .trim()
+    .toUpperCase();
+  return CHAT_AGENT_IDS.includes(safeFallback) ? safeFallback : PARTY_AGENT_DEFAULT_ID;
+}
+
+function sanitizePartyAgentBySessionMap(raw, fallback = PARTY_AGENT_DEFAULT_ID) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const normalized = {};
+  Object.entries(source)
+    .slice(0, 1200)
+    .forEach(([rawSessionId, rawAgentId]) => {
+      const sessionId = sanitizePartyAgentSessionId(rawSessionId);
+      if (!sessionId) return;
+      normalized[sessionId] = sanitizePartyAgentId(rawAgentId, fallback);
+    });
+  return normalized;
+}
+
+function readPartyAgentBySession(map, sessionId, fallback = PARTY_AGENT_DEFAULT_ID) {
+  const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+  const safeFallback = sanitizePartyAgentId(fallback, PARTY_AGENT_DEFAULT_ID);
+  if (!safeSessionId) return safeFallback;
+  const source = sanitizePartyAgentBySessionMap(map, safeFallback);
+  return sanitizePartyAgentId(source[safeSessionId], safeFallback);
+}
+
+function patchPartyAgentBySession(
+  map,
+  sessionId,
+  agentId,
+  fallback = PARTY_AGENT_DEFAULT_ID,
+) {
+  const source = sanitizePartyAgentBySessionMap(map, fallback);
+  const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+  const safeAgentId = sanitizePartyAgentId(agentId, fallback);
+  if (!safeSessionId || !safeAgentId) return source;
+  if (source[safeSessionId] === safeAgentId) return source;
+  return {
+    ...source,
+    [safeSessionId]: safeAgentId,
+  };
+}
+
+function getPartyAgentSmartContextDefaultEnabled(agentId) {
+  return sanitizePartyAgentId(agentId, PARTY_AGENT_DEFAULT_ID) === "E";
+}
+
+function buildPartyAgentSmartContextKey(sessionId, agentId) {
+  const safeSessionId = sanitizePartyAgentSessionId(sessionId);
+  const safeAgentId = sanitizePartyAgentId(agentId, PARTY_AGENT_DEFAULT_ID);
+  if (!safeSessionId || !safeAgentId) return "";
+  return `${safeSessionId}::${safeAgentId}`;
+}
+
+function sanitizePartyAgentSmartContextEnabledMap(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const normalized = {};
+
+  Object.entries(source)
+    .slice(0, 1200)
+    .forEach(([rawKey, rawValue]) => {
+      if (rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)) {
+        const safeSessionId = sanitizePartyAgentSessionId(rawKey);
+        if (!safeSessionId) return;
+        Object.entries(rawValue)
+          .slice(0, CHAT_AGENT_IDS.length)
+          .forEach(([rawAgentId, nestedValue]) => {
+            const key = buildPartyAgentSmartContextKey(safeSessionId, rawAgentId);
+            if (!key) return;
+            normalized[key] = !!nestedValue;
+          });
+        return;
+      }
+      const [rawSessionId, rawAgentId] = String(rawKey || "").split("::");
+      const key = buildPartyAgentSmartContextKey(rawSessionId, rawAgentId);
+      if (!key) return;
+      normalized[key] = !!rawValue;
+    });
+
+  return normalized;
+}
+
+function readPartyAgentSmartContextEnabledBySessionAgent(map, sessionId, agentId) {
+  const key = buildPartyAgentSmartContextKey(sessionId, agentId);
+  const fallback = getPartyAgentSmartContextDefaultEnabled(agentId);
+  if (!key) return fallback;
+
+  const source = map && typeof map === "object" ? map : {};
+  if (Object.prototype.hasOwnProperty.call(source, key)) {
+    return !!source[key];
+  }
+  return fallback;
+}
+
+function patchPartyAgentSmartContextEnabledBySessionAgent(map, sessionId, agentId, enabled) {
+  const key = buildPartyAgentSmartContextKey(sessionId, agentId);
+  const source = sanitizePartyAgentSmartContextEnabledMap(map);
+  if (!key) return source;
+  const nextEnabled = !!enabled;
+  if (source[key] === nextEnabled) return source;
+  return {
+    ...source,
+    [key]: nextEnabled,
+  };
+}
+
+function pickRecentPartyAgentRounds(list, maxRounds = PARTY_AGENT_CONTEXT_USER_ROUNDS) {
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const safeMaxRounds = Math.max(1, Number(maxRounds) || PARTY_AGENT_CONTEXT_USER_ROUNDS);
+  let seenUser = 0;
+  let startIndex = 0;
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    if (String(list[index]?.role || "") === "user") {
+      seenUser += 1;
+      if (seenUser > safeMaxRounds) {
+        startIndex = index + 1;
+        break;
+      }
+    }
+  }
+  return list.slice(startIndex);
 }
 
 function resolvePartyAgentLocalFile(item) {

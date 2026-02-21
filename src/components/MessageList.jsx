@@ -1,6 +1,7 @@
 import {
   ChevronDown,
   Copy,
+  Forward,
   RotateCcw,
   Sparkles,
   ThumbsDown,
@@ -57,6 +58,7 @@ const MessageList = forwardRef(function MessageList({
   bottomInset = 0,
   onAssistantFeedback,
   onAssistantRegenerate,
+  onAssistantForward,
   onAskSelection,
   onLatestChange,
   showAssistantActions = true,
@@ -188,6 +190,7 @@ const MessageList = forwardRef(function MessageList({
           isStreaming={isStreaming}
           onAssistantFeedback={onAssistantFeedback}
           onAssistantRegenerate={onAssistantRegenerate}
+          onAssistantForward={onAssistantForward}
           promptMessageId={promptMap.get(m.id) || ""}
           showAssistantActions={showAssistantActions}
         />
@@ -197,6 +200,7 @@ const MessageList = forwardRef(function MessageList({
       isStreaming,
       onAssistantFeedback,
       onAssistantRegenerate,
+      onAssistantForward,
       promptMap,
       showAssistantActions,
     ],
@@ -389,6 +393,7 @@ const MessageItem = memo(function MessageItem({
   isStreaming,
   onAssistantFeedback,
   onAssistantRegenerate,
+  onAssistantForward,
   promptMessageId,
   showAssistantActions,
 }) {
@@ -593,6 +598,19 @@ const MessageItem = memo(function MessageItem({
             >
               <Copy size={16} />
             </button>
+
+            {typeof onAssistantForward === "function" ? (
+              <button
+                type="button"
+                className="msg-action-btn"
+                title="转发到左侧对话"
+                aria-label="转发到左侧对话"
+                onClick={() => onAssistantForward?.(m.id)}
+                disabled={isStreaming}
+              >
+                <Forward size={16} />
+              </button>
+            ) : null}
           </div>
         )}
       </div>
