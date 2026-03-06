@@ -1,6 +1,6 @@
 # 元协坊 · EduChat
 
-一款基于 React + Vite + Express + MongoDB 构建的智能体协作平台，具有智能体单聊、图片生成和多智能体协作群聊（正在开发中）等功能。
+一款基于 React + Vite + Express + MongoDB 构建的智能体协作平台，具有智能体单聊、图片生成和智能体协作群聊等功能。
 
 ## Docker 部署
 
@@ -23,3 +23,7 @@
    - `npm install`
 2. 启动服务：
    - `npm run dev`
+
+## 许可证
+
+本项目采用 GNU Affero General Public License v3.0（AGPL-3.0）许可证发布，详见 [LICENSE](./LICENSE) 文件。
