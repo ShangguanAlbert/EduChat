@@ -5,7 +5,7 @@ import "../styles/agentselect.css";
 const AGENTS = [
   { id: "A", name: "智能体 A" },
   { id: "B", name: "智能体 B" },
-  { id: "C", name: "智能体 C" },
+  { id: "C", name: "远程教育" },
   { id: "D", name: "千问3.5" },
   { id: "E", name: "SSCI审稿人" },
 ];

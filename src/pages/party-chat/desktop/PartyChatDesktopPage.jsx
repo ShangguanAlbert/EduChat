@@ -45,6 +45,7 @@ import {
   markPartyRoomRead,
   renamePartyRoom,
   setPartyRoomAgentMemberAccess,
+  setPartyRoomMemberMute,
   downloadPartyFile,
   sendPartyFileMessage,
   sendPartyImageMessage,
@@ -60,11 +61,17 @@ const SOCKET_PING_MS = 20 * 1000;
 const PARTY_UPLOAD_FILE_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 const PARTY_AGENT_PANEL_TEMPERATURE = 0.6;
 const PARTY_AGENT_ACCESS_BLOCKED_MESSAGE = "派主暂未开放成员使用派Agent。";
+const PARTY_MEMBER_MUTED_BLOCKED_MESSAGE = "你已被派主禁言，暂时无法发言。";
 const PARTY_AGENT_PANEL_TOP_P = 1;
 const PARTY_AGENT_DEFAULT_ID = "A";
 const PARTY_AGENT_CONTEXT_USER_ROUNDS = 10;
 const PARTY_AGENT_DRAFT_PERSIST_MS = 420;
 const CHAT_AGENT_IDS = Object.freeze(["A", "B", "C", "D", "E"]);
+const TEACHER_SCOPE_YANG_JUNFENG = "yang-junfeng";
+const AGENT_C_LOCKED_PROVIDER = "volcengine";
+const LOCKED_AGENT_BY_TEACHER_SCOPE = Object.freeze({
+  [TEACHER_SCOPE_YANG_JUNFENG]: "C",
+});
 const PARTY_DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   A: "volcengine",
   B: "volcengine",
@@ -141,6 +148,7 @@ export default function PartyChatDesktopPage({
     settings: {},
   }));
   const [chatMessagesBySession, setChatMessagesBySession] = useState({});
+  const [chatTeacherScopeKey, setChatTeacherScopeKey] = useState("");
   const [chatAgentRuntimeConfigs, setChatAgentRuntimeConfigs] = useState(() =>
     sanitizePartyAgentRuntimeConfigMap({}),
   );
@@ -169,6 +177,7 @@ export default function PartyChatDesktopPage({
   const [dissolveConfirmText, setDissolveConfirmText] = useState("");
   const [dissolveSubmitting, setDissolveSubmitting] = useState(false);
   const [partyAgentAccessSubmitting, setPartyAgentAccessSubmitting] = useState(false);
+  const [memberMuteSubmittingByUserId, setMemberMuteSubmittingByUserId] = useState({});
 
   const [composeText, setComposeText] = useState("");
   const [sendingText, setSendingText] = useState(false);
@@ -213,14 +222,26 @@ export default function PartyChatDesktopPage({
       ? chatMessagesBySession[linkedChatSessionId]
       : [];
   }, [chatMessagesBySession, linkedChatSessionId]);
+  const teacherLockedAgentId = useMemo(
+    () => resolveLockedAgentByTeacherScope(chatTeacherScopeKey),
+    [chatTeacherScopeKey],
+  );
+  const teacherScopedAgentLocked = !!teacherLockedAgentId;
   const linkedChatAgentId = useMemo(() => {
-    return readPartyAgentBySession(
+    const saved = readPartyAgentBySession(
       chatMetaState.settings?.agentBySession,
       linkedChatSessionId,
       chatMetaState.settings?.agent || PARTY_AGENT_DEFAULT_ID,
     );
-  }, [chatMetaState.settings?.agent, chatMetaState.settings?.agentBySession, linkedChatSessionId]);
+    return teacherLockedAgentId || saved;
+  }, [
+    chatMetaState.settings?.agent,
+    chatMetaState.settings?.agentBySession,
+    linkedChatSessionId,
+    teacherLockedAgentId,
+  ]);
   const linkedChatSmartContextEnabled = useMemo(() => {
+    if (teacherScopedAgentLocked) return true;
     return readPartyAgentSmartContextEnabledBySessionAgent(
       chatMetaState.settings?.smartContextEnabledBySessionAgent,
       linkedChatSessionId,
@@ -230,6 +251,7 @@ export default function PartyChatDesktopPage({
     chatMetaState.settings?.smartContextEnabledBySessionAgent,
     linkedChatSessionId,
     linkedChatAgentId,
+    teacherScopedAgentLocked,
   ]);
   const linkedChatProvider = useMemo(
     () =>
@@ -242,11 +264,13 @@ export default function PartyChatDesktopPage({
   );
   const partyAgentSmartContextSupported = linkedChatProvider === "volcengine";
   const effectiveLinkedChatSmartContextEnabled =
-    partyAgentSmartContextSupported && linkedChatSmartContextEnabled;
-  const partyAgentSwitchLocked = !!effectiveLinkedChatSmartContextEnabled;
-  const partyAgentSmartContextInfoTitle = partyAgentSmartContextSupported
-    ? "开启后将锁定当前智能体进行对话，不得切换智能体"
-    : "仅火山引擎智能体支持智能上下文管理，当前智能体已默认关闭";
+    partyAgentSmartContextSupported && (teacherScopedAgentLocked || linkedChatSmartContextEnabled);
+  const partyAgentSwitchLocked = teacherScopedAgentLocked || !!effectiveLinkedChatSmartContextEnabled;
+  const partyAgentSmartContextInfoTitle = teacherScopedAgentLocked
+    ? "当前授课教师已锁定远程教育智能体，并强制开启智能上下文管理。"
+    : partyAgentSmartContextSupported
+      ? "开启后将锁定当前智能体进行对话，不得切换智能体"
+      : "仅火山引擎智能体支持智能上下文管理，当前智能体已默认关闭";
   const activeMembers = useMemo(() => {
     if (!activeRoom) return [];
     return activeRoom.memberUserIds.map((userId) => {
@@ -262,6 +286,20 @@ export default function PartyChatDesktopPage({
         .filter(Boolean),
     );
   }, [activeRoom]);
+  const activeMutedUserIdSet = useMemo(() => {
+    return new Set(
+      (Array.isArray(activeRoom?.mutedMemberUserIds) ? activeRoom.mutedMemberUserIds : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean),
+    );
+  }, [activeRoom]);
+  const activeRoomSelfMuted = useMemo(() => {
+    const room = activeRoom;
+    const myUserId = String(me.id || "").trim();
+    if (!room || !myUserId) return false;
+    if (String(room.ownerUserId || "").trim() === myUserId) return false;
+    return activeMutedUserIdSet.has(myUserId);
+  }, [activeMutedUserIdSet, activeRoom, me.id]);
   const latestMessageAt = useMemo(() => {
     if (!activeMessages.length) return "";
     return activeMessages[activeMessages.length - 1]?.createdAt || "";
@@ -270,7 +308,8 @@ export default function PartyChatDesktopPage({
   const canSendComposer =
     !!activeRoomId &&
     (composeText.trim().length > 0 || selectedImageFiles.length > 0 || selectedUploadFiles.length > 0) &&
-    !composerSending;
+    !composerSending &&
+    !activeRoomSelfMuted;
   const canManageActiveRoom = !!activeRoom && activeRoom.ownerUserId === me.id;
   const partyAgentMemberEnabled = activeRoom?.partyAgentMemberEnabled !== false;
   const partyAgentAccessBlocked = !!activeRoom && !canManageActiveRoom && !partyAgentMemberEnabled;
@@ -278,18 +317,30 @@ export default function PartyChatDesktopPage({
     ? PARTY_AGENT_ACCESS_BLOCKED_MESSAGE
     : "";
   const partyAgentSelectDisabled =
-    !linkedChatSessionId || partyAgentStreaming || partyAgentSwitchLocked || partyAgentAccessBlocked;
+    !linkedChatSessionId ||
+    partyAgentStreaming ||
+    partyAgentSwitchLocked ||
+    partyAgentAccessBlocked;
   const partyAgentSelectDisabledTitle = partyAgentAccessBlocked
     ? "派主暂未开放成员使用派Agent"
     : !linkedChatSessionId
       ? "暂无可同步的 ChatPage 会话"
       : partyAgentStreaming
         ? "生成中，请稍候再切换智能体"
-        : "开启智能上下文管理后，需先关闭开关才能切换智能体。";
+        : teacherScopedAgentLocked
+          ? "当前授课教师下已锁定为“远程教育”智能体。"
+          : "开启智能上下文管理后，需先关闭开关才能切换智能体。";
   const partyAgentSmartContextControlDisabled =
-    partyAgentAccessBlocked || !linkedChatSessionId || !partyAgentSmartContextSupported;
+    partyAgentAccessBlocked ||
+    !linkedChatSessionId ||
+    !partyAgentSmartContextSupported ||
+    teacherScopedAgentLocked;
   const partyAgentSmartContextToggleDisabled =
-    partyAgentAccessBlocked || !linkedChatSessionId || partyAgentStreaming || !partyAgentSmartContextSupported;
+    partyAgentAccessBlocked ||
+    !linkedChatSessionId ||
+    partyAgentStreaming ||
+    !partyAgentSmartContextSupported ||
+    teacherScopedAgentLocked;
   const partyAgentInputDisabled =
     !linkedChatSessionId || partyAgentStreaming || !!chatBootstrapError || partyAgentAccessBlocked;
   const bannerMessage = actionError || messagesError || bootstrapError || chatBootstrapError;
@@ -315,6 +366,18 @@ export default function PartyChatDesktopPage({
   const selectedForwardCount = selectedForwardMessageIds.length;
   const canForwardToPartyAgent = !!linkedChatSessionId && !partyAgentAccessBlocked;
   const showSidebar = isMobileSidebarDrawer ? isSidebarDrawerOpen : isSidebarExpanded;
+  const isCurrentUserMutedInRoom = useCallback(
+    (roomId) => {
+      const safeRoomId = String(roomId || "").trim();
+      const safeUserId = String(me.id || "").trim();
+      if (!safeRoomId || !safeUserId) return false;
+      const room = rooms.find((item) => String(item?.id || "").trim() === safeRoomId);
+      if (!room) return false;
+      if (String(room.ownerUserId || "").trim() === safeUserId) return false;
+      return Array.isArray(room.mutedMemberUserIds) && room.mutedMemberUserIds.includes(safeUserId);
+    },
+    [me.id, rooms],
+  );
 
   const setChatSessionMessages = useCallback((sessionId, updater) => {
     const safeSessionId = sanitizePartyAgentSessionId(sessionId);
@@ -461,7 +524,7 @@ export default function PartyChatDesktopPage({
 
   const onPartyAgentChange = useCallback(
     (nextAgentId) => {
-      if (partyAgentAccessBlocked || partyAgentSwitchLocked) return;
+      if (teacherScopedAgentLocked || partyAgentAccessBlocked || partyAgentSwitchLocked) return;
       const safeSessionId = sanitizePartyAgentSessionId(linkedChatSessionId);
       const safeAgentId = sanitizePartyAgentId(nextAgentId, linkedChatAgentId);
       if (!safeSessionId || !safeAgentId) return;
@@ -491,12 +554,19 @@ export default function PartyChatDesktopPage({
       partyAgentAccessBlocked,
       partyAgentSwitchLocked,
       persistPartyAgentMetaState,
+      teacherScopedAgentLocked,
     ],
   );
 
   const onPartyAgentToggleSmartContext = useCallback(
     (enabled) => {
-      if (partyAgentAccessBlocked || !partyAgentSmartContextSupported) return;
+      if (
+        teacherScopedAgentLocked ||
+        partyAgentAccessBlocked ||
+        !partyAgentSmartContextSupported
+      ) {
+        return;
+      }
       const safeSessionId = sanitizePartyAgentSessionId(linkedChatSessionId);
       const safeAgentId = sanitizePartyAgentId(linkedChatAgentId, PARTY_AGENT_DEFAULT_ID);
       if (!safeSessionId || !safeAgentId) return;
@@ -527,6 +597,7 @@ export default function PartyChatDesktopPage({
       partyAgentAccessBlocked,
       partyAgentSmartContextSupported,
       persistPartyAgentMetaState,
+      teacherScopedAgentLocked,
     ],
   );
 
@@ -819,6 +890,10 @@ export default function PartyChatDesktopPage({
     const safeMessageId = String(assistantMessageId || "").trim();
     if (!roomId || !safeMessageId) {
       setPartyAgentError("请先在左侧选择派会话后再转发。");
+      return;
+    }
+    if (isCurrentUserMutedInRoom(roomId)) {
+      setPartyAgentError(PARTY_MEMBER_MUTED_BLOCKED_MESSAGE);
       return;
     }
     const sourceMessage =
@@ -1417,6 +1492,8 @@ export default function PartyChatDesktopPage({
       try {
         const result = await fetchChatBootstrap();
         if (cancelled) return;
+        const teacherScopeKey = normalizeTeacherScopeKey(result?.teacherScopeKey);
+        const lockedAgentId = resolveLockedAgentByTeacherScope(teacherScopeKey);
         const state = result?.state && typeof result.state === "object" ? result.state : {};
         const sessions = Array.isArray(state.sessions) ? state.sessions : [];
         const resolvedActiveId =
@@ -1427,20 +1504,56 @@ export default function PartyChatDesktopPage({
           state.sessionMessages && typeof state.sessionMessages === "object"
             ? state.sessionMessages
             : {};
+        const rawSettings =
+          state.settings && typeof state.settings === "object" ? state.settings : {};
+        let nextSettings = rawSettings;
+        let shouldPersistLockedSettings = false;
+        if (lockedAgentId) {
+          const lockedAgentBySession = lockPartyAgentBySessionMap(
+            rawSettings.agentBySession,
+            sessions,
+            lockedAgentId,
+            lockedAgentId,
+          );
+          const lockedSmartContextMap = enablePartySmartContextForAgentSessions(
+            rawSettings.smartContextEnabledBySessionAgent,
+            sessions,
+            lockedAgentId,
+            lockedAgentId,
+          );
+          const safeAgent = sanitizePartyAgentId(rawSettings.agent, lockedAgentId);
+          shouldPersistLockedSettings =
+            safeAgent !== lockedAgentId ||
+            lockedAgentBySession !== rawSettings.agentBySession ||
+            lockedSmartContextMap !== rawSettings.smartContextEnabledBySessionAgent ||
+            rawSettings.smartContextEnabled !== true;
+          nextSettings = {
+            ...rawSettings,
+            agent: lockedAgentId,
+            agentBySession: lockedAgentBySession,
+            smartContextEnabled: true,
+            smartContextEnabledBySessionAgent: lockedSmartContextMap,
+          };
+        }
+        const nextMetaState = {
+          activeId: resolvedActiveId,
+          groups: Array.isArray(state.groups) ? state.groups : [],
+          sessions,
+          settings: nextSettings,
+        };
         setChatAgentRuntimeConfigs(
           sanitizePartyAgentRuntimeConfigMap(result?.agentRuntimeConfigs),
         );
         setChatAgentProviderDefaults(
           sanitizePartyAgentProviderDefaults(result?.agentProviderDefaults),
         );
-        setChatMetaState({
-          activeId: resolvedActiveId,
-          groups: Array.isArray(state.groups) ? state.groups : [],
-          sessions,
-          settings: state.settings && typeof state.settings === "object" ? state.settings : {},
-        });
+        setChatTeacherScopeKey(teacherScopeKey);
+        setChatMetaState(nextMetaState);
         setChatMessagesBySession(sessionMessages);
         setChatBootstrapError("");
+        if (shouldPersistLockedSettings) {
+          void persistPartyAgentMetaState(nextMetaState);
+        }
       } catch (error) {
         if (cancelled) return;
         setChatBootstrapError(error?.message || "ChatPage 会话加载失败。");
@@ -1451,7 +1564,7 @@ export default function PartyChatDesktopPage({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [persistPartyAgentMetaState]);
 
   useEffect(() => {
     const controllers = agentStreamControllersRef.current;
@@ -1594,7 +1707,14 @@ export default function PartyChatDesktopPage({
   useEffect(() => {
     setMultiForwardMode(false);
     setSelectedForwardMessageIds([]);
+    setMemberMuteSubmittingByUserId({});
   }, [activeRoomId]);
+
+  useEffect(() => {
+    if (!activeRoomSelfMuted) return;
+    setShowComposerEmojiPanel(false);
+    setShowMentionPicker(false);
+  }, [activeRoomSelfMuted]);
 
   useEffect(() => {
     if (selectedForwardMessageIds.length === 0) return;
@@ -1878,6 +1998,36 @@ export default function PartyChatDesktopPage({
     }
   }
 
+  async function handleToggleMemberMute(member) {
+    const room = activeRoom;
+    const roomId = String(room?.id || "").trim();
+    const targetUserId = String(member?.id || "").trim();
+    if (!roomId || !targetUserId) return;
+    if (!canManageActiveRoom) return;
+    if (targetUserId === String(room?.ownerUserId || "").trim()) return;
+    if (memberMuteSubmittingByUserId[targetUserId]) return;
+
+    const nextMuted = !activeMutedUserIdSet.has(targetUserId);
+    setMemberMuteSubmittingByUserId((prev) => ({
+      ...prev,
+      [targetUserId]: true,
+    }));
+    try {
+      const result = await setPartyRoomMemberMute(roomId, targetUserId, nextMuted);
+      applyRoomUpsert(result?.room);
+      setActionError("");
+    } catch (error) {
+      setActionError(error?.message || `${nextMuted ? "禁言" : "解除禁言"}失败，请稍后重试。`);
+    } finally {
+      setMemberMuteSubmittingByUserId((prev) => {
+        if (!prev[targetUserId]) return prev;
+        const next = { ...prev };
+        delete next[targetUserId];
+        return next;
+      });
+    }
+  }
+
   async function handleDissolveRoom(event) {
     event.preventDefault();
     if (!activeRoom || !canManageActiveRoom || dissolveSubmitting) return;
@@ -1981,6 +2131,9 @@ export default function PartyChatDesktopPage({
   async function dispatchTextMessage(roomId, content, replyToMessageId = "") {
     const safeRoomId = String(roomId || "").trim();
     if (!safeRoomId) return { message: null };
+    if (isCurrentUserMutedInRoom(safeRoomId)) {
+      throw new Error(PARTY_MEMBER_MUTED_BLOCKED_MESSAGE);
+    }
     const createdAt = new Date().toISOString();
     const localMessageId = `local-text-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const replyMeta = buildOptimisticReplyMeta(safeRoomId, replyToMessageId);
@@ -2031,6 +2184,9 @@ export default function PartyChatDesktopPage({
   async function dispatchImageMessage(roomId, file, replyToMessageId = "") {
     const safeRoomId = String(roomId || "").trim();
     if (!safeRoomId || !(file instanceof File)) return null;
+    if (isCurrentUserMutedInRoom(safeRoomId)) {
+      throw new Error(PARTY_MEMBER_MUTED_BLOCKED_MESSAGE);
+    }
     const createdAt = new Date().toISOString();
     const localMessageId = `local-image-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const replyMeta = buildOptimisticReplyMeta(safeRoomId, replyToMessageId);
@@ -2089,6 +2245,9 @@ export default function PartyChatDesktopPage({
   async function dispatchFileMessage(roomId, file, replyToMessageId = "") {
     const safeRoomId = String(roomId || "").trim();
     if (!safeRoomId || !(file instanceof File)) return null;
+    if (isCurrentUserMutedInRoom(safeRoomId)) {
+      throw new Error(PARTY_MEMBER_MUTED_BLOCKED_MESSAGE);
+    }
     const createdAt = new Date().toISOString();
     const localMessageId = `local-file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const replyMeta = buildOptimisticReplyMeta(safeRoomId, replyToMessageId);
@@ -2147,6 +2306,10 @@ export default function PartyChatDesktopPage({
   async function handleSendComposer() {
     const roomId = String(activeRoomId || "").trim();
     if (!roomId || composerSending) return;
+    if (activeRoomSelfMuted) {
+      setActionError(PARTY_MEMBER_MUTED_BLOCKED_MESSAGE);
+      return;
+    }
 
     const textPayload = composeText.trim();
     const imageFiles = [...selectedImageFiles];
@@ -2962,16 +3125,40 @@ export default function PartyChatDesktopPage({
                   const isOwner = member.id === activeRoom.ownerUserId;
                   const isSelf = member.id === me.id;
                   const isOnline = isSelf || activeOnlineUserIdSet.has(member.id);
+                  const isMuted = activeMutedUserIdSet.has(member.id);
+                  const canToggleMute = canManageActiveRoom && !isOwner;
+                  const muteSubmitting = !!memberMuteSubmittingByUserId[member.id];
+                  const muteActionText = isMuted ? "解除禁言" : "禁言";
                   return (
                     <div
                       key={member.id}
-                      className={`party-side-member-item${isSelf ? " is-self" : ""}`}
+                      className={`party-side-member-item${isSelf ? " is-self" : ""}${
+                        isMuted ? " is-muted" : ""
+                      }`}
                     >
-                      <NameAvatar name={member.name} />
+                      <button
+                        type="button"
+                        className={`party-side-member-avatar-btn${canToggleMute ? " is-actionable" : ""}${
+                          isMuted ? " is-muted" : ""
+                        }`}
+                        onClick={() => void handleToggleMemberMute(member)}
+                        disabled={!canToggleMute || muteSubmitting}
+                        title={
+                          canToggleMute
+                            ? `${muteActionText}${member.name}`
+                            : isOwner
+                              ? "派主不可被禁言"
+                              : ""
+                        }
+                        aria-label={canToggleMute ? `${muteActionText}${member.name}` : `${member.name}头像`}
+                      >
+                        <NameAvatar name={member.name} />
+                      </button>
                       <span className="party-side-member-name">{member.name}</span>
                       <span className={`party-side-member-status${isOnline ? " online" : ""}`}>
                         {isOnline ? "在线" : "离线"}
                       </span>
+                      {isMuted ? <span className="party-side-member-muted">禁言</span> : null}
                       {isOwner ? <span className="party-side-member-owner">派主</span> : null}
                       {isSelf ? <span className="party-side-member-self">我</span> : null}
                     </div>
@@ -3382,6 +3569,7 @@ export default function PartyChatDesktopPage({
                         accept="image/*"
                         multiple
                         onChange={onPickImageFile}
+                        disabled={activeRoomSelfMuted}
                         className="party-file-input"
                       />
                       <input
@@ -3389,6 +3577,7 @@ export default function PartyChatDesktopPage({
                         type="file"
                         multiple
                         onChange={onPickUploadFile}
+                        disabled={activeRoomSelfMuted}
                         className="party-file-input"
                       />
 
@@ -3397,6 +3586,7 @@ export default function PartyChatDesktopPage({
                           type="button"
                           className={`party-tool-btn${showComposerEmojiPanel ? " active" : ""}`}
                           title="表情"
+                          disabled={activeRoomSelfMuted}
                           onClick={() => {
                             setShowMentionPicker(false);
                             setShowComposerEmojiPanel((prev) => !prev);
@@ -3408,6 +3598,7 @@ export default function PartyChatDesktopPage({
                           type="button"
                           className={`party-tool-btn${showMentionPicker ? " active" : ""}`}
                           title="@成员"
+                          disabled={activeRoomSelfMuted}
                           onClick={toggleMentionPicker}
                         >
                           <AtSign size={17} />
@@ -3416,6 +3607,7 @@ export default function PartyChatDesktopPage({
                           type="button"
                           className="party-tool-btn"
                           title="发送图片"
+                          disabled={activeRoomSelfMuted}
                           onClick={openImagePicker}
                         >
                           <ImagePlus size={17} />
@@ -3424,6 +3616,7 @@ export default function PartyChatDesktopPage({
                           type="button"
                           className="party-tool-btn"
                           title="发送文件"
+                          disabled={activeRoomSelfMuted}
                           onClick={openFilePicker}
                         >
                           <FileUp size={17} />
@@ -3530,10 +3723,11 @@ export default function PartyChatDesktopPage({
                         <textarea
                           ref={composeTextareaRef}
                           className="party-compose-textarea"
-                          placeholder="请输入消息"
+                          placeholder={activeRoomSelfMuted ? PARTY_MEMBER_MUTED_BLOCKED_MESSAGE : "请输入消息"}
                           value={composeText}
                           onChange={(event) => setComposeText(event.target.value)}
                           onPaste={onComposerPaste}
+                          disabled={activeRoomSelfMuted}
                           rows={isMobileSidebarDrawer ? 1 : 4}
                           onFocus={() => {
                             resizeComposeTextarea();
@@ -3551,7 +3745,11 @@ export default function PartyChatDesktopPage({
                       </div>
 
                       <div className="party-compose-footer">
-                        <span className="party-compose-hint">Enter 发送 / Shift+Enter 换行</span>
+                        <span className="party-compose-hint">
+                          {activeRoomSelfMuted
+                            ? PARTY_MEMBER_MUTED_BLOCKED_MESSAGE
+                            : "Enter 发送 / Shift+Enter 换行"}
+                        </span>
                         <button
                           type="button"
                           className="party-send-btn"
@@ -4181,6 +4379,16 @@ function normalizeRoom(raw) {
   const memberUserIds = Array.isArray(raw?.memberUserIds)
     ? Array.from(new Set(raw.memberUserIds.map((item) => String(item || "").trim()).filter(Boolean)))
     : [];
+  const ownerUserId = String(raw?.ownerUserId || "").trim();
+  const mutedMemberUserIds = Array.isArray(raw?.mutedMemberUserIds)
+    ? Array.from(
+        new Set(
+          raw.mutedMemberUserIds
+            .map((item) => String(item || "").trim())
+            .filter((userId) => userId && userId !== ownerUserId && memberUserIds.includes(userId)),
+        ),
+      )
+    : [];
   const memberCount = Math.max(
     memberUserIds.length,
     Number.isFinite(Number(raw?.memberCount)) ? Number(raw.memberCount) : memberUserIds.length,
@@ -4191,9 +4399,10 @@ function normalizeRoom(raw) {
     id,
     roomCode: String(raw?.roomCode || "").trim(),
     name: String(raw?.name || "未命名派"),
-    ownerUserId: String(raw?.ownerUserId || "").trim(),
+    ownerUserId,
     partyAgentMemberEnabled: raw?.partyAgentMemberEnabled !== false,
     memberUserIds,
+    mutedMemberUserIds,
     memberCount,
     updatedAt: String(raw?.updatedAt || ""),
     readStates: readStatesProvided ? normalizeRoomReadStates(raw?.readStates) : [],
@@ -4613,6 +4822,22 @@ function normalizeUrlHref(text) {
   return `https://${value}`;
 }
 
+function normalizeTeacherScopeKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function resolveLockedAgentByTeacherScope(teacherScopeKey) {
+  const normalized = normalizeTeacherScopeKey(teacherScopeKey);
+  const lockedAgent = LOCKED_AGENT_BY_TEACHER_SCOPE[normalized] || "";
+  const normalizedAgent = String(lockedAgent || "")
+    .trim()
+    .toUpperCase();
+  if (CHAT_AGENT_IDS.includes(normalizedAgent)) return normalizedAgent;
+  return "";
+}
+
 function sanitizePartyAgentSessionId(value) {
   const text = String(value || "")
     .trim()
@@ -4659,17 +4884,22 @@ function sanitizePartyAgentRuntimeConfigMap(raw) {
 
 function sanitizePartyAgentProviderDefaults(raw) {
   const source = raw && typeof raw === "object" ? raw : {};
-  return {
+  const next = {
     A: sanitizePartyProvider(source.A, PARTY_DEFAULT_AGENT_PROVIDER_MAP.A),
     B: sanitizePartyProvider(source.B, PARTY_DEFAULT_AGENT_PROVIDER_MAP.B),
     C: sanitizePartyProvider(source.C, PARTY_DEFAULT_AGENT_PROVIDER_MAP.C),
     D: sanitizePartyProvider(source.D, PARTY_DEFAULT_AGENT_PROVIDER_MAP.D),
     E: sanitizePartyProvider(source.E, PARTY_DEFAULT_AGENT_PROVIDER_MAP.E),
   };
+  next.C = AGENT_C_LOCKED_PROVIDER;
+  return next;
 }
 
 function resolvePartyAgentProvider(agentId, runtimeConfigs, providerDefaults) {
   const safeAgentId = sanitizePartyAgentId(agentId, PARTY_AGENT_DEFAULT_ID);
+  if (safeAgentId === "C") {
+    return AGENT_C_LOCKED_PROVIDER;
+  }
   const runtimeProvider = String(runtimeConfigs?.[safeAgentId]?.provider || "")
     .trim()
     .toLowerCase();
@@ -4718,6 +4948,64 @@ function patchPartyAgentBySession(
     ...source,
     [safeSessionId]: safeAgentId,
   };
+}
+
+function lockPartyAgentBySessionMap(
+  map,
+  sessions,
+  lockedAgentId,
+  fallback = PARTY_AGENT_DEFAULT_ID,
+) {
+  const safeLockedAgentId = sanitizePartyAgentId(lockedAgentId, fallback);
+  const source = sanitizePartyAgentBySessionMap(map, safeLockedAgentId);
+  const next = {};
+  let changed = false;
+  const validSessionIds = new Set();
+
+  if (Array.isArray(sessions)) {
+    sessions.slice(0, 600).forEach((session) => {
+      const sessionId = sanitizePartyAgentSessionId(session?.id);
+      if (!sessionId) return;
+      validSessionIds.add(sessionId);
+      if (source[sessionId] !== safeLockedAgentId) changed = true;
+      next[sessionId] = safeLockedAgentId;
+    });
+  }
+
+  Object.keys(source).forEach((sessionId) => {
+    if (!validSessionIds.has(sessionId)) {
+      changed = true;
+    }
+  });
+
+  if (!changed && Object.keys(next).length === Object.keys(source).length) {
+    return source;
+  }
+  return next;
+}
+
+function enablePartySmartContextForAgentSessions(
+  map,
+  sessions,
+  agentId,
+  fallback = PARTY_AGENT_DEFAULT_ID,
+) {
+  const safeAgentId = sanitizePartyAgentId(agentId, fallback);
+  let next = sanitizePartyAgentSmartContextEnabledMap(map);
+  if (!Array.isArray(sessions) || sessions.length === 0) return next;
+
+  sessions.slice(0, 600).forEach((session) => {
+    const sessionId = sanitizePartyAgentSessionId(session?.id);
+    if (!sessionId) return;
+    next = patchPartyAgentSmartContextEnabledBySessionAgent(
+      next,
+      sessionId,
+      safeAgentId,
+      true,
+      fallback,
+    );
+  });
+  return next;
 }
 
 function getPartyAgentSmartContextDefaultEnabled(agentId) {

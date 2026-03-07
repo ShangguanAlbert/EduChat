@@ -42,6 +42,10 @@ const RESPONSE_FORMAT_OPTIONS = [
   { value: "url", label: "URL" },
   { value: "b64_json", label: "Base64" },
 ];
+const SEEDREAM_MODEL_OPTIONS = [
+  { value: "doubao-seedream-4-5-251128", label: "Seedream 4.5" },
+  { value: "doubao-seedream-5-0-260128", label: "Seedream 5.0" },
+];
 const GENERATION_MODE_OPTIONS = [
   { value: "disabled", label: "单图" },
   { value: "auto", label: "组图（auto）" },
@@ -247,12 +251,12 @@ export default function ImageGenerationDesktopPage({
   const location = useLocation();
 
   const [prompt, setPrompt] = useState("");
+  const [model, setModel] = useState("doubao-seedream-4-5-251128");
   const [size, setSize] = useState("2K");
   const [sequentialMode, setSequentialMode] = useState("disabled");
   const [maxImagesInput, setMaxImagesInput] = useState(String(GROUP_IMAGE_MAX));
   const [watermark, setWatermark] = useState(false);
   const [responseFormat, setResponseFormat] = useState("url");
-  const [streamEnabled, setStreamEnabled] = useState(true);
   const [imageUrlsText, setImageUrlsText] = useState("");
   const [inputFiles, setInputFiles] = useState([]);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -396,6 +400,14 @@ export default function ImageGenerationDesktopPage({
     }
   }, [termsLocked]);
 
+  const refreshHistoryAfterGeneration = useCallback(async () => {
+    if (termsLocked) return;
+    await loadHistory({ silent: true });
+    window.setTimeout(() => {
+      void loadHistory({ silent: true });
+    }, 520);
+  }, [loadHistory, termsLocked]);
+
   useEffect(() => {
     if (!returnContextFromState) return;
     saveImageReturnContext(returnContextFromState);
@@ -484,16 +496,18 @@ export default function ImageGenerationDesktopPage({
 
     let streamError = "";
     let shouldRefreshHistory = false;
+    let sawDoneEvent = false;
 
     try {
       await streamSeedreamGeneration({
         prompt,
+        model,
         size,
         sequentialMode,
         maxImages: resolvedMaxImages,
         watermark,
         responseFormat,
-        stream: streamEnabled,
+        stream: true,
         imageUrls,
         files: inputFiles,
         handlers: {
@@ -536,6 +550,10 @@ export default function ImageGenerationDesktopPage({
           onError: (message) => {
             streamError = String(message || "图片生成失败。");
           },
+          onDone: () => {
+            sawDoneEvent = true;
+            shouldRefreshHistory = true;
+          },
         },
       });
 
@@ -546,8 +564,8 @@ export default function ImageGenerationDesktopPage({
       setErrorText(error?.message || "图片生成失败，请稍后再试。");
     } finally {
       setIsGenerating(false);
-      if (shouldRefreshHistory) {
-        loadHistory({ silent: true });
+      if (shouldRefreshHistory || sawDoneEvent) {
+        void refreshHistoryAfterGeneration();
       }
     }
   }
@@ -679,6 +697,13 @@ export default function ImageGenerationDesktopPage({
               </div>
             ) : null}
             <CustomSelect
+              label="生图模型"
+              value={model}
+              options={SEEDREAM_MODEL_OPTIONS}
+              onChange={setModel}
+              disabled={termsLocked || isGenerating}
+            />
+            <CustomSelect
               label="输出尺寸"
               value={size}
               options={SIZE_OPTIONS}
@@ -739,15 +764,6 @@ export default function ImageGenerationDesktopPage({
               <span>添加水印</span>
             </label>
 
-            <label className="image-setting-check">
-              <input
-                type="checkbox"
-                checked={streamEnabled}
-                onChange={(e) => setStreamEnabled(e.target.checked)}
-                disabled={termsLocked}
-              />
-              <span>流式返回</span>
-            </label>
           </div>
 
           <div className="image-preview-stage">
@@ -822,6 +838,27 @@ export default function ImageGenerationDesktopPage({
                 </div>
               )}
             </div>
+
+            {generatedPreviewItems.length > 1 ? (
+              <div className="image-generated-strip" role="list" aria-label="本次生成组图">
+                {generatedPreviewItems.map((item) => {
+                  const active = selectedPreview?.key === item.key;
+                  return (
+                    <button
+                      key={item.key}
+                      type="button"
+                      className={`image-generated-thumb${active ? " is-active" : ""}`}
+                      onClick={() => setSelectedPreviewKey(item.key)}
+                      title={`查看第 ${item.imageIndex + 1} 张`}
+                      aria-label={`查看第 ${item.imageIndex + 1} 张`}
+                    >
+                      <img src={item.url} alt={`组图第 ${item.imageIndex + 1} 张`} loading="lazy" />
+                      <span>{item.imageIndex + 1}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
           </div>
 
           <div className="image-capsule-wrap">

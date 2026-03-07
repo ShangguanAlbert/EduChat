@@ -93,7 +93,13 @@ const AUTH_TOKEN_TTL_SECONDS = 12 * 60 * 60;
 const ADMIN_TOKEN_TTL_SECONDS = 2 * 60 * 60;
 const AGENT_IDS = ["A", "B", "C", "D"];
 const ADMIN_CONFIG_KEY = "global";
-const DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL = "doubao-seedream-4-5-251128";
+const TEACHER_SCOPE_LOCKED_AGENT_MAP = Object.freeze({
+  "yang-junfeng": "C",
+});
+const VOLCENGINE_IMAGE_GENERATION_MODEL_ID_45 = "doubao-seedream-4-5-251128";
+const VOLCENGINE_IMAGE_GENERATION_MODEL_ID_50 = "doubao-seedream-5-0-260128";
+const DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL =
+  VOLCENGINE_IMAGE_GENERATION_MODEL_ID_45;
 const DEFAULT_VOLCENGINE_IMAGE_GENERATION_ENDPOINT =
   "https://ark.cn-beijing.volces.com/api/v3/images/generations";
 const SYSTEM_PROMPT_MAX_LENGTH = 24000;
@@ -170,6 +176,7 @@ const GROUP_CHAT_TEXT_MAX_LENGTH = 3600;
 const GROUP_CHAT_ROOM_NAME_MAX_LENGTH = 30;
 const GROUP_CHAT_REPLY_PREVIEW_MAX_LENGTH = 120;
 const GROUP_CHAT_LOCAL_PARSE_HINT_TEXT = "仅解析文字中的文本";
+const GROUP_CHAT_MEMBER_MUTED_ERROR_MESSAGE = "你已被派主禁言，暂时无法发言。";
 const GROUP_CHAT_MAX_REACTIONS_PER_MESSAGE = 32;
 const GROUP_CHAT_REACTION_EMOJI_MAX_SYMBOLS = 6;
 const GROUP_CHAT_MAX_READ_STATES_PER_ROOM = GROUP_CHAT_MAX_MEMBERS_PER_ROOM;
@@ -202,6 +209,7 @@ if (!groupChatOssClient) {
 const AGENT_D_FIXED_PROVIDER = "aliyun";
 const AGENT_D_FIXED_MODEL = "qwen3.5-plus";
 const AGENT_D_FIXED_MAX_OUTPUT_TOKENS = 65536;
+const AGENT_C_FIXED_PROVIDER = "volcengine";
 const GROUP_CHAT_VOLCENGINE_SUPPORTED_IMAGE_EXTENSIONS = new Set([
   "jpg",
   "jpeg",
@@ -1048,6 +1056,10 @@ const groupChatRoomSchema = new mongoose.Schema(
     ownerUserId: { type: String, required: true, index: true },
     partyAgentMemberEnabled: { type: Boolean, default: true },
     memberUserIds: {
+      type: [String],
+      default: () => [],
+    },
+    mutedMemberUserIds: {
       type: [String],
       default: () => [],
     },
@@ -2583,9 +2595,19 @@ app.post(
   upload.array("files", MAX_FILES),
   async (req, res) => {
     if ((await assertPartyAgentPanelRoomAccess(req, res)) === false) return;
-    const agentId = sanitizeAgent(req.body?.agentId || "A");
+    const requestedAgentId = sanitizeAgent(req.body?.agentId || "A");
+    const teacherScopedLockedAgentId = resolveTeacherScopedLockedAgentId(
+      req.authTeacherScopeKey,
+    );
+    const agentId = teacherScopedLockedAgentId || requestedAgentId;
     const sessionId = sanitizeId(req.body?.sessionId, "");
-    const smartContextEnabled = sanitizeRuntimeBoolean(req.body?.smartContextEnabled, false);
+    const requestedSmartContextEnabled = sanitizeRuntimeBoolean(
+      req.body?.smartContextEnabled,
+      false,
+    );
+    const smartContextEnabled = teacherScopedLockedAgentId
+      ? true
+      : requestedSmartContextEnabled;
     const contextMode = sanitizeSmartContextMode(req.body?.contextMode);
     const volcengineFileRefs = readRequestVolcengineFileRefs(
       req.body?.volcengineFileRefs,
@@ -2625,6 +2647,13 @@ app.post(
   upload.array("files", MAX_FILES),
   async (req, res) => {
     if ((await assertPartyAgentPanelRoomAccess(req, res)) === false) return;
+    const teacherScopedLockedAgentId = resolveTeacherScopedLockedAgentId(
+      req.authTeacherScopeKey,
+    );
+    if (teacherScopedLockedAgentId && teacherScopedLockedAgentId !== AGENT_E_ID) {
+      res.status(403).json({ error: "当前授课教师已锁定“远程教育”智能体。" });
+      return;
+    }
     const sessionId = sanitizeId(req.body?.sessionId, "");
     const smartContextEnabled = sanitizeRuntimeBoolean(req.body?.smartContextEnabled, false);
     const contextMode = sanitizeSmartContextMode(req.body?.contextMode);
@@ -3248,6 +3277,101 @@ app.patch("/api/group-chat/rooms/:roomId/party-agent-access", requireChatAuth, a
   }
 });
 
+app.patch("/api/group-chat/rooms/:roomId/members/:memberUserId/mute", requireChatAuth, async (req, res) => {
+  const userId = sanitizeId(req.authUser?._id, "");
+  const roomId = sanitizeId(req.params?.roomId, "");
+  const targetMemberUserId = sanitizeId(req.params?.memberUserId, "");
+  const nextMuted = sanitizeRuntimeBoolean(req.body?.muted, true);
+  if (!userId || !roomId || !targetMemberUserId) {
+    res.status(400).json({ error: "无效参数。" });
+    return;
+  }
+  if (!isMongoObjectIdLike(roomId)) {
+    res.status(400).json({ error: "无效群聊 ID。" });
+    return;
+  }
+
+  try {
+    const room = await GroupChatRoom.findById(roomId).lean();
+    const normalizedRoom = normalizeGroupChatRoomDoc(room, {
+      viewerUserId: userId,
+    });
+    if (!normalizedRoom) {
+      res.status(404).json({ error: "群聊不存在或已失效。" });
+      return;
+    }
+    if (normalizedRoom.ownerUserId !== userId) {
+      res.status(403).json({ error: "仅派主可管理成员禁言。" });
+      return;
+    }
+    if (!normalizedRoom.memberUserIds.includes(targetMemberUserId)) {
+      res.status(404).json({ error: "成员不存在或已离开当前派。" });
+      return;
+    }
+    if (targetMemberUserId === normalizedRoom.ownerUserId) {
+      res.status(400).json({ error: "不能对派主设置禁言。" });
+      return;
+    }
+
+    const currentlyMuted = normalizedRoom.mutedMemberUserIds.includes(targetMemberUserId);
+    if (currentlyMuted === nextMuted) {
+      res.json({
+        ok: true,
+        room: normalizedRoom,
+      });
+      return;
+    }
+
+    const nextMutedMemberUserIds = new Set(normalizedRoom.mutedMemberUserIds);
+    if (nextMuted) {
+      nextMutedMemberUserIds.add(targetMemberUserId);
+    } else {
+      nextMutedMemberUserIds.delete(targetMemberUserId);
+    }
+
+    const updated = await GroupChatRoom.findByIdAndUpdate(
+      roomId,
+      {
+        $set: {
+          mutedMemberUserIds: sanitizeGroupChatMutedMemberUserIds(
+            Array.from(nextMutedMemberUserIds),
+            normalizedRoom.memberUserIds,
+            normalizedRoom.ownerUserId,
+          ),
+          updatedAt: new Date(),
+        },
+      },
+      { new: true },
+    ).lean();
+    const updatedRoom = normalizeGroupChatRoomDoc(updated, {
+      viewerUserId: userId,
+    });
+    if (!updatedRoom) {
+      res.status(404).json({ error: "群聊不存在或已失效。" });
+      return;
+    }
+
+    const usersById = await readGroupChatUsersByIds([targetMemberUserId]);
+    const targetUserName = sanitizeText(usersById?.[targetMemberUserId]?.name, "该成员", 30);
+    const actionText = nextMuted ? "禁言了" : "解除禁言";
+    const systemMessageDoc = await createGroupChatSystemMessage({
+      roomId,
+      content: `${buildGroupChatDisplayName(req.authUser)} ${actionText} ${targetUserName}`,
+    });
+    broadcastGroupChatMessageCreated(roomId, systemMessageDoc);
+    broadcastGroupChatRoomUpdated(roomId, updatedRoom);
+
+    res.json({
+      ok: true,
+      room: updatedRoom,
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error?.message || "更新成员禁言状态失败，请稍后重试。",
+    });
+  }
+});
+
 app.delete("/api/group-chat/rooms/:roomId", requireChatAuth, async (req, res) => {
   const userId = sanitizeId(req.authUser?._id, "");
   const roomId = sanitizeId(req.params?.roomId, "");
@@ -3464,8 +3588,15 @@ app.post("/api/group-chat/rooms/:roomId/messages/text", requireChatAuth, async (
 
   try {
     const room = await GroupChatRoom.findOne({ _id: roomId, memberUserIds: userId }).lean();
-    if (!room) {
+    const normalizedRoom = normalizeGroupChatRoomDoc(room, {
+      viewerUserId: userId,
+    });
+    if (!normalizedRoom) {
       res.status(403).json({ error: "你不在该群聊中，无法发送消息。" });
+      return;
+    }
+    if (isGroupChatMemberMuted(normalizedRoom, userId)) {
+      res.status(403).json({ error: GROUP_CHAT_MEMBER_MUTED_ERROR_MESSAGE });
       return;
     }
 
@@ -3542,8 +3673,15 @@ app.post(
     let uploadedImageOssKey = "";
     try {
       const room = await GroupChatRoom.findOne({ _id: roomId, memberUserIds: userId }).lean();
-      if (!room) {
+      const normalizedRoom = normalizeGroupChatRoomDoc(room, {
+        viewerUserId: userId,
+      });
+      if (!normalizedRoom) {
         res.status(403).json({ error: "你不在该群聊中，无法发送消息。" });
+        return;
+      }
+      if (isGroupChatMemberMuted(normalizedRoom, userId)) {
+        res.status(403).json({ error: GROUP_CHAT_MEMBER_MUTED_ERROR_MESSAGE });
         return;
       }
 
@@ -3689,8 +3827,15 @@ app.post(
 
     try {
       const room = await GroupChatRoom.findOne({ _id: roomId, memberUserIds: userId }).lean();
-      if (!room) {
+      const normalizedRoom = normalizeGroupChatRoomDoc(room, {
+        viewerUserId: userId,
+      });
+      if (!normalizedRoom) {
         res.status(403).json({ error: "你不在该群聊中，无法发送文件。" });
+        return;
+      }
+      if (isGroupChatMemberMuted(normalizedRoom, userId)) {
+        res.status(403).json({ error: GROUP_CHAT_MEMBER_MUTED_ERROR_MESSAGE });
         return;
       }
 
@@ -6703,8 +6848,14 @@ async function streamSeedreamImageGeneration({
   });
 
   const generatedImageByIndex = new Map();
+  let nextGeneratedImageIndex = 0;
   const collectGeneratedImage = (payload) => {
-    const imageIndex = sanitizeRuntimeInteger(payload?.imageIndex, 0, 0, 9999);
+    const explicitImageIndex = Number(payload?.imageIndex);
+    const imageIndex =
+      Number.isFinite(explicitImageIndex) && explicitImageIndex >= 0
+        ? Math.floor(explicitImageIndex)
+        : nextGeneratedImageIndex;
+    nextGeneratedImageIndex = Math.max(nextGeneratedImageIndex, imageIndex + 1);
     const size = sanitizeText(payload?.size, "", 80);
     const model = sanitizeText(payload?.model, "", 160);
     const imageUrl = resolveGeneratedImageOutputUrl({
@@ -6793,6 +6944,7 @@ async function buildSeedreamImageGenerationRequest({
   model,
   chatStorageUserId = "",
 }) {
+  const resolvedModel = normalizeSeedreamGenerationModel(body?.model, model);
   const prompt = sanitizeText(body?.prompt, "", 2000);
   const size = normalizeSeedreamSize(body?.size);
   const sequentialImageGeneration = normalizeSeedreamSequentialMode(
@@ -6825,7 +6977,7 @@ async function buildSeedreamImageGenerationRequest({
   }
 
   const payload = {
-    model: String(model || DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL),
+    model: resolvedModel,
     prompt,
     stream,
     response_format: responseFormat,
@@ -6852,6 +7004,41 @@ async function buildSeedreamImageGenerationRequest({
     inputImageCount: inputImages.length,
     maxImages,
   };
+}
+
+function normalizeSeedreamGenerationModel(value, fallback = "") {
+  const safeFallback = sanitizeText(
+    fallback,
+    DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL,
+    160,
+  );
+  const normalizedInput = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s.]+/g, "-");
+  if (!normalizedInput) {
+    return safeFallback;
+  }
+  if (
+    normalizedInput === VOLCENGINE_IMAGE_GENERATION_MODEL_ID_45 ||
+    normalizedInput === "doubao-seedream-4-5" ||
+    normalizedInput === "seedream-4-5" ||
+    normalizedInput === "seedream45"
+  ) {
+    return VOLCENGINE_IMAGE_GENERATION_MODEL_ID_45;
+  }
+  if (
+    normalizedInput === VOLCENGINE_IMAGE_GENERATION_MODEL_ID_50 ||
+    normalizedInput === "doubao-seedream-5-0" ||
+    normalizedInput === "seedream-5-0" ||
+    normalizedInput === "seedream50"
+  ) {
+    return VOLCENGINE_IMAGE_GENERATION_MODEL_ID_50;
+  }
+  if (normalizedInput === safeFallback.toLowerCase()) {
+    return safeFallback;
+  }
+  return safeFallback;
 }
 
 function normalizeSeedreamSize(value) {
@@ -6986,6 +7173,78 @@ function normalizeSeedreamImageMimeType(value) {
   return "";
 }
 
+function extractSeedreamImageResultEntries(payload) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const rawEntries = [];
+
+  const dataEntries = Array.isArray(source.data) ? source.data : [];
+  dataEntries.forEach((item, idx) => {
+    if (!item || typeof item !== "object") return;
+    rawEntries.push({
+      ...item,
+      __fallbackIndex: idx,
+    });
+  });
+
+  const outputEntries = Array.isArray(source.outputs) ? source.outputs : [];
+  outputEntries.forEach((item, idx) => {
+    if (!item || typeof item !== "object") return;
+    rawEntries.push({
+      ...item,
+      __fallbackIndex: idx,
+    });
+  });
+
+  if (source.image && typeof source.image === "object") {
+    rawEntries.push({
+      ...source.image,
+      __fallbackIndex: 0,
+    });
+  }
+
+  const topLevelUrl = String(source.url || source.image_url || "").trim();
+  const topLevelB64 = String(source.b64_json || source.b64Json || "").trim();
+  if (topLevelUrl || topLevelB64) {
+    rawEntries.push({
+      url: topLevelUrl,
+      b64_json: topLevelB64,
+      size: source.size,
+      image_index: source.image_index ?? source.imageIndex ?? source.index,
+      __fallbackIndex: 0,
+    });
+  }
+
+  const normalized = [];
+  const deduped = new Set();
+  rawEntries.forEach((item, idx) => {
+    const fallbackIndex = sanitizeRuntimeInteger(
+      item?.__fallbackIndex,
+      idx,
+      0,
+      9999,
+    );
+    const imageIndex = sanitizeRuntimeInteger(
+      item?.image_index ?? item?.imageIndex ?? item?.index,
+      fallbackIndex,
+      0,
+      9999,
+    );
+    const url = String(item?.url || item?.image_url || "").trim();
+    const b64Json = String(item?.b64_json || item?.b64Json || "").trim();
+    if (!url && !b64Json) return;
+    const dedupeKey = `${imageIndex}::${url || b64Json}`;
+    if (deduped.has(dedupeKey)) return;
+    deduped.add(dedupeKey);
+    normalized.push({
+      imageIndex,
+      url,
+      b64Json,
+      size: sanitizeText(item?.size, "", 80),
+    });
+  });
+  return normalized;
+}
+
 async function pipeVolcengineImageGenerationSse(upstream, res, handlers = {}) {
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
@@ -7011,25 +7270,30 @@ async function pipeVolcengineImageGenerationSse(upstream, res, handlers = {}) {
     const created = Number.isFinite(Number(json?.created))
       ? Number(json.created)
       : null;
-    const imageIndex = sanitizeRuntimeInteger(json?.image_index, 0, 0, 999);
+    const imageEntries = extractSeedreamImageResultEntries(json);
 
     if (type === "image_generation.partial_succeeded") {
-      sawAnyImageEvent = true;
-      const partialPayload = {
-        model,
-        created,
-        imageIndex,
-        url: String(json?.url || ""),
-        b64Json: String(json?.b64_json || ""),
-        size: sanitizeText(json?.size, "", 80),
-      };
-      writeEvent(res, "image_partial", partialPayload);
-      handlers.onImagePartial?.(partialPayload);
+      if (imageEntries.length > 0) {
+        sawAnyImageEvent = true;
+        imageEntries.forEach((entry) => {
+          const partialPayload = {
+            model,
+            created,
+            imageIndex: entry.imageIndex,
+            url: entry.url,
+            b64Json: entry.b64Json,
+            size: entry.size,
+          };
+          writeEvent(res, "image_partial", partialPayload);
+          handlers.onImagePartial?.(partialPayload);
+        });
+      }
       return false;
     }
 
     if (type === "image_generation.partial_failed") {
       sawAnyImageEvent = true;
+      const fallbackImageIndex = imageEntries.length > 0 ? imageEntries[0].imageIndex : 0;
       const errorObj =
         json?.error && typeof json.error === "object" ? json.error : {};
       const code = sanitizeText(errorObj.code, "", 120);
@@ -7040,7 +7304,7 @@ async function pipeVolcengineImageGenerationSse(upstream, res, handlers = {}) {
       writeEvent(res, "image_failed", {
         model,
         created,
-        imageIndex,
+        imageIndex: fallbackImageIndex,
         errorCode: code,
         errorMessage: message,
       });
@@ -7048,6 +7312,21 @@ async function pipeVolcengineImageGenerationSse(upstream, res, handlers = {}) {
     }
 
     if (type === "image_generation.completed") {
+      if (imageEntries.length > 0) {
+        sawAnyImageEvent = true;
+        imageEntries.forEach((entry) => {
+          const partialPayload = {
+            model,
+            created,
+            imageIndex: entry.imageIndex,
+            url: entry.url,
+            b64Json: entry.b64Json,
+            size: entry.size,
+          };
+          writeEvent(res, "image_partial", partialPayload);
+          handlers.onImagePartial?.(partialPayload);
+        });
+      }
       sawCompleted = true;
       writeEvent(res, "usage", {
         model,
@@ -7072,6 +7351,23 @@ async function pipeVolcengineImageGenerationSse(upstream, res, handlers = {}) {
             message: json.error.message,
           }),
       );
+    }
+
+    if (imageEntries.length > 0) {
+      sawAnyImageEvent = true;
+      imageEntries.forEach((entry) => {
+        const partialPayload = {
+          model,
+          created,
+          imageIndex: entry.imageIndex,
+          url: entry.url,
+          b64Json: entry.b64Json,
+          size: entry.size,
+        };
+        writeEvent(res, "image_partial", partialPayload);
+        handlers.onImagePartial?.(partialPayload);
+      });
+      return false;
     }
 
     return false;
@@ -7108,37 +7404,42 @@ function emitSeedreamImageGenerationNonStreamEvents(result, res, handlers = {}) 
   const created = Number.isFinite(Number(payload?.created))
     ? Number(payload.created)
     : null;
-  const data = Array.isArray(payload?.data) ? payload.data : [];
-
-  data.forEach((item, idx) => {
-    if (item && typeof item === "object" && item.error) {
-      const errorObj =
-        item.error && typeof item.error === "object" ? item.error : {};
-      const code = sanitizeText(errorObj.code, "", 120);
-      writeEvent(res, "image_failed", {
-        model,
-        created,
-        imageIndex: idx,
-        errorCode: code,
-        errorMessage: mapVolcengineImageGenerationEventError({
-          code,
-          message: errorObj.message,
-        }),
-      });
-      return;
-    }
-
-    const imageObj = item && typeof item === "object" ? item : {};
+  const imageEntries = extractSeedreamImageResultEntries(payload);
+  imageEntries.forEach((entry) => {
     const partialPayload = {
       model,
       created,
-      imageIndex: idx,
-      url: String(imageObj.url || ""),
-      b64Json: String(imageObj.b64_json || ""),
-      size: sanitizeText(imageObj.size, "", 80),
+      imageIndex: entry.imageIndex,
+      url: entry.url,
+      b64Json: entry.b64Json,
+      size: entry.size,
     };
     writeEvent(res, "image_partial", partialPayload);
     handlers.onImagePartial?.(partialPayload);
+  });
+
+  const data = Array.isArray(payload?.data) ? payload.data : [];
+  data.forEach((item, idx) => {
+    if (!(item && typeof item === "object" && item.error)) return;
+    const errorObj =
+      item.error && typeof item.error === "object" ? item.error : {};
+    const code = sanitizeText(errorObj.code, "", 120);
+    const fallbackIndex = sanitizeRuntimeInteger(
+      item?.image_index ?? item?.imageIndex ?? item?.index,
+      idx,
+      0,
+      9999,
+    );
+    writeEvent(res, "image_failed", {
+      model,
+      created,
+      imageIndex: fallbackIndex,
+      errorCode: code,
+      errorMessage: mapVolcengineImageGenerationEventError({
+        code,
+        message: errorObj.message,
+      }),
+    });
   });
 
   if (payload?.error && typeof payload.error === "object") {
@@ -9545,7 +9846,10 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
   const source = raw && typeof raw === "object" ? raw : {};
   const normalizedAgentId = sanitizeAgent(agentId);
   const defaults = getDefaultRuntimeConfigByAgent(normalizedAgentId);
-  const provider = sanitizeRuntimeProvider(source.provider);
+  const provider =
+    normalizedAgentId === "C"
+      ? AGENT_C_FIXED_PROVIDER
+      : sanitizeRuntimeProvider(source.provider);
   const protocol = sanitizeRuntimeProtocol(source.protocol);
   const model = sanitizeRuntimeModel(source.model);
   const modelForMatching =
@@ -9837,6 +10141,10 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     if (shouldApplyBootDefaults) {
       next.protocol = "responses";
     }
+  }
+
+  if (normalizedAgentId === "C") {
+    next.provider = AGENT_C_FIXED_PROVIDER;
   }
 
   return next;
@@ -10154,6 +10462,10 @@ function sanitizeSystemPrompt(value) {
 }
 
 function getProviderByAgent(agentId, runtimeConfig = null) {
+  const targetAgent = sanitizeAgent(agentId);
+  if (targetAgent === "C") {
+    return AGENT_C_FIXED_PROVIDER;
+  }
   const runtimeProvider = sanitizeRuntimeProvider(runtimeConfig?.provider);
   if (runtimeProvider !== "inherit") {
     return normalizeProvider(runtimeProvider);
@@ -10165,7 +10477,6 @@ function getProviderByAgent(agentId, runtimeConfig = null) {
     C: "volcengine",
     D: AGENT_D_FIXED_PROVIDER,
   };
-  const targetAgent = sanitizeAgent(agentId);
   const map = {
     A: process.env.AGENT_PROVIDER_A || defaults.A,
     B: process.env.AGENT_PROVIDER_B || defaults.B,
@@ -11127,6 +11438,17 @@ function sanitizeAgent(value) {
   return "A";
 }
 
+function resolveTeacherScopedLockedAgentId(teacherScopeKey) {
+  const safeScopeKey = sanitizeTeacherScopeKey(teacherScopeKey);
+  const rawLockedAgent = String(TEACHER_SCOPE_LOCKED_AGENT_MAP[safeScopeKey] || "")
+    .trim()
+    .toUpperCase();
+  if (["A", "B", "C", "D", AGENT_E_ID].includes(rawLockedAgent)) {
+    return rawLockedAgent;
+  }
+  return "";
+}
+
 function sanitizeReasoning(value, fallback = "high") {
   const key = String(value || "")
     .trim()
@@ -11211,6 +11533,19 @@ function sanitizeGroupChatMemberUserIds(value) {
   ).slice(0, GROUP_CHAT_MAX_MEMBERS_PER_ROOM);
 }
 
+function sanitizeGroupChatMutedMemberUserIds(value, roomMemberUserIds = [], ownerUserId = "") {
+  const memberSet = new Set(sanitizeGroupChatMemberUserIds(roomMemberUserIds));
+  const safeOwnerUserId = sanitizeId(ownerUserId, "");
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .map((item) => sanitizeId(item, ""))
+        .filter((userId) => !!userId && userId !== safeOwnerUserId && memberSet.has(userId)),
+    ),
+  ).slice(0, GROUP_CHAT_MAX_MEMBERS_PER_ROOM);
+}
+
 function normalizeGroupChatReadStates(value, roomMemberUserIds = []) {
   const memberSet = new Set(sanitizeGroupChatMemberUserIds(roomMemberUserIds));
   if (!Array.isArray(value)) return [];
@@ -11251,6 +11586,11 @@ function normalizeGroupChatRoomDoc(doc, options = {}) {
   if (!id) return null;
   const memberUserIds = sanitizeGroupChatMemberUserIds(doc.memberUserIds);
   const ownerUserId = sanitizeId(doc.ownerUserId, "");
+  const mutedMemberUserIds = sanitizeGroupChatMutedMemberUserIds(
+    doc.mutedMemberUserIds,
+    memberUserIds,
+    ownerUserId,
+  );
   const onlineMemberUserIds = Array.from(
     new Set(getGroupChatOnlineUserIdsByRoom(id).filter((userId) => memberUserIds.includes(userId))),
   );
@@ -11262,6 +11602,7 @@ function normalizeGroupChatRoomDoc(doc, options = {}) {
     ownerUserId,
     partyAgentMemberEnabled: sanitizeRuntimeBoolean(doc.partyAgentMemberEnabled, true),
     memberUserIds,
+    mutedMemberUserIds,
     memberCount: Math.max(memberUserIds.length, sanitizeRuntimeInteger(doc.memberCount, 1, 1, 999)),
     createdAt: sanitizeIsoDate(doc.createdAt),
     updatedAt: sanitizeIsoDate(doc.updatedAt),
@@ -11273,6 +11614,22 @@ function normalizeGroupChatRoomDoc(doc, options = {}) {
   }
 
   return normalized;
+}
+
+function isGroupChatMemberMuted(room, userId) {
+  const safeUserId = sanitizeId(userId, "");
+  if (!safeUserId) return false;
+  const normalizedRoom =
+    room && typeof room === "object" && room.id
+      ? room
+      : normalizeGroupChatRoomDoc(room);
+  if (!normalizedRoom) return false;
+  if (safeUserId === sanitizeId(normalizedRoom.ownerUserId, "")) return false;
+  return sanitizeGroupChatMutedMemberUserIds(
+    normalizedRoom.mutedMemberUserIds,
+    normalizedRoom.memberUserIds,
+    normalizedRoom.ownerUserId,
+  ).includes(safeUserId);
 }
 
 function normalizeGroupChatFilesApiInputType(value) {

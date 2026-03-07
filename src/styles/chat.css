@@ -59,6 +59,16 @@
   flex-direction:column;
 }
 
+.sidebar button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sidebar button:focus,
+.sidebar button:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
 .sidebar-top{
   padding: 12px;
   display:flex;

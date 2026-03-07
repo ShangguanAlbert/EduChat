@@ -312,6 +312,35 @@
   background: #edf4ff;
 }
 
+.party-side-member-item.is-muted {
+  border-color: #f3d9a4;
+  background: #fffbf2;
+}
+
+.party-side-member-avatar-btn {
+  border: 0;
+  padding: 0;
+  border-radius: 999px;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+}
+
+.party-side-member-avatar-btn.is-actionable {
+  cursor: pointer;
+}
+
+.party-side-member-avatar-btn.is-actionable:hover {
+  transform: scale(1.04);
+}
+
+.party-side-member-avatar-btn:disabled {
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
 .party-side-member-item .name-avatar {
   width: 28px;
   height: 28px;
@@ -346,6 +375,15 @@
 .party-side-member-status.online {
   color: #0d8b40;
   background: #e6f8ec;
+}
+
+.party-side-member-muted {
+  border: 1px solid #efcf91;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 11px;
+  color: #8f4f08;
+  background: #fff3de;
 }
 
 .party-side-member-owner {
@@ -1657,6 +1695,11 @@
 .party-tool-btn:hover,
 .party-tool-btn.active {
   background: #eef4ff;
+}
+
+.party-tool-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .party-compose-emoji-panel {

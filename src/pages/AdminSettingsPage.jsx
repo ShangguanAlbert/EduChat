@@ -76,6 +76,9 @@ const AGENT_D_LOCKED_RUNTIME_FIELDS = new Set([
   "includeCurrentTime",
   "maxOutputTokens",
 ]);
+const AGENT_C_LOCKED_RUNTIME_FIELDS = new Set([
+  "provider",
+]);
 const OPENROUTER_PDF_ENGINE_OPTIONS = [
   { value: "auto", label: "自动（默认）" },
   { value: "pdf-text", label: "pdf-text（免费）" },
@@ -194,6 +197,7 @@ function sanitizeAgentProviderMap(raw) {
       next[agentId] = key;
     }
   });
+  next.C = "volcengine";
   next.D = "aliyun";
   return next;
 }
@@ -783,6 +787,7 @@ export default function AdminSettingsPage() {
         : "该模型不支持深度思考联动，联网搜索将按默认模式直接调用。";
 
   const isAgentESelected = selectedAgent === "E";
+  const isAgentCSelected = selectedAgent === "C";
   const isAgentDSelected = selectedAgent === "D";
   const isCoreAgentSelected = AGENT_IDS.includes(selectedAgent);
   const selectedPrompt = isAgentESelected ? "" : prompts[selectedAgent] || "";
@@ -1161,6 +1166,7 @@ export default function AdminSettingsPage() {
 
   function updateRuntimeField(field, value) {
     if (!isCoreAgentSelected) return;
+    if (selectedAgent === "C" && AGENT_C_LOCKED_RUNTIME_FIELDS.has(field)) return;
     if (selectedAgent === "D" && AGENT_D_LOCKED_RUNTIME_FIELDS.has(field)) return;
     setRuntimeConfigs((prev) => {
       const current = prev[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
@@ -1393,6 +1399,7 @@ export default function AdminSettingsPage() {
 
   function resolveDebugProvider(agentId, runtimeConfig) {
     if (agentId === "E") return "volcengine";
+    if (String(agentId || "").trim().toUpperCase() === "C") return "volcengine";
     const runtimeProvider = String(runtimeConfig?.provider || "")
       .trim()
       .toLowerCase();
@@ -2484,7 +2491,7 @@ export default function AdminSettingsPage() {
                   value={selectedProvider}
                   options={PROVIDER_OPTIONS}
                   onChange={(next) => updateRuntimeField("provider", next)}
-                  disabled={loading || isAgentDSelected}
+                  disabled={loading || isAgentCSelected || isAgentDSelected}
                 />
               </div>
 

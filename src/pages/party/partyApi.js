@@ -79,6 +79,22 @@ export function setPartyRoomAgentMemberAccess(roomId, partyAgentMemberEnabled) {
   });
 }
 
+export function setPartyRoomMemberMute(roomId, memberUserId, muted) {
+  const safeRoomId = String(roomId || "").trim();
+  const safeMemberUserId = String(memberUserId || "").trim();
+  return request(
+    `/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/members/${encodeURIComponent(
+      safeMemberUserId,
+    )}/mute`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        muted: !!muted,
+      }),
+    },
+  );
+}
+
 export function dissolvePartyRoom(roomId) {
   const safeRoomId = String(roomId || "").trim();
   return request(`/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}`, {

@@ -170,6 +170,20 @@
   gap: 6px;
 }
 
+.image-mobile-shell .image-generated-strip {
+  gap: 7px;
+}
+
+.image-mobile-shell .image-generated-thumb {
+  min-width: 64px;
+  width: 64px;
+}
+
+.image-mobile-shell .image-generated-thumb img {
+  width: 54px;
+  height: 54px;
+}
+
 .image-mobile-shell .image-action-btn {
   min-height: 34px;
   border-radius: 10px;

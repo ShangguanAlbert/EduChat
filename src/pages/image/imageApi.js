@@ -11,6 +11,7 @@ async function readJsonSafe(resp) {
 
 export async function streamSeedreamGeneration({
   prompt,
+  model,
   size,
   sequentialMode,
   maxImages,
@@ -23,6 +24,7 @@ export async function streamSeedreamGeneration({
 }) {
   const formData = new FormData();
   formData.append("prompt", String(prompt || ""));
+  formData.append("model", String(model || ""));
   formData.append("size", String(size || ""));
   formData.append("mode", String(sequentialMode || "disabled"));
   formData.append("maxImages", String(maxImages || 15));

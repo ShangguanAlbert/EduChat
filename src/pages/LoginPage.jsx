@@ -17,10 +17,8 @@ import { EMPTY_AUTH_STATUS, PRIVACY_POLICY_SECTIONS } from "./login/loginConstan
 import {
   DEFAULT_TEACHER_SCOPE_KEY,
   TEACHER_SCOPE_OPTIONS,
-  getTeacherScopeLabel,
 } from "../../shared/teacherScopes.js";
 import {
-  findFixedStudentLoginRuleByUsername,
   resolveFixedStudentTeacherScopeKeyByUsername,
 } from "./login/fixedStudentLoginRules.js";
 import "../styles/login.css";
@@ -76,15 +74,6 @@ export default function LoginPage() {
     () => resolveFixedStudentTeacherScopeKeyByUsername(username),
     [username],
   );
-  const fixedStudentLoginRule = useMemo(
-    () => findFixedStudentLoginRuleByUsername(username),
-    [username],
-  );
-  const lockedTeacherScopeLabel = useMemo(
-    () => (lockedTeacherScopeKey ? getTeacherScopeLabel(lockedTeacherScopeKey) : ""),
-    [lockedTeacherScopeKey],
-  );
-
   useEffect(() => {
     if (lockedTeacherScopeKey && teacherScopeKey !== lockedTeacherScopeKey) {
       setTeacherScopeKey(lockedTeacherScopeKey);
@@ -306,9 +295,9 @@ export default function LoginPage() {
     <div className="login-page">
       <div className="login-shell">
         <div className="login-brand">
-          <div className="login-logo">E</div>
+          <div className="login-logo">元</div>
           <div>
-            <div className="login-title">EduChat</div>
+            <div className="login-title">元协坊</div>
           </div>
         </div>
 
@@ -355,11 +344,6 @@ export default function LoginPage() {
               onChange={setTeacherScopeKey}
               disabled={!!lockedTeacherScopeKey}
             />
-            {lockedTeacherScopeKey ? (
-              <p className="login-field-note">
-                {`检测到预置学生账号“${fixedStudentLoginRule?.username || username.trim()}”，授课教师已自动锁定为“${lockedTeacherScopeLabel}”。`}
-              </p>
-            ) : null}
           </div>
 
           <div className="login-consent-row">
@@ -436,6 +420,10 @@ export default function LoginPage() {
             </button>
           </div>
         </form>
+        <div className="login-license" aria-label="开源协议声明">
+          <p>开源协议：本项目遵循 GNU AGPL v3.0。</p>
+          <p>Copyright © 上官福泽 2026</p>
+        </div>
       </div>
 
       <button

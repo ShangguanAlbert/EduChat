@@ -86,6 +86,11 @@ const DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   E: "openrouter",
 });
 const SIDEBAR_VISIBILITY_STORAGE_KEY = "chat_sidebar_visible";
+const TEACHER_SCOPE_YANG_JUNFENG = "yang-junfeng";
+const AGENT_C_LOCKED_PROVIDER = "volcengine";
+const LOCKED_AGENT_BY_TEACHER_SCOPE = Object.freeze({
+  [TEACHER_SCOPE_YANG_JUNFENG]: "C",
+});
 
 function detectMobileViewport() {
   if (typeof window === "undefined") return false;
@@ -116,24 +121,41 @@ function sanitizeProvider(value, fallback = "openrouter") {
 
 function sanitizeAgentProviderDefaults(raw) {
   const source = raw && typeof raw === "object" ? raw : {};
-  return {
+  const next = {
     A: sanitizeProvider(source.A, DEFAULT_AGENT_PROVIDER_MAP.A),
     B: sanitizeProvider(source.B, DEFAULT_AGENT_PROVIDER_MAP.B),
     C: sanitizeProvider(source.C, DEFAULT_AGENT_PROVIDER_MAP.C),
     D: sanitizeProvider(source.D, DEFAULT_AGENT_PROVIDER_MAP.D),
     E: sanitizeProvider(source.E, DEFAULT_AGENT_PROVIDER_MAP.E),
   };
+  next.C = AGENT_C_LOCKED_PROVIDER;
+  return next;
 }
 
 function resolveAgentProvider(agentId, runtimeConfig, providerDefaults) {
+  const safeAgentId = AGENT_META[agentId] ? agentId : "A";
+  if (safeAgentId === "C") {
+    return AGENT_C_LOCKED_PROVIDER;
+  }
   const runtimeProvider = String(runtimeConfig?.provider || "")
     .trim()
     .toLowerCase();
   if (runtimeProvider && runtimeProvider !== "inherit") {
     return sanitizeProvider(runtimeProvider, "openrouter");
   }
-  const safeAgentId = AGENT_META[agentId] ? agentId : "A";
   return sanitizeProvider(providerDefaults?.[safeAgentId], DEFAULT_AGENT_PROVIDER_MAP[safeAgentId]);
+}
+
+function normalizeTeacherScopeKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function resolveLockedAgentByTeacherScope(teacherScopeKey) {
+  const normalized = normalizeTeacherScopeKey(teacherScopeKey);
+  const lockedAgent = LOCKED_AGENT_BY_TEACHER_SCOPE[normalized] || "";
+  return sanitizeSmartContextAgentId(lockedAgent);
 }
 
 function resolveRuntimeConfigForAgent(agentId, runtimeConfigs) {
@@ -379,6 +401,51 @@ function ensureAgentBySessionMap(map, sessions, fallbackAgent = "A") {
   return next;
 }
 
+function lockAgentBySessionMap(map, sessions, lockedAgentId) {
+  const safeLockedAgentId = sanitizeSmartContextAgentId(lockedAgentId);
+  if (!safeLockedAgentId) return sanitizeAgentBySessionMap(map);
+
+  const source = sanitizeAgentBySessionMap(map);
+  const next = {};
+  let changed = false;
+  const validSessionIds = new Set();
+
+  if (Array.isArray(sessions)) {
+    sessions.slice(0, 600).forEach((session) => {
+      const sessionId = sanitizeSmartContextSessionId(session?.id);
+      if (!sessionId) return;
+      validSessionIds.add(sessionId);
+      if (source[sessionId] !== safeLockedAgentId) changed = true;
+      next[sessionId] = safeLockedAgentId;
+    });
+  }
+
+  Object.keys(source).forEach((sessionId) => {
+    if (!validSessionIds.has(sessionId)) {
+      changed = true;
+    }
+  });
+
+  if (!changed && Object.keys(next).length === Object.keys(source).length) {
+    return source;
+  }
+  return next;
+}
+
+function enableSmartContextForAgentSessions(map, sessions, agentId) {
+  const safeAgentId = sanitizeSmartContextAgentId(agentId);
+  if (!safeAgentId) return sanitizeSmartContextEnabledMap(map);
+
+  let next = sanitizeSmartContextEnabledMap(map);
+  if (!Array.isArray(sessions) || sessions.length === 0) return next;
+  sessions.slice(0, 600).forEach((session) => {
+    const sessionId = sanitizeSmartContextSessionId(session?.id);
+    if (!sessionId) return;
+    next = patchSmartContextEnabledBySessionAgent(next, sessionId, safeAgentId, true);
+  });
+  return next;
+}
+
 export default function ChatDesktopPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -417,6 +484,7 @@ export default function ChatDesktopPage() {
   const [isMobileViewport, setIsMobileViewport] = useState(detectMobileViewport);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [bootstrapError, setBootstrapError] = useState("");
+  const [teacherScopeKey, setTeacherScopeKey] = useState("");
   const [dismissedRoundWarningBySession, setDismissedRoundWarningBySession] = useState({});
   const [messageBottomInset, setMessageBottomInset] = useState(0);
 
@@ -459,6 +527,11 @@ export default function ChatDesktopPage() {
   const roundWarningDismissed = !!dismissedRoundWarningBySession[activeId];
   const userInfoComplete = useMemo(() => isUserInfoComplete(userInfo), [userInfo]);
   const interactionLocked = bootstrapLoading || forceUserInfoModal || userInfoSaving;
+  const teacherLockedAgentId = useMemo(
+    () => resolveLockedAgentByTeacherScope(teacherScopeKey),
+    [teacherScopeKey],
+  );
+  const teacherScopedAgentLocked = !!teacherLockedAgentId;
   const activeAgent = useMemo(() => AGENT_META[agent] || AGENT_META.A, [agent]);
   const activeRuntimeConfig = useMemo(
     () => resolveRuntimeConfigForAgent(agent, agentRuntimeConfigs),
@@ -478,13 +551,19 @@ export default function ChatDesktopPage() {
     [smartContextEnabledBySessionAgent, activeId, agent],
   );
   const smartContextSupported = activeProvider === "volcengine";
-  const effectiveSmartContextEnabled = smartContextSupported && smartContextEnabled;
+  const effectiveSmartContextEnabled =
+    smartContextSupported && (teacherScopedAgentLocked || smartContextEnabled);
   const smartContextToggleDisabled =
-    isStreaming || interactionLocked || !smartContextSupported;
-  const smartContextInfoTitle = smartContextSupported
-    ? "开启后将锁定当前智能体进行对话，不得切换智能体"
-    : "仅火山引擎智能体支持智能上下文管理，当前智能体已默认关闭";
-  const agentSwitchLocked = effectiveSmartContextEnabled;
+    teacherScopedAgentLocked || isStreaming || interactionLocked || !smartContextSupported;
+  const smartContextInfoTitle = teacherScopedAgentLocked
+    ? "当前授课教师已锁定远程教育智能体，并强制开启智能上下文管理。"
+    : smartContextSupported
+      ? "开启后将锁定当前智能体进行对话，不得切换智能体"
+      : "仅火山引擎智能体支持智能上下文管理，当前智能体已默认关闭";
+  const agentSwitchLocked = teacherScopedAgentLocked || effectiveSmartContextEnabled;
+  const agentSelectDisabledTitle = teacherScopedAgentLocked
+    ? "当前授课教师下已锁定为“远程教育”智能体。"
+    : "开启智能上下文管理后，需先关闭开关才能切换智能体。";
   const makeRuntimeSnapshot = (agentId = agent) => {
     const runtime = resolveRuntimeConfigForAgent(agentId, agentRuntimeConfigs);
     return createRuntimeSnapshot({
@@ -645,9 +724,16 @@ export default function ChatDesktopPage() {
 
   function onNewChat() {
     const next = createNewSessionRecord();
+    const nextAgentId = teacherLockedAgentId || agent;
     setSessions((prev) => [next.session, ...prev]);
     setSessionMessages((prev) => ({ ...prev, [next.session.id]: next.messages }));
-    setAgentBySession((prev) => patchAgentBySession(prev, next.session.id, agent));
+    setAgentBySession((prev) => patchAgentBySession(prev, next.session.id, nextAgentId));
+    if (teacherScopedAgentLocked) {
+      setSmartContextEnabledBySessionAgent((prev) =>
+        patchSmartContextEnabledBySessionAgent(prev, next.session.id, nextAgentId, true),
+      );
+      setAgent(nextAgentId);
+    }
     if (next.messages[0]) {
       queueMessageUpsert(next.session.id, next.messages[0]);
     }
@@ -716,7 +802,7 @@ export default function ChatDesktopPage() {
   }
 
   function onAgentChange(nextAgent) {
-    if (agentSwitchLocked) return;
+    if (teacherScopedAgentLocked || agentSwitchLocked) return;
     setAgent(nextAgent);
     setAgentBySession((prev) => patchAgentBySession(prev, activeId, nextAgent));
   }
@@ -773,6 +859,7 @@ export default function ChatDesktopPage() {
   }
 
   function onToggleSmartContext(enabled) {
+    if (teacherScopedAgentLocked) return;
     const nextEnabled = !!enabled;
     setSmartContextEnabledBySessionAgent((prev) =>
       patchSmartContextEnabledBySessionAgent(prev, activeId, agent, nextEnabled),
@@ -1733,6 +1820,8 @@ export default function ChatDesktopPage() {
         const rawActiveId = String(state.activeId || nextSessions[0]?.id || "s1");
         const stateSettings =
           state.settings && typeof state.settings === "object" ? state.settings : {};
+        const nextTeacherScopeKey = normalizeTeacherScopeKey(data?.teacherScopeKey);
+        const lockedAgentId = resolveLockedAgentByTeacherScope(nextTeacherScopeKey);
         const nextRuntimeConfigs = sanitizeRuntimeConfigMap(data?.agentRuntimeConfigs);
         const nextProviderDefaults = sanitizeAgentProviderDefaults(data?.agentProviderDefaults);
         const restoreContext = location.state?.fromImageGeneration
@@ -1741,11 +1830,12 @@ export default function ChatDesktopPage() {
             )
           : null;
 
-        const fallbackAgent = AGENT_META[stateSettings.agent] ? stateSettings.agent : "A";
+        const fallbackAgent =
+          lockedAgentId || (AGENT_META[stateSettings.agent] ? stateSettings.agent : "A");
         const nextAppliedReasoning = normalizeReasoningEffort(
           stateSettings.lastAppliedReasoning ?? "high",
         );
-        const nextSmartContextEnabledMap = sanitizeSmartContextEnabledMap(
+        let nextSmartContextEnabledMap = sanitizeSmartContextEnabledMap(
           stateSettings.smartContextEnabledBySessionAgent,
         );
 
@@ -1768,11 +1858,23 @@ export default function ChatDesktopPage() {
           resolvedSessions,
           fallbackAgent,
         );
-        if (canRestoreSession && restoreContext?.agentId && AGENT_META[restoreContext.agentId]) {
+        if (
+          !lockedAgentId &&
+          canRestoreSession &&
+          restoreContext?.agentId &&
+          AGENT_META[restoreContext.agentId]
+        ) {
           nextAgentBySession = patchAgentBySession(
             nextAgentBySession,
             restoreContext.sessionId,
             restoreContext.agentId,
+          );
+        }
+        if (lockedAgentId) {
+          nextAgentBySession = lockAgentBySessionMap(
+            nextAgentBySession,
+            resolvedSessions,
+            lockedAgentId,
           );
         }
 
@@ -1796,6 +1898,14 @@ export default function ChatDesktopPage() {
             nextSmartContextEnabledMap[legacyKey] = true;
           }
         }
+        if (lockedAgentId) {
+          const forcedSmartContextMap = enableSmartContextForAgentSessions(
+            nextSmartContextEnabledMap,
+            resolvedSessions,
+            lockedAgentId,
+          );
+          nextSmartContextEnabledMap = forcedSmartContextMap;
+        }
 
         setGroups(nextGroups);
         setSessions(resolvedSessions);
@@ -1805,6 +1915,7 @@ export default function ChatDesktopPage() {
         setAgentBySession(nextAgentBySession);
         setAgentRuntimeConfigs(nextRuntimeConfigs);
         setAgentProviderDefaults(nextProviderDefaults);
+        setTeacherScopeKey(nextTeacherScopeKey);
         setApiTemperature(nextApiTemperature);
         setApiTopP(nextApiTopP);
         setApiReasoningEffort(nextApiReasoning);
@@ -2082,7 +2193,7 @@ export default function ChatDesktopPage() {
               value={agent}
               onChange={onAgentChange}
               disabled={agentSwitchLocked}
-              disabledTitle="开启智能上下文管理后，需先关闭开关才能切换智能体。"
+              disabledTitle={agentSelectDisabledTitle}
             />
             <div
               className={`smart-context-control${!smartContextSupported ? " is-disabled" : ""}`}

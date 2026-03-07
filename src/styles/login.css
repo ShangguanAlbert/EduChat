@@ -16,6 +16,12 @@
   box-sizing: border-box;
 }
 
+.login-page,
+.login-page *:not(input):not(textarea) {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .login-page {
   height: 100vh;
   width: 100vw;
@@ -261,6 +267,22 @@
 .login-link-btn:hover {
   color: #345b9f;
   text-decoration: underline;
+}
+
+.login-license {
+  margin-top: 12px;
+  text-align: center;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.login-license p {
+  margin: 0;
+}
+
+.login-license p + p {
+  margin-top: 2px;
 }
 
 .login-footer-divider {

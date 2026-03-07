@@ -5,6 +5,7 @@ export const VOLCENGINE_FIXED_TOP_P = 0.95;
 const AGENT_D_FIXED_PROVIDER = "aliyun";
 const AGENT_D_FIXED_MODEL = "qwen3.5-plus";
 const AGENT_D_FIXED_MAX_OUTPUT_TOKENS = 65536;
+const AGENT_C_FIXED_PROVIDER = "volcengine";
 const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
 const RUNTIME_MAX_INPUT_TOKENS = 512000;
 const RUNTIME_MAX_OUTPUT_TOKENS = 1048576;
@@ -601,7 +602,10 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
   const source = raw && typeof raw === "object" ? raw : {};
   const normalizedAgentId = AGENT_IDS.includes(agentId) ? agentId : "A";
   const defaults = getDefaultRuntimeConfigByAgent(normalizedAgentId);
-  const provider = sanitizeProvider(source.provider);
+  const provider =
+    normalizedAgentId === "C"
+      ? AGENT_C_FIXED_PROVIDER
+      : sanitizeProvider(source.provider);
   const protocol = sanitizeProtocol(source.protocol);
   const model = sanitizeModel(source.model);
   const modelForMatching = model || getDefaultModelByAgent(normalizedAgentId);
@@ -833,6 +837,10 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
     if (shouldApplyBootDefaults) {
       next.protocol = "responses";
     }
+  }
+
+  if (normalizedAgentId === "C") {
+    next.provider = AGENT_C_FIXED_PROVIDER;
   }
 
   return next;
