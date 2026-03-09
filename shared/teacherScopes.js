@@ -1,8 +1,10 @@
 export const DEFAULT_TEACHER_SCOPE_KEY = "default";
+export const SHANGGUAN_FUZE_TEACHER_SCOPE_KEY = "shangguan-fuze";
+export const YANG_JUNFENG_TEACHER_SCOPE_KEY = "yang-junfeng";
 
 export const TEACHER_SCOPE_OPTIONS = Object.freeze([
-  { key: "shangguan-fuze", label: "上官福泽" },
-  { key: "yang-junfeng", label: "杨俊锋" },
+  { key: SHANGGUAN_FUZE_TEACHER_SCOPE_KEY, label: "上官福泽" },
+  { key: YANG_JUNFENG_TEACHER_SCOPE_KEY, label: "杨俊锋" },
   { key: DEFAULT_TEACHER_SCOPE_KEY, label: "默认" },
 ]);
 

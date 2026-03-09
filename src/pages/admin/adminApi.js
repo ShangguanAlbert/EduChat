@@ -61,8 +61,27 @@ export function fetchAdminAgentSettings(adminToken) {
   return request("/api/auth/admin/agent-settings", adminToken);
 }
 
+export function fetchAdminOnlinePresence(adminToken, className = "") {
+  const safeClassName = String(className || "").trim();
+  const path = safeClassName
+    ? `/api/auth/admin/online-presence?className=${encodeURIComponent(safeClassName)}`
+    : "/api/auth/admin/online-presence";
+  return request(path, adminToken);
+}
+
 export function saveAdminAgentSettings(adminToken, payload) {
   return request("/api/auth/admin/agent-settings", adminToken, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function fetchAdminClassroomSettings(adminToken) {
+  return request("/api/auth/admin/classroom-settings", adminToken);
+}
+
+export function saveAdminClassroomSettings(adminToken, payload) {
+  return request("/api/auth/admin/classroom-settings", adminToken, {
     method: "PUT",
     body: JSON.stringify(payload),
   });

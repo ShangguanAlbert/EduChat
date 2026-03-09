@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import ModalOverlay from "../components/login/ModalOverlay.jsx";
 import PortalSelect from "../components/PortalSelect.jsx";
 import { setStoredAuthUser, setUserToken, withAuthSlot } from "../app/authStorage.js";
@@ -16,6 +16,7 @@ import { setAdminToken } from "./login/adminSession.js";
 import { EMPTY_AUTH_STATUS, PRIVACY_POLICY_SECTIONS } from "./login/loginConstants.js";
 import {
   DEFAULT_TEACHER_SCOPE_KEY,
+  SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
   TEACHER_SCOPE_OPTIONS,
 } from "../../shared/teacherScopes.js";
 import {
@@ -132,7 +133,18 @@ export default function LoginPage() {
         teacherScopeKey: data.teacherScopeKey || teacherScopeKey,
         teacherScopeLabel: data.teacherScopeLabel || "",
       });
-      navigate(withAuthSlot("/chat"));
+      const nextTeacherScopeKey = String(
+        data.teacherScopeKey || teacherScopeKey || DEFAULT_TEACHER_SCOPE_KEY,
+      )
+        .trim()
+        .toLowerCase();
+      navigate(
+        withAuthSlot(
+          nextTeacherScopeKey === SHANGGUAN_FUZE_TEACHER_SCOPE_KEY
+            ? "/mode-selection"
+            : "/chat",
+        ),
+      );
     } catch (error) {
       setErr(readErrorMessage(error));
     } finally {
@@ -421,8 +433,14 @@ export default function LoginPage() {
           </div>
         </form>
         <div className="login-license" aria-label="开源协议声明">
-          <p>开源协议：本项目遵循 GNU AGPL v3.0。</p>
-          <p>Copyright © 上官福泽 2026</p>
+          <p>
+            开源协议：本项目遵循{" "}
+            <Link className="login-license-link" to={withAuthSlot("/license")}>
+              GNU AGPL v3.0
+            </Link>
+            .
+          </p>
+          <p>Copyright © 2026 上官福泽</p>
         </div>
       </div>
 

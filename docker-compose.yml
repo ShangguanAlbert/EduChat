@@ -58,7 +58,7 @@ services:
       MONGO_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME:-admin}:${MONGO_INITDB_ROOT_PASSWORD:-change_me}@mongo:27017/${MONGO_DB_NAME:-educhat}?authSource=admin
       GROUP_CHAT_BUTLER_REDIS_URL: redis://redis:6379
     ports:
-      - "8787:8787"
+      - "3080:8787"
     healthcheck:
       test:
         [

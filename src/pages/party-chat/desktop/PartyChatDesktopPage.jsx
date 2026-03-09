@@ -4483,6 +4483,8 @@ function normalizeMessage(raw) {
   if (!id) return null;
   const type = String(raw?.type || "").trim().toLowerCase();
   if (type !== "text" && type !== "image" && type !== "file" && type !== "system") return null;
+  const systemContent = type === "system" ? normalizeSystemMessageContent(raw?.content) : "";
+  if (type === "system" && !systemContent) return null;
   const image = raw?.image && typeof raw.image === "object"
     ? {
         dataUrl: String(raw.image.dataUrl || "").trim(),
@@ -4513,10 +4515,7 @@ function normalizeMessage(raw) {
     type,
     senderUserId: String(raw?.senderUserId || "").trim(),
     senderName: String(raw?.senderName || (type === "system" ? "系统" : "用户")),
-    content:
-      type === "system"
-        ? normalizeSystemMessageContent(raw?.content)
-        : String(raw?.content || ""),
+    content: type === "system" ? systemContent : String(raw?.content || ""),
     replyToMessageId: String(raw?.replyToMessageId || "").trim(),
     replyPreviewText: String(raw?.replyPreviewText || ""),
     replySenderName: String(raw?.replySenderName || ""),
@@ -4528,9 +4527,14 @@ function normalizeMessage(raw) {
 }
 
 function normalizeSystemMessageContent(text) {
-  return String(text || "")
+  const normalized = String(text || "")
     .replaceAll("创建了群聊", "创建了派")
-    .replaceAll("加入了群聊", "加入了派");
+    .replaceAll("加入了群聊", "加入了派")
+    .trim();
+  if (!normalized) return "";
+  if (normalized.includes("创建了派")) return "";
+  if (normalized.includes("禁言了") || normalized.includes("解除禁言")) return "";
+  return normalized;
 }
 
 function normalizeMessageReactions(rawReactions) {

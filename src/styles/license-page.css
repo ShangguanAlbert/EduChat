@@ -1,0 +1,94 @@
+:root {
+  --license-bg: #edf1f7;
+  --license-card-bg: #ffffff;
+  --license-border: #d8dee8;
+  --license-text: #111827;
+  --license-muted: #6b7280;
+  --license-link: #345b9f;
+}
+
+.license-page {
+  min-height: 100vh;
+  padding: 24px;
+  background:
+    radial-gradient(960px 480px at 10% 14%, rgba(116, 148, 197, 0.18), transparent 62%),
+    radial-gradient(640px 380px at 92% 18%, rgba(178, 192, 218, 0.2), transparent 55%),
+    linear-gradient(180deg, #f1f4f9, var(--license-bg));
+}
+
+.license-card {
+  width: min(900px, 100%);
+  margin: 0 auto;
+  border-radius: 22px;
+  border: 1px solid var(--license-border);
+  background: var(--license-card-bg);
+  box-shadow: 0 28px 60px rgba(15, 23, 42, 0.16);
+  padding: 20px;
+}
+
+.license-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.license-back-link {
+  width: fit-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--license-link);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.license-back-link:hover {
+  text-decoration: underline;
+}
+
+.license-title {
+  margin: 0;
+  color: var(--license-text);
+  font-size: 24px;
+}
+
+.license-subtitle {
+  margin: 0;
+  color: var(--license-muted);
+  font-size: 13px;
+}
+
+.license-content {
+  margin: 18px 0 0;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  background: #f8fafc;
+  color: #1f2937;
+  font-size: 13px;
+  line-height: 1.6;
+  font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+}
+
+@media (max-width: 640px) {
+  .license-page {
+    padding: 12px;
+  }
+
+  .license-card {
+    border-radius: 16px;
+    padding: 14px;
+  }
+
+  .license-title {
+    font-size: 20px;
+  }
+
+  .license-content {
+    max-height: calc(100vh - 180px);
+  }
+}

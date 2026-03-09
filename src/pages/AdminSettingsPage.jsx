@@ -1311,10 +1311,12 @@ export default function AdminSettingsPage() {
     await persistSettings();
   }
 
-  function onLogoutAdmin() {
-    clearAdminToken();
-    setAdminToken("");
-    navigate(withAuthSlot("/login", activeSlot), { replace: true });
+  function onBackToOnlinePanel() {
+    navigate(withAuthSlot("/admin/settings", activeSlot));
+  }
+
+  function onOpenClassroomSettings() {
+    navigate(withAuthSlot("/admin/classroom-settings", activeSlot));
   }
 
   async function onExportUsers() {
@@ -1989,9 +1991,9 @@ export default function AdminSettingsPage() {
             <button
               type="button"
               className="admin-icon-btn"
-              onClick={onLogoutAdmin}
-              title="返回登录页"
-              aria-label="返回登录页"
+              onClick={onBackToOnlinePanel}
+              title="返回在线面板"
+              aria-label="返回在线面板"
             >
               <ArrowLeft size={18} />
             </button>
@@ -2021,6 +2023,15 @@ export default function AdminSettingsPage() {
                   ? `保存时间 ${formatClock(lastSavedAt)}`
                   : "保存时间 --:--:--"}
             </div>
+            <button
+              type="button"
+              className="admin-ghost-btn"
+              onClick={onOpenClassroomSettings}
+              title="打开课堂任务设置"
+              aria-label="打开课堂任务设置"
+            >
+              <span>课堂任务设置</span>
+            </button>
             <button
               type="button"
               className="admin-save-btn"

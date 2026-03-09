@@ -52,6 +52,7 @@ import {
 } from "./providers/aliyun/constants.js";
 import {
   DEFAULT_TEACHER_SCOPE_KEY,
+  SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
   buildTeacherScopedStorageUserId,
   getTeacherScopeLabel,
   isDefaultTeacherScopeKey,
@@ -69,6 +70,7 @@ const app = express();
 const groupChatWsRoomSockets = new Map();
 const groupChatWsMetaBySocket = new Map();
 const groupChatWsOnlineCountsByRoom = new Map();
+const userOnlinePresenceByUserId = new Map();
 const chatPreparedAttachmentCache = new Map();
 let groupChatExpiredFileCleanupTimer = null;
 let generatedImageExpiredCleanupTimer = null;
@@ -91,11 +93,17 @@ const EXCEL_PREVIEW_MAX_SHEETS = 8;
 const PASSWORD_MIN_LENGTH = 6;
 const AUTH_TOKEN_TTL_SECONDS = 12 * 60 * 60;
 const ADMIN_TOKEN_TTL_SECONDS = 2 * 60 * 60;
+const USER_ONLINE_ACTIVITY_WINDOW_MS = 5 * 60 * 1000;
+const USER_ONLINE_PRESENCE_RETENTION_MS = 24 * 60 * 60 * 1000;
+const USER_BROWSER_HEARTBEAT_INTERVAL_MS = 20 * 1000;
+const USER_BROWSER_HEARTBEAT_STALE_MS = 70 * 1000;
 const AGENT_IDS = ["A", "B", "C", "D"];
 const ADMIN_CONFIG_KEY = "global";
 const TEACHER_SCOPE_LOCKED_AGENT_MAP = Object.freeze({
   "yang-junfeng": "C",
 });
+const CLASSROOM_FIRST_LESSON_DATE = "2026-03-11";
+const CLASSROOM_QUESTIONNAIRE_URL = "https://v.wjx.cn/vm/PQfZjgr.aspx#";
 const VOLCENGINE_IMAGE_GENERATION_MODEL_ID_45 = "doubao-seedream-4-5-251128";
 const VOLCENGINE_IMAGE_GENERATION_MODEL_ID_50 = "doubao-seedream-5-0-260128";
 const DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL =
@@ -1458,6 +1466,10 @@ const adminConfigSchema = new mongoose.Schema(
       ),
       default: () => createDefaultAgentRuntimeConfigMap(),
     },
+    shangguanClassTaskProductImprovementEnabled: {
+      type: Boolean,
+      default: false,
+    },
   },
   {
     timestamps: true,
@@ -1517,12 +1529,44 @@ app.get("/api/chat/bootstrap", requireChatAuth, async (req, res) => {
   });
 });
 
+app.get("/api/classroom/tasks/settings", requireChatAuth, async (req, res) => {
+  const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
+  const isShangguanTeacher = teacherScopeKey === SHANGGUAN_FUZE_TEACHER_SCOPE_KEY;
+  let productImprovementEnabled = false;
+
+  if (isShangguanTeacher) {
+    const config = await readAdminAgentConfig();
+    productImprovementEnabled = !!config.shangguanClassTaskProductImprovementEnabled;
+  }
+
+  res.json({
+    ok: true,
+    teacherScopeKey,
+    teacherScopeLabel: getTeacherScopeLabel(teacherScopeKey),
+    classroomTaskEnabled: isShangguanTeacher,
+    firstLessonDate: CLASSROOM_FIRST_LESSON_DATE,
+    questionnaireUrl: CLASSROOM_QUESTIONNAIRE_URL,
+    productImprovementEnabled,
+  });
+});
+
 app.get("/api/user/profile", requireChatAuth, async (req, res) => {
   const profile = sanitizeUserProfile(req.authUser.profile);
   res.json({
     ok: true,
     profile,
     profileComplete: isUserProfileComplete(profile),
+  });
+});
+
+app.post("/api/user/presence/heartbeat", requireChatAuth, async (req, res) => {
+  const nowMs = Date.now();
+  markUserOnlinePresence(req.authUser, nowMs);
+  markUserOnlineBrowserHeartbeat(req.authUser, nowMs);
+  res.json({
+    ok: true,
+    at: new Date(nowMs).toISOString(),
+    heartbeatStaleSeconds: Math.floor(USER_BROWSER_HEARTBEAT_STALE_MS / 1000),
   });
 });
 
@@ -1745,6 +1789,7 @@ app.post("/api/auth/login", async (req, res) => {
     },
     AUTH_TOKEN_TTL_SECONDS,
   );
+  markUserOnlinePresence(user);
 
   res.json({
     ok: true,
@@ -1912,6 +1957,14 @@ app.put("/api/auth/admin/agent-settings", async (req, res) => {
   const runtimeConfigs = sanitizeAgentRuntimeConfigsPayload(
     req.body?.runtimeConfigs,
   );
+  const previous = await readAdminAgentConfig();
+  const hasClassroomToggle = Object.prototype.hasOwnProperty.call(
+    req.body || {},
+    "shangguanClassTaskProductImprovementEnabled",
+  );
+  const shangguanClassTaskProductImprovementEnabled = hasClassroomToggle
+    ? sanitizeRuntimeBoolean(req.body?.shangguanClassTaskProductImprovementEnabled, false)
+    : !!previous.shangguanClassTaskProductImprovementEnabled;
 
   const doc = await AdminConfig.findOneAndUpdate(
     { key: ADMIN_CONFIG_KEY },
@@ -1920,6 +1973,7 @@ app.put("/api/auth/admin/agent-settings", async (req, res) => {
         key: ADMIN_CONFIG_KEY,
         agentSystemPrompts: prompts,
         agentRuntimeConfigs: runtimeConfigs,
+        shangguanClassTaskProductImprovementEnabled,
       },
     },
     {
@@ -1931,6 +1985,54 @@ app.put("/api/auth/admin/agent-settings", async (req, res) => {
 
   const config = normalizeAdminConfigDoc(doc);
   res.json(buildAdminAgentSettingsResponse(config));
+});
+
+app.get("/api/auth/admin/classroom-settings", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+  const config = await readAdminAgentConfig();
+  res.json({
+    ok: true,
+    firstLessonDate: CLASSROOM_FIRST_LESSON_DATE,
+    questionnaireUrl: CLASSROOM_QUESTIONNAIRE_URL,
+    shangguanClassTaskProductImprovementEnabled:
+      !!config.shangguanClassTaskProductImprovementEnabled,
+    heartbeatIntervalSeconds: Math.floor(USER_BROWSER_HEARTBEAT_INTERVAL_MS / 1000),
+    heartbeatStaleSeconds: Math.floor(USER_BROWSER_HEARTBEAT_STALE_MS / 1000),
+    updatedAt: config.updatedAt,
+  });
+});
+
+app.put("/api/auth/admin/classroom-settings", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+  const shangguanClassTaskProductImprovementEnabled = sanitizeRuntimeBoolean(
+    req.body?.shangguanClassTaskProductImprovementEnabled,
+    false,
+  );
+  const doc = await AdminConfig.findOneAndUpdate(
+    { key: ADMIN_CONFIG_KEY },
+    {
+      $set: {
+        key: ADMIN_CONFIG_KEY,
+        shangguanClassTaskProductImprovementEnabled,
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+    },
+  ).lean();
+  const config = normalizeAdminConfigDoc(doc);
+  res.json({
+    ok: true,
+    firstLessonDate: CLASSROOM_FIRST_LESSON_DATE,
+    questionnaireUrl: CLASSROOM_QUESTIONNAIRE_URL,
+    shangguanClassTaskProductImprovementEnabled:
+      !!config.shangguanClassTaskProductImprovementEnabled,
+    heartbeatIntervalSeconds: Math.floor(USER_BROWSER_HEARTBEAT_INTERVAL_MS / 1000),
+    heartbeatStaleSeconds: Math.floor(USER_BROWSER_HEARTBEAT_STALE_MS / 1000),
+    updatedAt: config.updatedAt,
+  });
 });
 
 app.get("/api/auth/admin/agent-e/settings", async (req, res) => {
@@ -1989,6 +2091,82 @@ app.get("/api/auth/admin/users", async (req, res) => {
       createdAt: item.createdAt,
       updatedAt: item.updatedAt,
     })),
+  });
+});
+
+app.get("/api/auth/admin/online-presence", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+
+  const classNameFilter = sanitizeText(req.query?.className, "", 40);
+  const strictBrowserOpenClassNames = new Set(["810班", "811班"]);
+  const nowMs = Date.now();
+  const onlineEntries = collectOnlinePresenceEntries(nowMs);
+  const onlineUserIds = onlineEntries.map((item) => item.userId);
+
+  if (onlineUserIds.length === 0) {
+    res.json({
+      ok: true,
+      generatedAt: new Date(nowMs).toISOString(),
+      className: classNameFilter,
+      onlineWindowSeconds: Math.floor(USER_ONLINE_ACTIVITY_WINDOW_MS / 1000),
+      totalOnlineCount: 0,
+      filteredOnlineCount: 0,
+      users: [],
+    });
+    return;
+  }
+
+  const users = await AuthUser.find(
+    { _id: { $in: onlineUserIds }, role: "user" },
+    { username: 1, profile: 1 },
+  ).lean();
+  const userById = new Map(users.map((item) => [String(item?._id || ""), item]));
+
+  const onlineUsers = onlineEntries
+    .map((entry) => {
+      const user = userById.get(entry.userId);
+      if (!user) return null;
+      const profile = sanitizeUserProfile(user.profile);
+      return {
+        userId: entry.userId,
+        username: user.username || "",
+        profile: {
+          name: profile.name || "",
+          studentId: profile.studentId || "",
+          grade: profile.grade || "",
+          className: profile.className || "",
+        },
+        lastSeenAt: sanitizeIsoDate(new Date(entry.lastSeenAtMs)) || new Date(nowMs).toISOString(),
+        browserHeartbeatAt:
+          entry.browserHeartbeatAtMs > 0
+            ? sanitizeIsoDate(new Date(entry.browserHeartbeatAtMs))
+            : null,
+      };
+    })
+    .filter(Boolean);
+
+  const effectiveOnlineUsers = onlineUsers.filter((item) => {
+    const className = sanitizeText(item?.profile?.className, "", 40);
+    if (!strictBrowserOpenClassNames.has(className)) return true;
+    const heartbeatMs = new Date(item?.browserHeartbeatAt || 0).getTime() || 0;
+    return heartbeatMs >= nowMs - USER_BROWSER_HEARTBEAT_STALE_MS;
+  });
+
+  const filteredUsers = classNameFilter
+    ? effectiveOnlineUsers.filter(
+        (item) => sanitizeText(item?.profile?.className, "", 40) === classNameFilter,
+      )
+    : effectiveOnlineUsers;
+
+  res.json({
+    ok: true,
+    generatedAt: new Date(nowMs).toISOString(),
+    className: classNameFilter,
+    onlineWindowSeconds: Math.floor(USER_ONLINE_ACTIVITY_WINDOW_MS / 1000),
+    heartbeatStaleSeconds: Math.floor(USER_BROWSER_HEARTBEAT_STALE_MS / 1000),
+    totalOnlineCount: effectiveOnlineUsers.length,
+    filteredOnlineCount: filteredUsers.length,
+    users: filteredUsers,
   });
 });
 
@@ -2989,19 +3167,6 @@ app.post("/api/group-chat/rooms", requireChatAuth, async (req, res) => {
       memberCount: 1,
     });
 
-    const systemMessageDoc = await createGroupChatSystemMessage({
-      roomId: sanitizeId(roomDoc?._id, ""),
-      content: `${buildGroupChatDisplayName(req.authUser)} 创建了派`,
-    });
-    if (systemMessageDoc?._id) {
-      await markGroupChatRoomReadByMessageId({
-        roomId: sanitizeId(roomDoc?._id, ""),
-        userId,
-        messageId: sanitizeId(systemMessageDoc?._id, ""),
-      });
-    }
-    broadcastGroupChatMessageCreated(sanitizeId(roomDoc?._id, ""), systemMessageDoc);
-
     res.json({
       ok: true,
       room: normalizeGroupChatRoomDoc(roomDoc, {
@@ -3351,14 +3516,6 @@ app.patch("/api/group-chat/rooms/:roomId/members/:memberUserId/mute", requireCha
       return;
     }
 
-    const usersById = await readGroupChatUsersByIds([targetMemberUserId]);
-    const targetUserName = sanitizeText(usersById?.[targetMemberUserId]?.name, "该成员", 30);
-    const actionText = nextMuted ? "禁言了" : "解除禁言";
-    const systemMessageDoc = await createGroupChatSystemMessage({
-      roomId,
-      content: `${buildGroupChatDisplayName(req.authUser)} ${actionText} ${targetUserName}`,
-    });
-    broadcastGroupChatMessageCreated(roomId, systemMessageDoc);
     broadcastGroupChatRoomUpdated(roomId, updatedRoom);
 
     res.json({
@@ -9809,6 +9966,10 @@ function normalizeAdminConfigDoc(doc) {
   return {
     prompts: sanitizeAgentPromptPayload(doc?.agentSystemPrompts),
     runtimeConfigs: sanitizeAgentRuntimeConfigsPayload(doc?.agentRuntimeConfigs),
+    shangguanClassTaskProductImprovementEnabled: sanitizeRuntimeBoolean(
+      doc?.shangguanClassTaskProductImprovementEnabled,
+      false,
+    ),
     updatedAt: sanitizeIsoDate(doc?.updatedAt),
   };
 }
@@ -10432,6 +10593,7 @@ function buildAdminAgentSettingsResponse(config) {
     resolvedRuntimeConfigs,
     agentProviderDefaults: buildAgentProviderDefaults(),
     agentModelDefaults: buildAgentModelDefaults(),
+    shangguanClassTaskProductImprovementEnabled: !!config.shangguanClassTaskProductImprovementEnabled,
     updatedAt: config.updatedAt,
   };
 }
@@ -10890,6 +11052,112 @@ function mapVolcengineUpstreamError({ status, code, message, param }) {
   return "";
 }
 
+function pruneExpiredUserOnlinePresence(nowMs = Date.now()) {
+  const safeNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const expiredBefore = safeNowMs - USER_ONLINE_PRESENCE_RETENTION_MS;
+  for (const [userId, entry] of userOnlinePresenceByUserId.entries()) {
+    const safeUserId = sanitizeId(userId, "");
+    const lastSeenAtMs = Number(entry?.lastSeenAtMs) || 0;
+    if (!safeUserId || lastSeenAtMs <= 0 || lastSeenAtMs < expiredBefore) {
+      userOnlinePresenceByUserId.delete(userId);
+    }
+  }
+}
+
+function markUserOnlinePresence(userOrId, seenAtMs = Date.now()) {
+  const userId =
+    typeof userOrId === "string" ? sanitizeId(userOrId, "") : sanitizeId(userOrId?._id, "");
+  if (!userId) return;
+
+  const safeSeenAtMs = Number.isFinite(seenAtMs) ? seenAtMs : Date.now();
+  const previous = userOnlinePresenceByUserId.get(userId);
+  const socketCount = sanitizeRuntimeInteger(previous?.socketCount, 0, 0, 9999);
+  const browserHeartbeatAtMs = Number(previous?.browserHeartbeatAtMs) || 0;
+  userOnlinePresenceByUserId.set(userId, {
+    userId,
+    lastSeenAtMs: safeSeenAtMs,
+    socketCount,
+    browserHeartbeatAtMs,
+  });
+  if (userOnlinePresenceByUserId.size > 200) {
+    pruneExpiredUserOnlinePresence(safeSeenAtMs);
+  }
+}
+
+function markUserOnlineBrowserHeartbeat(userOrId, seenAtMs = Date.now()) {
+  const userId =
+    typeof userOrId === "string" ? sanitizeId(userOrId, "") : sanitizeId(userOrId?._id, "");
+  if (!userId) return;
+
+  const safeSeenAtMs = Number.isFinite(seenAtMs) ? seenAtMs : Date.now();
+  const previous = userOnlinePresenceByUserId.get(userId);
+  const socketCount = sanitizeRuntimeInteger(previous?.socketCount, 0, 0, 9999);
+  const lastSeenAtMs = Number(previous?.lastSeenAtMs) || safeSeenAtMs;
+  userOnlinePresenceByUserId.set(userId, {
+    userId,
+    lastSeenAtMs,
+    socketCount,
+    browserHeartbeatAtMs: safeSeenAtMs,
+  });
+  if (userOnlinePresenceByUserId.size > 200) {
+    pruneExpiredUserOnlinePresence(safeSeenAtMs);
+  }
+}
+
+function setUserOnlineSocketPresence(userOrId, delta = 0) {
+  const userId =
+    typeof userOrId === "string" ? sanitizeId(userOrId, "") : sanitizeId(userOrId?._id, "");
+  if (!userId) return;
+
+  const safeDelta = sanitizeRuntimeInteger(delta, 0, -9999, 9999);
+  const nowMs = Date.now();
+  const previous = userOnlinePresenceByUserId.get(userId);
+  const previousCount = sanitizeRuntimeInteger(previous?.socketCount, 0, 0, 9999);
+  const nextCount = Math.max(0, previousCount + safeDelta);
+  const lastSeenAtMs = Number(previous?.lastSeenAtMs) || nowMs;
+  const browserHeartbeatAtMs = Number(previous?.browserHeartbeatAtMs) || 0;
+
+  userOnlinePresenceByUserId.set(userId, {
+    userId,
+    lastSeenAtMs,
+    socketCount: nextCount,
+    browserHeartbeatAtMs,
+  });
+  if (safeDelta > 0) {
+    markUserOnlinePresence(userId, nowMs);
+  } else if (nextCount <= 0 && nowMs - lastSeenAtMs > USER_ONLINE_PRESENCE_RETENTION_MS) {
+    userOnlinePresenceByUserId.delete(userId);
+  }
+}
+
+function collectOnlinePresenceEntries(nowMs = Date.now()) {
+  const safeNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const onlineThresholdMs = safeNowMs - USER_ONLINE_ACTIVITY_WINDOW_MS;
+  pruneExpiredUserOnlinePresence(safeNowMs);
+
+  const entries = [];
+  for (const [userId, entry] of userOnlinePresenceByUserId.entries()) {
+    const safeUserId = sanitizeId(userId, "");
+    if (!safeUserId) continue;
+    const lastSeenAtMs = Number(entry?.lastSeenAtMs) || 0;
+    const socketCount = sanitizeRuntimeInteger(entry?.socketCount, 0, 0, 9999);
+    const browserHeartbeatAtMs = Number(entry?.browserHeartbeatAtMs) || 0;
+    if (socketCount <= 0 && lastSeenAtMs < onlineThresholdMs) continue;
+    entries.push({
+      userId: safeUserId,
+      lastSeenAtMs,
+      socketCount,
+      browserHeartbeatAtMs,
+    });
+  }
+
+  entries.sort((a, b) => {
+    if (b.socketCount !== a.socketCount) return b.socketCount - a.socketCount;
+    return b.lastSeenAtMs - a.lastSeenAtMs;
+  });
+  return entries;
+}
+
 function requireChatAuth(req, res, next) {
   const token = readBearerToken(req);
   const payload = verifyToken(token);
@@ -10912,6 +11180,7 @@ function requireChatAuth(req, res, next) {
         String(user?._id || ""),
         teacherScopeKey,
       );
+      markUserOnlinePresence(user);
       next();
     })
     .catch((error) => {
@@ -13352,6 +13621,7 @@ function initGroupChatWebSocketServer(server) {
       authed: false,
       userId: "",
       userName: "",
+      presenceTracked: false,
       joinedRooms: new Set(),
       authTimer: 0,
     };
@@ -13370,6 +13640,10 @@ function initGroupChatWebSocketServer(server) {
       const currentMeta = groupChatWsMetaBySocket.get(socket);
       if (currentMeta?.authTimer) {
         clearTimeout(currentMeta.authTimer);
+      }
+      if (currentMeta?.presenceTracked && currentMeta.userId) {
+        setUserOnlineSocketPresence(currentMeta.userId, -1);
+        currentMeta.presenceTracked = false;
       }
       detachSocketFromAllGroupChatRooms(socket);
       groupChatWsMetaBySocket.delete(socket);
@@ -13406,6 +13680,10 @@ async function handleGroupChatWsMessage(socket, rawData) {
       return;
     }
     if (type === "ping") {
+      const meta = groupChatWsMetaBySocket.get(socket);
+      if (meta?.authed && meta.userId) {
+        markUserOnlinePresence(meta.userId);
+      }
       sendGroupChatWsPayload(socket, {
         type: "pong",
         at: sanitizeIsoDate(payload?.at) || new Date().toISOString(),
@@ -13441,9 +13719,26 @@ async function handleGroupChatWsAuth(socket, payload) {
     return;
   }
 
+  const nextUserId = sanitizeId(user?._id, "");
+  if (!nextUserId) {
+    sendGroupChatWsError(socket, "账号状态异常，请重新登录。", "invalid_user");
+    closeGroupChatSocket(socket, 4003, "invalid_user");
+    return;
+  }
+
+  if (meta.presenceTracked && meta.userId && meta.userId !== nextUserId) {
+    setUserOnlineSocketPresence(meta.userId, -1);
+    meta.presenceTracked = false;
+  }
+
   meta.authed = true;
-  meta.userId = sanitizeId(user?._id, "");
+  meta.userId = nextUserId;
   meta.userName = buildGroupChatDisplayName(user);
+  markUserOnlinePresence(meta.userId);
+  if (!meta.presenceTracked && meta.userId) {
+    setUserOnlineSocketPresence(meta.userId, 1);
+    meta.presenceTracked = true;
+  }
   if (meta.authTimer) {
     clearTimeout(meta.authTimer);
     meta.authTimer = 0;
@@ -14244,6 +14539,7 @@ async function ensureFixedStudentAccounts() {
     const password = String(account?.password || "");
     const className = sanitizeText(account?.className, "", 40);
     const studentId = sanitizeText(account?.studentId, "", 20);
+    const grade = sanitizeText(account?.grade, "8年级", 20);
     const lockedTeacherScopeKey = sanitizeTeacherScopeKey(
       account?.requiredTeacherScopeKey || FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
     );
@@ -14268,6 +14564,7 @@ async function ensureFixedStudentAccounts() {
         profile: {
           name: username,
           studentId,
+          grade,
           className,
         },
       });
@@ -14278,6 +14575,7 @@ async function ensureFixedStudentAccounts() {
       ...sanitizeUserProfile(existing.profile),
       name: username,
       studentId,
+      grade,
       className,
     };
     const needsUpdate =
@@ -14289,6 +14587,7 @@ async function ensureFixedStudentAccounts() {
       readLockedTeacherScopeKey(existing.lockedTeacherScopeKey) !== lockedTeacherScopeKey ||
       nextProfile.name !== sanitizeText(existing.profile?.name, "", 20) ||
       nextProfile.studentId !== sanitizeText(existing.profile?.studentId, "", 20) ||
+      nextProfile.grade !== sanitizeText(existing.profile?.grade, "", 20) ||
       nextProfile.className !== sanitizeText(existing.profile?.className, "", 40);
     if (!needsUpdate) continue;
 
