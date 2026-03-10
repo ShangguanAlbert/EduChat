@@ -7,6 +7,7 @@ import { setStoredAuthUser, setUserToken, withAuthSlot } from "../app/authStorag
 import {
   adminLogin,
   fetchAuthStatus,
+  fetchLoginTeacherScopeLock,
   loginAccount,
   registerAccount,
   resetForgotPassword,
@@ -38,10 +39,11 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [privacyAgreed, setPrivacyAgreed] = useState(false);
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
+  const [dynamicLockedTeacherScopeKey, setDynamicLockedTeacherScopeKey] = useState("");
 
   const [authStatusLoading, setAuthStatusLoading] = useState(true);
   const [authStatus, setAuthStatus] = useState(EMPTY_AUTH_STATUS);
-  const [adminNotice, setAdminNotice] = useState("");
+  const [teacherLoginLoading, setTeacherLoginLoading] = useState(false);
 
   const [showRegisterModal, setShowRegisterModal] = useState(false);
   const [registerUsername, setRegisterUsername] = useState("");
@@ -59,21 +61,40 @@ export default function LoginPage() {
   const [forgotErr, setForgotErr] = useState("");
   const [forgotSaving, setForgotSaving] = useState(false);
 
-  const [showAdminLoginModal, setShowAdminLoginModal] = useState(false);
-  const [adminUsername, setAdminUsername] = useState("");
-  const [adminPassword, setAdminPassword] = useState("");
-  const [adminLoginLoading, setAdminLoginLoading] = useState(false);
-  const [adminLoginErr, setAdminLoginErr] = useState("");
-
   const loginHint = useMemo(() => {
     if (authStatusLoading) return "正在读取账号状态…";
     if (!authStatus.hasAnyUser) return "尚未注册普通用户账号，请先点击“注册账号”。";
     return "";
   }, [authStatus.hasAnyUser, authStatusLoading]);
 
+  useEffect(() => {
+    const usernameText = String(username || "").trim();
+    if (!usernameText) {
+      setDynamicLockedTeacherScopeKey("");
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const data = await fetchLoginTeacherScopeLock(usernameText);
+        if (cancelled) return;
+        setDynamicLockedTeacherScopeKey(String(data?.lockedTeacherScopeKey || ""));
+      } catch {
+        if (cancelled) return;
+        setDynamicLockedTeacherScopeKey("");
+      }
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [username]);
+
   const lockedTeacherScopeKey = useMemo(
-    () => resolveFixedStudentTeacherScopeKeyByUsername(username),
-    [username],
+    () =>
+      resolveFixedStudentTeacherScopeKeyByUsername(username) ||
+      String(dynamicLockedTeacherScopeKey || "").trim(),
+    [dynamicLockedTeacherScopeKey, username],
   );
   useEffect(() => {
     if (lockedTeacherScopeKey && teacherScopeKey !== lockedTeacherScopeKey) {
@@ -96,9 +117,6 @@ export default function LoginPage() {
         preloadedStudentTeacherScopeKey: String(data.preloadedStudentTeacherScopeKey || ""),
         preloadedStudentTeacherScopeLabel: String(data.preloadedStudentTeacherScopeLabel || ""),
       });
-      setAdminUsername((current) =>
-        adminUsernames.includes(current) ? current : adminUsernames[0] || "",
-      );
     } catch (error) {
       setErr(readErrorMessage(error));
       setAuthStatus(EMPTY_AUTH_STATUS);
@@ -114,7 +132,6 @@ export default function LoginPage() {
   async function onSubmit(e) {
     e.preventDefault();
     setErr("");
-    setAdminNotice("");
 
     if (!username.trim()) return setErr("请输入用户名");
     if (!password) return setErr("请输入密码");
@@ -158,7 +175,6 @@ export default function LoginPage() {
     setRegisterPasswordConfirm("");
     setRegisterUsername("");
     setShowRegisterModal(true);
-    setAdminNotice("");
   }
 
   async function onRegisterSubmit(e) {
@@ -198,7 +214,6 @@ export default function LoginPage() {
     setForgotMatched(false);
     setForgotPassword("");
     setForgotPasswordConfirm("");
-    setAdminNotice("");
   }
 
   async function onVerifyForgotUsername() {
@@ -253,53 +268,33 @@ export default function LoginPage() {
     }
   }
 
-  function onAdminEntryClick() {
-    setAdminNotice("");
-    setAdminLoginErr("");
+  async function onTeacherLogin() {
+    setErr("");
     if (authStatusLoading) return;
-    if (!authStatus.hasAdmin) {
-      setAdminNotice("管理员账号未初始化。");
-      return;
-    }
+    if (!authStatus.hasAdmin) return setErr("管理员账号未初始化。");
+    if (!username.trim()) return setErr("请输入用户名");
+    if (!password) return setErr("请输入密码");
+    if (!privacyAgreed) return setErr("请先勾选并同意隐私政策");
 
-    setAdminUsername((current) => current || authStatus.adminUsernames[0] || "");
-    setAdminPassword("");
-    setShowAdminLoginModal(true);
-  }
-
-  async function onAdminLoginSubmit(e) {
-    e.preventDefault();
-    setAdminLoginErr("");
-
-    if (!adminUsername.trim()) {
-      setAdminLoginErr("请选择管理员账号。");
-      return;
-    }
-    if (!adminPassword) {
-      setAdminLoginErr("请输入管理员密码。");
-      return;
-    }
-
-    setAdminLoginLoading(true);
+    setTeacherLoginLoading(true);
     try {
       const loginData = await adminLogin({
-        username: adminUsername.trim(),
-        password: adminPassword,
+        username: username.trim(),
+        password,
       });
 
       const nextToken = String(loginData?.token || "").trim();
       if (!nextToken) {
-        setAdminLoginErr("管理员会话创建失败，请重试。");
+        setErr("教师会话创建失败，请重试。");
         return;
       }
 
       setAdminToken(nextToken);
-      setShowAdminLoginModal(false);
       navigate(withAuthSlot("/admin/settings"));
     } catch (error) {
-      setAdminLoginErr(readErrorMessage(error));
+      setErr(readErrorMessage(error));
     } finally {
-      setAdminLoginLoading(false);
+      setTeacherLoginLoading(false);
     }
   }
 
@@ -385,20 +380,30 @@ export default function LoginPage() {
           </div>
 
           <div className="login-actions">
-            <button
-              className="login-btn"
-              type="submit"
-              disabled={loading || !privacyAgreed || authStatusLoading}
-            >
-              {loading ? (
-                <span className="btn-inner">
-                  <span className="spinner" aria-hidden="true"></span>
-                  登录中…
-                </span>
-              ) : (
-                "登录"
-              )}
-            </button>
+            <div className="login-action-row">
+              <button
+                className="login-btn login-btn-secondary"
+                type="button"
+                onClick={onTeacherLogin}
+                disabled={authStatusLoading || loading || teacherLoginLoading}
+              >
+                {teacherLoginLoading ? "登录中…" : "教师登录"}
+              </button>
+              <button
+                className="login-btn"
+                type="submit"
+                disabled={loading || teacherLoginLoading || !privacyAgreed || authStatusLoading}
+              >
+                {loading ? (
+                  <span className="btn-inner">
+                    <span className="spinner" aria-hidden="true"></span>
+                    登录中…
+                  </span>
+                ) : (
+                  "学生登录"
+                )}
+              </button>
+            </div>
             <div className="login-err">{err}</div>
           </div>
 
@@ -443,15 +448,6 @@ export default function LoginPage() {
           <p>Copyright © 2026 上官福泽</p>
         </div>
       </div>
-
-      <button
-        type="button"
-        className="login-admin-entry"
-        onClick={onAdminEntryClick}
-      >
-        管理员入口
-      </button>
-      {adminNotice ? <p className="login-admin-notice">{adminNotice}</p> : null}
 
       {showRegisterModal && (
         <ModalOverlay
@@ -598,60 +594,6 @@ export default function LoginPage() {
                 disabled={forgotSaving || !forgotMatched}
               >
                 {forgotSaving ? "保存中…" : "重置密码"}
-              </button>
-            </div>
-          </form>
-        </ModalOverlay>
-      )}
-
-      {showAdminLoginModal && (
-        <ModalOverlay
-          title="管理员登录"
-          subtitle="登录后进入独立管理页面进行导出与智能体配置。"
-          onClose={() => setShowAdminLoginModal(false)}
-        >
-          <form onSubmit={onAdminLoginSubmit}>
-            <div className="login-field">
-              <label className="login-label">管理员账号</label>
-              <PortalSelect
-                className="login-portal-select"
-                value={adminUsername}
-                ariaLabel="选择管理员账号"
-                options={authStatus.adminUsernames.map((item) => ({
-                  value: item,
-                  label: item,
-                }))}
-                onChange={setAdminUsername}
-              />
-            </div>
-
-            <div className="login-field">
-              <label className="login-label">管理员密码</label>
-              <input
-                className="login-input"
-                value={adminPassword}
-                onChange={(e) => setAdminPassword(e.target.value)}
-                type="password"
-                autoComplete="current-password"
-              />
-            </div>
-
-            <p className="login-modal-error">{adminLoginErr}</p>
-            <div className="login-modal-actions">
-              <button
-                type="button"
-                className="login-modal-btn secondary"
-                onClick={() => setShowAdminLoginModal(false)}
-                disabled={adminLoginLoading}
-              >
-                取消
-              </button>
-              <button
-                type="submit"
-                className="login-modal-btn"
-                disabled={adminLoginLoading}
-              >
-                {adminLoginLoading ? "登录中…" : "进入管理页面"}
               </button>
             </div>
           </form>

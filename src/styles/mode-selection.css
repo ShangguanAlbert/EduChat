@@ -213,6 +213,167 @@
   color: var(--mode-danger);
 }
 
+.task-lesson-board {
+  margin-top: 4px;
+  border: 1px solid #d2dced;
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.task-lesson-board h2 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--mode-text);
+}
+
+.task-lesson-list {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.task-lesson-group h3 {
+  margin: 12px 0 0;
+  font-size: 14px;
+  color: #1f2f4b;
+}
+
+.task-lesson-group .task-lesson-list {
+  margin-top: 8px;
+}
+
+.task-lesson-history {
+  margin-top: 12px;
+  border: 1px solid #d6e0ef;
+  border-radius: 12px;
+  background: #fbfdff;
+  padding: 10px;
+}
+
+.task-lesson-history > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 14px;
+  font-weight: 600;
+  color: #2b3e5d;
+}
+
+.task-lesson-history > summary::-webkit-details-marker {
+  display: none;
+}
+
+.task-lesson-history > summary::before {
+  content: "▸";
+  margin-right: 8px;
+  color: #667a9d;
+}
+
+.task-lesson-history[open] > summary::before {
+  content: "▾";
+}
+
+.task-lesson-history .task-lesson-list {
+  margin-top: 10px;
+}
+
+.task-lesson-item {
+  border: 1px solid #d5dfef;
+  border-radius: 14px;
+  background: #fbfdff;
+  padding: 11px 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.task-lesson-item > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.task-lesson-item > header strong {
+  font-size: 15px;
+  color: #1f2f4b;
+}
+
+.task-lesson-item > header span {
+  font-size: 12px;
+  color: var(--mode-muted);
+}
+
+.task-lesson-item ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 7px;
+}
+
+.task-lesson-item li {
+  border-radius: 10px;
+  background: #f2f6fd;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.task-lesson-item li strong {
+  font-size: 13px;
+  color: #1f2f4b;
+}
+
+.task-lesson-item li span {
+  font-size: 12px;
+  color: #526581;
+}
+
+.task-lesson-file-list {
+  display: grid;
+  gap: 8px;
+}
+
+.task-lesson-file-btn {
+  border: 1px solid #d0daea;
+  border-radius: 12px;
+  background: #fff;
+  color: #1f2f4b;
+  min-height: 44px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-lesson-file-btn:hover:not(:disabled) {
+  border-color: #a4bbdf;
+  background: #f7faff;
+}
+
+.task-lesson-file-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.task-lesson-file-btn span strong {
+  display: block;
+  font-size: 14px;
+  color: #1f2f4b;
+}
+
+.task-lesson-file-btn span small {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--mode-muted);
+}
+
 .task-lock-box,
 .task-content-box {
   border: 1px solid #d1dcee;

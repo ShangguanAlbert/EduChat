@@ -1,0 +1,164 @@
+.student-home-page {
+  background:
+    radial-gradient(920px 430px at 8% 10%, rgba(121, 156, 214, 0.2), transparent 62%),
+    radial-gradient(780px 420px at 94% 12%, rgba(160, 189, 231, 0.22), transparent 60%),
+    linear-gradient(180deg, #f3f6fb, #edf2f8);
+}
+
+.student-home-shell {
+  max-width: 1360px;
+  margin: 0 auto;
+}
+
+.student-home-sidebar {
+  overscroll-behavior-y: contain;
+}
+
+.student-home-main {
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.student-panel-stack {
+  gap: 16px;
+}
+
+.student-lesson-workbench {
+  min-height: 560px;
+}
+
+.student-lesson-list-panel {
+  width: 330px;
+  flex-basis: 330px;
+}
+
+.student-lesson-detail-panel {
+  overflow: hidden;
+}
+
+.student-lesson-detail-head {
+  align-items: baseline;
+}
+
+.student-lesson-detail-head span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.student-lesson-meta-grid {
+  margin-top: 0;
+}
+
+.student-lesson-section {
+  margin-top: 14px;
+  border: 1px solid #d8e2f0;
+  border-radius: 12px;
+  background: #fbfdff;
+  padding: 12px;
+}
+
+.student-lesson-section h3 {
+  margin: 0;
+  font-size: 14px;
+  color: #1f2f4b;
+}
+
+.student-lesson-section .teacher-empty-text {
+  margin-top: 8px;
+}
+
+.student-lesson-section .task-lesson-list,
+.student-lesson-section .task-lesson-file-list {
+  margin-top: 10px;
+}
+
+.student-task-card {
+  width: 100%;
+  min-height: 0;
+  border-radius: 16px;
+  border: 1px solid #dbe5f2;
+  background: #ffffff;
+  box-shadow: none;
+  padding: 14px;
+}
+
+.student-task-card .task-list {
+  margin-bottom: 10px;
+}
+
+.task-lesson-item li.student-task-row {
+  display: grid;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.student-task-meta {
+  display: grid;
+  gap: 6px;
+}
+
+.student-task-link {
+  width: fit-content;
+  font-size: 12px;
+  color: #234991;
+  text-decoration: none;
+}
+
+.student-task-link:hover {
+  text-decoration: underline;
+}
+
+.student-task-content {
+  margin: 0;
+  font-size: 12px;
+  color: #344256;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.student-workshop-card {
+  min-height: 320px;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 16px;
+  text-align: center;
+}
+
+.student-workshop-svg {
+  width: min(320px, 100%);
+  height: auto;
+  filter: drop-shadow(0 10px 16px rgba(31, 53, 114, 0.22));
+}
+
+.student-workshop-card p {
+  margin: 0;
+  max-width: 560px;
+  color: #42556f;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.student-workshop-open-btn {
+  min-height: 42px;
+}
+
+@media (max-width: 1080px) {
+  .student-home-page .teacher-home-nav {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .student-lesson-list-panel {
+    width: 100%;
+    flex-basis: auto;
+  }
+}
+
+@media (max-width: 860px) {
+  .student-home-page .teacher-home-nav {
+    grid-template-columns: 1fr;
+  }
+
+  .student-task-card {
+    padding: 10px;
+  }
+}

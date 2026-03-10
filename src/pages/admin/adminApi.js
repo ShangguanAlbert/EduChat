@@ -61,6 +61,10 @@ export function fetchAdminAgentSettings(adminToken) {
   return request("/api/auth/admin/agent-settings", adminToken);
 }
 
+export function fetchAdminMe(adminToken) {
+  return request("/api/auth/admin/me", adminToken);
+}
+
 export function fetchAdminOnlinePresence(adminToken, className = "") {
   const safeClassName = String(className || "").trim();
   const path = safeClassName
@@ -85,6 +89,143 @@ export function saveAdminClassroomSettings(adminToken, payload) {
     method: "PUT",
     body: JSON.stringify(payload),
   });
+}
+
+export function fetchAdminClassroomPlans(adminToken) {
+  return request("/api/auth/admin/classroom-plans", adminToken);
+}
+
+export function saveAdminClassroomPlans(adminToken, payload) {
+  return request("/api/auth/admin/classroom-plans", adminToken, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function uploadAdminClassroomLessonFiles(adminToken, lessonId, files = []) {
+  const safeLessonId = String(lessonId || "").trim();
+  const safeFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  const formData = new FormData();
+  safeFiles.forEach((file) => {
+    formData.append("files", file);
+  });
+
+  const resp = await fetch(
+    `/api/auth/admin/classroom-plans/${encodeURIComponent(safeLessonId)}/files`,
+    {
+      method: "POST",
+      headers: authHeader(adminToken),
+      body: formData,
+    },
+  );
+  const data = await readJson(resp);
+  if (!resp.ok) {
+    const message = data?.error || data?.message || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+  return data;
+}
+
+export async function uploadAdminClassroomTaskFiles(
+  adminToken,
+  lessonId,
+  taskId,
+  files = [],
+) {
+  const safeLessonId = String(lessonId || "").trim();
+  const safeTaskId = String(taskId || "").trim();
+  const safeFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  const formData = new FormData();
+  safeFiles.forEach((file) => {
+    formData.append("files", file);
+  });
+
+  const resp = await fetch(
+    `/api/auth/admin/classroom-plans/${encodeURIComponent(
+      safeLessonId,
+    )}/tasks/${encodeURIComponent(safeTaskId)}/files`,
+    {
+      method: "POST",
+      headers: authHeader(adminToken),
+      body: formData,
+    },
+  );
+  const data = await readJson(resp);
+  if (!resp.ok) {
+    const message = data?.error || data?.message || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+  return data;
+}
+
+export function deleteAdminClassroomLessonFile(adminToken, lessonId, fileId) {
+  const safeLessonId = String(lessonId || "").trim();
+  const safeFileId = String(fileId || "").trim();
+  return request(
+    `/api/auth/admin/classroom-plans/${encodeURIComponent(
+      safeLessonId,
+    )}/files/${encodeURIComponent(safeFileId)}`,
+    adminToken,
+    { method: "DELETE" },
+  );
+}
+
+export function deleteAdminClassroomTaskFile(adminToken, lessonId, taskId, fileId) {
+  const safeLessonId = String(lessonId || "").trim();
+  const safeTaskId = String(taskId || "").trim();
+  const safeFileId = String(fileId || "").trim();
+  return request(
+    `/api/auth/admin/classroom-plans/${encodeURIComponent(
+      safeLessonId,
+    )}/tasks/${encodeURIComponent(safeTaskId)}/files/${encodeURIComponent(safeFileId)}`,
+    adminToken,
+    { method: "DELETE" },
+  );
+}
+
+export async function downloadAdminClassroomLessonFile(adminToken, fileId) {
+  const safeFileId = String(fileId || "").trim();
+  const resp = await fetch(
+    `/api/auth/admin/classroom-plans/files/${encodeURIComponent(safeFileId)}/download`,
+    {
+      method: "GET",
+      headers: authHeader(adminToken),
+    },
+  );
+  const contentType = String(resp.headers.get("content-type") || "").toLowerCase();
+
+  if (!resp.ok) {
+    let message = "";
+    try {
+      const data = await resp.json();
+      message = data?.error || data?.message || "";
+    } catch {
+      try {
+        message = await resp.text();
+      } catch {
+        message = "";
+      }
+    }
+    throw new Error(message || `请求失败（${resp.status}）`);
+  }
+
+  if (contentType.includes("application/json")) {
+    const data = await readJson(resp);
+    const downloadUrl = String(data?.downloadUrl || "").trim();
+    if (downloadUrl) {
+      return {
+        downloadUrl,
+        filename: String(data?.fileName || "课程文件.bin").trim() || "课程文件.bin",
+        mimeType: String(data?.mimeType || ""),
+      };
+    }
+  }
+
+  const blob = await resp.blob();
+  const filename =
+    readContentDispositionFilename(resp.headers.get("Content-Disposition")) ||
+    "课程文件.bin";
+  return { blob, filename };
 }
 
 export function exportAdminUsersTxt(adminToken) {

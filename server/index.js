@@ -53,6 +53,7 @@ import {
 import {
   DEFAULT_TEACHER_SCOPE_KEY,
   SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
+  YANG_JUNFENG_TEACHER_SCOPE_KEY,
   buildTeacherScopedStorageUserId,
   getTeacherScopeLabel,
   isDefaultTeacherScopeKey,
@@ -102,8 +103,13 @@ const ADMIN_CONFIG_KEY = "global";
 const TEACHER_SCOPE_LOCKED_AGENT_MAP = Object.freeze({
   "yang-junfeng": "C",
 });
+const CLASS_NAME_JIAOJI_231 = "教技231";
 const CLASSROOM_FIRST_LESSON_DATE = "2026-03-11";
 const CLASSROOM_QUESTIONNAIRE_URL = "https://v.wjx.cn/vm/PQfZjgr.aspx#";
+const ADMIN_CLASSROOM_COURSE_PLAN_MAX_ITEMS = 40;
+const ADMIN_CLASSROOM_COURSE_TASK_MAX_ITEMS = 12;
+const ADMIN_CLASSROOM_COURSE_FILE_MAX_ITEMS = 20;
+const ADMIN_CLASSROOM_COURSE_FILE_UPLOAD_MAX_FILES = 6;
 const VOLCENGINE_IMAGE_GENERATION_MODEL_ID_45 = "doubao-seedream-4-5-251128";
 const VOLCENGINE_IMAGE_GENERATION_MODEL_ID_50 = "doubao-seedream-5-0-260128";
 const DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL =
@@ -144,6 +150,8 @@ const GROUP_CHAT_OSS_EXPIRED_CLEANUP_BATCH_SIZE = 120;
 const GENERATED_IMAGE_OSS_EXPIRED_CLEANUP_INTERVAL_MS = 60 * 1000;
 const GENERATED_IMAGE_OSS_EXPIRED_CLEANUP_BATCH_SIZE = 80;
 const CHAT_ATTACHMENT_OSS_SCOPE = "chat-attachments";
+const TEACHER_LESSON_FILE_OSS_SCOPE = "teacher_sgfz";
+const TEACHER_LESSON_FILE_OSS_SUB_SCOPE = "lesson-files";
 const FIXED_ADMIN_ACCOUNTS = Object.freeze([
   { username: "上官福泽", password: "2025112004074" },
   { username: "杨占山", password: "2024111004058" },
@@ -1428,6 +1436,45 @@ const runtimeConfigSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const adminClassroomCourseFileSchema = new mongoose.Schema(
+  {
+    id: { type: String, default: "" },
+    name: { type: String, default: "" },
+    mimeType: { type: String, default: "application/octet-stream" },
+    size: { type: Number, default: 0 },
+    uploadedAt: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
+const adminClassroomTaskSchema = new mongoose.Schema(
+  {
+    id: { type: String, default: "" },
+    type: { type: String, default: "text" },
+    title: { type: String, default: "" },
+    content: { type: String, default: "" },
+    files: { type: [adminClassroomCourseFileSchema], default: () => [] },
+  },
+  { _id: false },
+);
+
+const adminClassroomCoursePlanSchema = new mongoose.Schema(
+  {
+    id: { type: String, default: "" },
+    courseName: { type: String, default: "" },
+    courseTime: { type: String, default: "" },
+    courseStartAt: { type: String, default: "" },
+    courseEndAt: { type: String, default: "" },
+    notes: { type: String, default: "" },
+    enabled: { type: Boolean, default: true },
+    tasks: { type: [adminClassroomTaskSchema], default: () => [] },
+    files: { type: [adminClassroomCourseFileSchema], default: () => [] },
+    createdAt: { type: String, default: "" },
+    updatedAt: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
 const adminConfigSchema = new mongoose.Schema(
   {
     key: {
@@ -1470,6 +1517,10 @@ const adminConfigSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    teacherCoursePlans: {
+      type: [adminClassroomCoursePlanSchema],
+      default: () => [],
+    },
   },
   {
     timestamps: true,
@@ -1479,6 +1530,32 @@ const adminConfigSchema = new mongoose.Schema(
 
 const AdminConfig =
   mongoose.models.AdminConfig || mongoose.model("AdminConfig", adminConfigSchema);
+const adminClassroomLessonFileSchema = new mongoose.Schema(
+  {
+    key: { type: String, default: ADMIN_CONFIG_KEY, index: true },
+    fileId: { type: String, required: true, unique: true, index: true },
+    lessonId: { type: String, default: "", index: true },
+    taskId: { type: String, default: "", index: true },
+    fileName: { type: String, default: "" },
+    mimeType: { type: String, default: "application/octet-stream" },
+    size: { type: Number, default: 0 },
+    storageType: { type: String, default: "mongo" },
+    ossKey: { type: String, default: "" },
+    ossBucket: { type: String, default: "" },
+    ossRegion: { type: String, default: "" },
+    fileUrl: { type: String, default: "" },
+    binary: { type: Buffer, default: () => Buffer.from([]) },
+    uploadedByAdminId: { type: String, default: "" },
+    uploadedAt: { type: Date, default: Date.now },
+  },
+  {
+    timestamps: true,
+    collection: "admin_classroom_lesson_files",
+  },
+);
+const AdminClassroomLessonFile =
+  mongoose.models.AdminClassroomLessonFile ||
+  mongoose.model("AdminClassroomLessonFile", adminClassroomLessonFileSchema);
 const AgentEConfig = createAgentEConfigModel(mongoose);
 
 app.use(cors());
@@ -1533,10 +1610,16 @@ app.get("/api/classroom/tasks/settings", requireChatAuth, async (req, res) => {
   const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
   const isShangguanTeacher = teacherScopeKey === SHANGGUAN_FUZE_TEACHER_SCOPE_KEY;
   let productImprovementEnabled = false;
+  let teacherCoursePlans = [];
 
   if (isShangguanTeacher) {
     const config = await readAdminAgentConfig();
     productImprovementEnabled = !!config.shangguanClassTaskProductImprovementEnabled;
+    teacherCoursePlans = sortAdminClassroomCoursePlans(
+      config.teacherCoursePlans.filter((lesson) =>
+        sanitizeRuntimeBoolean(lesson?.enabled, true),
+      ),
+    );
   }
 
   res.json({
@@ -1547,6 +1630,7 @@ app.get("/api/classroom/tasks/settings", requireChatAuth, async (req, res) => {
     firstLessonDate: CLASSROOM_FIRST_LESSON_DATE,
     questionnaireUrl: CLASSROOM_QUESTIONNAIRE_URL,
     productImprovementEnabled,
+    teacherCoursePlans,
   });
 });
 
@@ -1755,6 +1839,35 @@ app.post("/api/auth/register", async (req, res) => {
   });
 });
 
+app.get("/api/auth/login/teacher-scope-lock", async (req, res) => {
+  const username = normalizeUsername(req.query?.username);
+  if (!username) {
+    res.json({
+      ok: true,
+      lockedTeacherScopeKey: "",
+      teacherScopeLabel: "",
+    });
+    return;
+  }
+
+  const user = await AuthUser.findOne({ usernameKey: toUsernameKey(username) }).lean();
+  if (!user) {
+    res.json({
+      ok: true,
+      lockedTeacherScopeKey: "",
+      teacherScopeLabel: "",
+    });
+    return;
+  }
+
+  const lockedTeacherScopeKey = resolveLoginLockedTeacherScopeKey(user);
+  res.json({
+    ok: true,
+    lockedTeacherScopeKey,
+    teacherScopeLabel: lockedTeacherScopeKey ? getTeacherScopeLabel(lockedTeacherScopeKey) : "",
+  });
+});
+
 app.post("/api/auth/login", async (req, res) => {
   const username = normalizeUsername(req.body?.username);
   const password = String(req.body?.password || "");
@@ -1772,20 +1885,15 @@ app.post("/api/auth/login", async (req, res) => {
     return;
   }
 
-  const lockedTeacherScopeKey = readLockedTeacherScopeKey(user.lockedTeacherScopeKey);
-  if (lockedTeacherScopeKey && teacherScopeKey !== lockedTeacherScopeKey) {
-    res.status(403).json({
-      error: `该账号仅支持选择“${getTeacherScopeLabel(lockedTeacherScopeKey)}”授课教师登录。`,
-    });
-    return;
-  }
+  const lockedTeacherScopeKey = resolveLoginLockedTeacherScopeKey(user);
+  const effectiveTeacherScopeKey = lockedTeacherScopeKey || teacherScopeKey;
 
   const token = signToken(
     {
       uid: String(user._id),
       role: user.role,
       scope: "chat",
-      tkey: teacherScopeKey,
+      tkey: effectiveTeacherScopeKey,
     },
     AUTH_TOKEN_TTL_SECONDS,
   );
@@ -1795,8 +1903,8 @@ app.post("/api/auth/login", async (req, res) => {
     ok: true,
     token,
     user: toPublicUser(user),
-    teacherScopeKey,
-    teacherScopeLabel: getTeacherScopeLabel(teacherScopeKey),
+    teacherScopeKey: effectiveTeacherScopeKey,
+    teacherScopeLabel: getTeacherScopeLabel(effectiveTeacherScopeKey),
   });
 });
 
@@ -1996,6 +2104,7 @@ app.get("/api/auth/admin/classroom-settings", async (req, res) => {
     questionnaireUrl: CLASSROOM_QUESTIONNAIRE_URL,
     shangguanClassTaskProductImprovementEnabled:
       !!config.shangguanClassTaskProductImprovementEnabled,
+    teacherCoursePlans: config.teacherCoursePlans,
     heartbeatIntervalSeconds: Math.floor(USER_BROWSER_HEARTBEAT_INTERVAL_MS / 1000),
     heartbeatStaleSeconds: Math.floor(USER_BROWSER_HEARTBEAT_STALE_MS / 1000),
     updatedAt: config.updatedAt,
@@ -2029,10 +2138,697 @@ app.put("/api/auth/admin/classroom-settings", async (req, res) => {
     questionnaireUrl: CLASSROOM_QUESTIONNAIRE_URL,
     shangguanClassTaskProductImprovementEnabled:
       !!config.shangguanClassTaskProductImprovementEnabled,
+    teacherCoursePlans: config.teacherCoursePlans,
     heartbeatIntervalSeconds: Math.floor(USER_BROWSER_HEARTBEAT_INTERVAL_MS / 1000),
     heartbeatStaleSeconds: Math.floor(USER_BROWSER_HEARTBEAT_STALE_MS / 1000),
     updatedAt: config.updatedAt,
   });
+});
+
+app.get("/api/auth/admin/classroom-plans", async (req, res) => {
+  const admin = await authenticateAdminRequest(req, res);
+  if (!admin) return;
+  const config = await readAdminAgentConfig();
+
+  res.json({
+    ok: true,
+    admin: {
+      id: String(admin?._id || ""),
+      username: admin?.username || "",
+      role: admin?.role || "admin",
+    },
+    firstLessonDate: CLASSROOM_FIRST_LESSON_DATE,
+    questionnaireUrl: CLASSROOM_QUESTIONNAIRE_URL,
+    shangguanClassTaskProductImprovementEnabled:
+      !!config.shangguanClassTaskProductImprovementEnabled,
+    teacherCoursePlans: config.teacherCoursePlans,
+    updatedAt: config.updatedAt,
+  });
+});
+
+app.put("/api/auth/admin/classroom-plans", async (req, res) => {
+  if (!(await authenticateAdminRequest(req, res))) return;
+  const previous = await readAdminAgentConfig();
+  const rawPlans = sanitizeAdminClassroomCoursePlansPayload(req.body?.teacherCoursePlans);
+  const previousById = new Map(
+    previous.teacherCoursePlans.map((item) => [String(item?.id || ""), item]),
+  );
+  const nowIso = new Date().toISOString();
+  const teacherCoursePlans = rawPlans.map((item, index) => {
+    const itemId = sanitizeId(item.id, `course-${index + 1}`);
+    const previousItem = previousById.get(itemId);
+    return {
+      ...item,
+      id: itemId,
+      createdAt:
+        sanitizeIsoDate(previousItem?.createdAt || item.createdAt) || nowIso,
+      updatedAt: nowIso,
+      tasks: item.tasks.map((task, taskIndex) => ({
+        ...task,
+        id: sanitizeId(task.id, `task-${taskIndex + 1}`),
+        files: sanitizeAdminClassroomCourseFilesPayload(task?.files),
+      })),
+      files: item.files.map((file, fileIndex) => ({
+        ...file,
+        id: sanitizeId(file.id, `lesson-file-${fileIndex + 1}`),
+      })),
+    };
+  });
+  const hasClassroomToggle = Object.prototype.hasOwnProperty.call(
+    req.body || {},
+    "shangguanClassTaskProductImprovementEnabled",
+  );
+  const shangguanClassTaskProductImprovementEnabled = hasClassroomToggle
+    ? sanitizeRuntimeBoolean(req.body?.shangguanClassTaskProductImprovementEnabled, false)
+    : !!previous.shangguanClassTaskProductImprovementEnabled;
+
+  const previousFileIds = new Set();
+  previous.teacherCoursePlans.forEach((lesson) => {
+    collectAdminClassroomFileIdsFromLesson(lesson).forEach((fileId) => {
+      previousFileIds.add(fileId);
+    });
+  });
+
+  const nextFileIds = new Set();
+  teacherCoursePlans.forEach((lesson) => {
+    const files = Array.isArray(lesson?.files) ? lesson.files : [];
+    lesson.files = files.filter((file) => {
+      const fileId = sanitizeId(file?.id, "");
+      if (!fileId || nextFileIds.has(fileId)) return false;
+      nextFileIds.add(fileId);
+      return true;
+    });
+    const tasks = Array.isArray(lesson?.tasks) ? lesson.tasks : [];
+    lesson.tasks = tasks.map((task) => {
+      const taskFiles = Array.isArray(task?.files) ? task.files : [];
+      const normalizedTaskFiles = taskFiles.filter((file) => {
+        const fileId = sanitizeId(file?.id, "");
+        if (!fileId || nextFileIds.has(fileId)) return false;
+        nextFileIds.add(fileId);
+        return true;
+      });
+      return {
+        ...task,
+        files: normalizedTaskFiles,
+      };
+    });
+  });
+
+  const staleFileIds = Array.from(previousFileIds).filter((fileId) => !nextFileIds.has(fileId));
+  if (staleFileIds.length > 0) {
+    const staleDocs = await AdminClassroomLessonFile.find({
+      key: ADMIN_CONFIG_KEY,
+      fileId: { $in: staleFileIds },
+    }).lean();
+    await AdminClassroomLessonFile.deleteMany({
+      key: ADMIN_CONFIG_KEY,
+      fileId: { $in: staleFileIds },
+    });
+    for (const staleDoc of staleDocs) {
+      const ossKey = sanitizeGroupChatOssObjectKey(staleDoc?.ossKey);
+      if (!ossKey) continue;
+      await deleteGroupChatOssObject(ossKey).catch(() => {});
+    }
+  }
+
+  const doc = await AdminConfig.findOneAndUpdate(
+    { key: ADMIN_CONFIG_KEY },
+    {
+      $set: {
+        key: ADMIN_CONFIG_KEY,
+        teacherCoursePlans,
+        shangguanClassTaskProductImprovementEnabled,
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+      setDefaultsOnInsert: true,
+    },
+  ).lean();
+  const config = normalizeAdminConfigDoc(doc);
+
+  res.json({
+    ok: true,
+    firstLessonDate: CLASSROOM_FIRST_LESSON_DATE,
+    questionnaireUrl: CLASSROOM_QUESTIONNAIRE_URL,
+    shangguanClassTaskProductImprovementEnabled:
+      !!config.shangguanClassTaskProductImprovementEnabled,
+    teacherCoursePlans: config.teacherCoursePlans,
+    updatedAt: config.updatedAt,
+  });
+});
+
+app.post(
+  "/api/auth/admin/classroom-plans/:lessonId/files",
+  requireAdminAuth,
+  upload.array("files", ADMIN_CLASSROOM_COURSE_FILE_UPLOAD_MAX_FILES),
+  async (req, res) => {
+    const lessonId = sanitizeId(req.params.lessonId, "");
+    if (!lessonId) {
+      res.status(400).json({ error: "课时标识无效。" });
+      return;
+    }
+
+    const sourceFiles = Array.isArray(req.files) ? req.files : [];
+    const normalizedFiles = sourceFiles
+      .map((file) => normalizeMultipartUploadFile(file))
+      .filter((file) => file && Buffer.isBuffer(file.buffer) && file.buffer.length > 0);
+    if (normalizedFiles.length === 0) {
+      res.status(400).json({ error: "请先选择要上传的课程文件。" });
+      return;
+    }
+
+    const previous = await readAdminAgentConfig();
+    const lessonIndex = previous.teacherCoursePlans.findIndex(
+      (lesson) => sanitizeId(lesson?.id, "") === lessonId,
+    );
+    if (lessonIndex < 0) {
+      res.status(404).json({ error: "未找到对应课时，请刷新后重试。" });
+      return;
+    }
+
+    const targetLesson = previous.teacherCoursePlans[lessonIndex];
+    const existingFiles = Array.isArray(targetLesson?.files) ? targetLesson.files : [];
+    if (existingFiles.length + normalizedFiles.length > ADMIN_CLASSROOM_COURSE_FILE_MAX_ITEMS) {
+      res.status(400).json({
+        error: `每节课最多上传 ${ADMIN_CLASSROOM_COURSE_FILE_MAX_ITEMS} 个文件，请删除后再上传。`,
+      });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const uploadedByAdminId = sanitizeId(req.authAdmin?._id, "");
+    const newFileDocs = [];
+    try {
+      for (const file of normalizedFiles) {
+        const uploaded = await uploadTeacherLessonFileToOss({
+          lesson: targetLesson,
+          lessonIndex,
+          file,
+        });
+        const fileId = createAdminClassroomLessonFileId();
+        newFileDocs.push({
+          key: ADMIN_CONFIG_KEY,
+          fileId,
+          lessonId,
+          fileName: sanitizeGroupChatFileName(uploaded.fileName || file.originalname || "课程文件.bin"),
+          mimeType: sanitizeGroupChatFileMimeType(uploaded.mimeType || file.mimetype),
+          size: sanitizeRuntimeInteger(uploaded.size, 0, 0, MAX_FILE_SIZE_BYTES),
+          storageType: "oss",
+          ossKey: sanitizeGroupChatOssObjectKey(uploaded.ossKey),
+          ossBucket: sanitizeAliyunOssBucket(uploaded.ossBucket),
+          ossRegion: sanitizeAliyunOssRegion(uploaded.ossRegion),
+          fileUrl: sanitizeGroupChatHttpUrl(uploaded.fileUrl),
+          binary: Buffer.alloc(0),
+          uploadedByAdminId,
+          uploadedAt: new Date(nowIso),
+        });
+      }
+    } catch (error) {
+      for (const uploadedDoc of newFileDocs) {
+        const ossKey = sanitizeGroupChatOssObjectKey(uploadedDoc.ossKey);
+        if (!ossKey) continue;
+        await deleteGroupChatOssObject(ossKey).catch(() => {});
+      }
+      throw error;
+    }
+
+    if (newFileDocs.length === 0) {
+      res.status(400).json({ error: "上传文件为空，请重新选择。" });
+      return;
+    }
+
+    await AdminClassroomLessonFile.insertMany(newFileDocs, { ordered: true });
+
+    const nextLessonFiles = sanitizeAdminClassroomCourseFilesPayload([
+      ...existingFiles,
+      ...newFileDocs.map((doc) => normalizeAdminClassroomLessonFileDoc(doc)),
+    ]);
+    const teacherCoursePlans = previous.teacherCoursePlans.map((lesson, index) => {
+      if (index !== lessonIndex) return lesson;
+      return {
+        ...lesson,
+        files: nextLessonFiles,
+        updatedAt: nowIso,
+      };
+    });
+
+    const doc = await AdminConfig.findOneAndUpdate(
+      { key: ADMIN_CONFIG_KEY },
+      {
+        $set: {
+          key: ADMIN_CONFIG_KEY,
+          teacherCoursePlans,
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true,
+      },
+    ).lean();
+    const config = normalizeAdminConfigDoc(doc);
+
+    res.json({
+      ok: true,
+      lessonId,
+      teacherCoursePlans: config.teacherCoursePlans,
+      updatedAt: config.updatedAt,
+    });
+  },
+);
+
+app.post(
+  "/api/auth/admin/classroom-plans/:lessonId/tasks/:taskId/files",
+  requireAdminAuth,
+  upload.array("files", ADMIN_CLASSROOM_COURSE_FILE_UPLOAD_MAX_FILES),
+  async (req, res) => {
+    const lessonId = sanitizeId(req.params.lessonId, "");
+    const taskId = sanitizeId(req.params.taskId, "");
+    if (!lessonId || !taskId) {
+      res.status(400).json({ error: "任务标识无效。" });
+      return;
+    }
+
+    const sourceFiles = Array.isArray(req.files) ? req.files : [];
+    const normalizedFiles = sourceFiles
+      .map((file) => normalizeMultipartUploadFile(file))
+      .filter((file) => file && Buffer.isBuffer(file.buffer) && file.buffer.length > 0);
+    if (normalizedFiles.length === 0) {
+      res.status(400).json({ error: "请先选择要上传的任务附件。" });
+      return;
+    }
+
+    const previous = await readAdminAgentConfig();
+    const lessonIndex = previous.teacherCoursePlans.findIndex(
+      (lesson) => sanitizeId(lesson?.id, "") === lessonId,
+    );
+    if (lessonIndex < 0) {
+      res.status(404).json({ error: "未找到对应课时，请刷新后重试。" });
+      return;
+    }
+
+    const targetLesson = previous.teacherCoursePlans[lessonIndex];
+    const taskMatch = findAdminClassroomLessonTaskById(targetLesson, taskId);
+    if (!taskMatch) {
+      res.status(404).json({ error: "未找到对应任务，请刷新后重试。" });
+      return;
+    }
+
+    const targetTask = taskMatch.task;
+    const existingFiles = Array.isArray(targetTask?.files) ? targetTask.files : [];
+    if (existingFiles.length + normalizedFiles.length > ADMIN_CLASSROOM_COURSE_FILE_MAX_ITEMS) {
+      res.status(400).json({
+        error: `每个任务最多上传 ${ADMIN_CLASSROOM_COURSE_FILE_MAX_ITEMS} 个附件，请删除后再上传。`,
+      });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const uploadedByAdminId = sanitizeId(req.authAdmin?._id, "");
+    const newFileDocs = [];
+    try {
+      for (const file of normalizedFiles) {
+        const uploaded = await uploadTeacherLessonFileToOss({
+          lesson: targetLesson,
+          lessonIndex,
+          file,
+        });
+        const fileId = createAdminClassroomLessonFileId();
+        newFileDocs.push({
+          key: ADMIN_CONFIG_KEY,
+          fileId,
+          lessonId,
+          taskId,
+          fileName: sanitizeGroupChatFileName(uploaded.fileName || file.originalname || "任务附件.bin"),
+          mimeType: sanitizeGroupChatFileMimeType(uploaded.mimeType || file.mimetype),
+          size: sanitizeRuntimeInteger(uploaded.size, 0, 0, MAX_FILE_SIZE_BYTES),
+          storageType: "oss",
+          ossKey: sanitizeGroupChatOssObjectKey(uploaded.ossKey),
+          ossBucket: sanitizeAliyunOssBucket(uploaded.ossBucket),
+          ossRegion: sanitizeAliyunOssRegion(uploaded.ossRegion),
+          fileUrl: sanitizeGroupChatHttpUrl(uploaded.fileUrl),
+          binary: Buffer.alloc(0),
+          uploadedByAdminId,
+          uploadedAt: new Date(nowIso),
+        });
+      }
+    } catch (error) {
+      for (const uploadedDoc of newFileDocs) {
+        const ossKey = sanitizeGroupChatOssObjectKey(uploadedDoc.ossKey);
+        if (!ossKey) continue;
+        await deleteGroupChatOssObject(ossKey).catch(() => {});
+      }
+      throw error;
+    }
+
+    if (newFileDocs.length === 0) {
+      res.status(400).json({ error: "上传文件为空，请重新选择。" });
+      return;
+    }
+
+    await AdminClassroomLessonFile.insertMany(newFileDocs, { ordered: true });
+
+    const nextTaskFiles = sanitizeAdminClassroomCourseFilesPayload([
+      ...existingFiles,
+      ...newFileDocs.map((doc) => normalizeAdminClassroomLessonFileDoc(doc)),
+    ]);
+
+    const teacherCoursePlans = previous.teacherCoursePlans.map((lesson, index) => {
+      if (index !== lessonIndex) return lesson;
+      const tasks = Array.isArray(lesson?.tasks) ? lesson.tasks : [];
+      const nextTasks = tasks.map((task) => {
+        if (sanitizeId(task?.id, "") !== taskId) return task;
+        return {
+          ...task,
+          files: nextTaskFiles,
+        };
+      });
+      return {
+        ...lesson,
+        tasks: nextTasks,
+        updatedAt: nowIso,
+      };
+    });
+
+    const doc = await AdminConfig.findOneAndUpdate(
+      { key: ADMIN_CONFIG_KEY },
+      {
+        $set: {
+          key: ADMIN_CONFIG_KEY,
+          teacherCoursePlans,
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true,
+      },
+    ).lean();
+    const config = normalizeAdminConfigDoc(doc);
+
+    res.json({
+      ok: true,
+      lessonId,
+      taskId,
+      teacherCoursePlans: config.teacherCoursePlans,
+      updatedAt: config.updatedAt,
+    });
+  },
+);
+
+app.delete(
+  "/api/auth/admin/classroom-plans/:lessonId/files/:fileId",
+  requireAdminAuth,
+  async (req, res) => {
+    const lessonId = sanitizeId(req.params.lessonId, "");
+    const fileId = sanitizeId(req.params.fileId, "");
+    if (!lessonId || !fileId) {
+      res.status(400).json({ error: "文件标识无效。" });
+      return;
+    }
+
+    const previous = await readAdminAgentConfig();
+    const lessonIndex = previous.teacherCoursePlans.findIndex(
+      (lesson) => sanitizeId(lesson?.id, "") === lessonId,
+    );
+    if (lessonIndex < 0) {
+      res.status(404).json({ error: "未找到对应课时。" });
+      return;
+    }
+
+    const targetLesson = previous.teacherCoursePlans[lessonIndex];
+    const files = Array.isArray(targetLesson?.files) ? targetLesson.files : [];
+    const nextFiles = files.filter((file) => sanitizeId(file?.id, "") !== fileId);
+    if (nextFiles.length === files.length) {
+      res.status(404).json({ error: "未找到对应课程文件。" });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const teacherCoursePlans = previous.teacherCoursePlans.map((lesson, index) => {
+      if (index !== lessonIndex) return lesson;
+      return {
+        ...lesson,
+        files: nextFiles,
+        updatedAt: nowIso,
+      };
+    });
+
+    const removedDoc = await AdminClassroomLessonFile.findOneAndDelete({
+      key: ADMIN_CONFIG_KEY,
+      lessonId,
+      fileId,
+    }).lean();
+    const removedOssKey = sanitizeGroupChatOssObjectKey(removedDoc?.ossKey);
+    if (removedOssKey) {
+      await deleteGroupChatOssObject(removedOssKey).catch(() => {});
+    }
+
+    const doc = await AdminConfig.findOneAndUpdate(
+      { key: ADMIN_CONFIG_KEY },
+      {
+        $set: {
+          key: ADMIN_CONFIG_KEY,
+          teacherCoursePlans,
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true,
+      },
+    ).lean();
+    const config = normalizeAdminConfigDoc(doc);
+    res.json({
+      ok: true,
+      lessonId,
+      fileId,
+      teacherCoursePlans: config.teacherCoursePlans,
+      updatedAt: config.updatedAt,
+    });
+  },
+);
+
+app.delete(
+  "/api/auth/admin/classroom-plans/:lessonId/tasks/:taskId/files/:fileId",
+  requireAdminAuth,
+  async (req, res) => {
+    const lessonId = sanitizeId(req.params.lessonId, "");
+    const taskId = sanitizeId(req.params.taskId, "");
+    const fileId = sanitizeId(req.params.fileId, "");
+    if (!lessonId || !taskId || !fileId) {
+      res.status(400).json({ error: "附件标识无效。" });
+      return;
+    }
+
+    const previous = await readAdminAgentConfig();
+    const lessonIndex = previous.teacherCoursePlans.findIndex(
+      (lesson) => sanitizeId(lesson?.id, "") === lessonId,
+    );
+    if (lessonIndex < 0) {
+      res.status(404).json({ error: "未找到对应课时。" });
+      return;
+    }
+
+    const targetLesson = previous.teacherCoursePlans[lessonIndex];
+    const taskMatch = findAdminClassroomLessonTaskById(targetLesson, taskId);
+    if (!taskMatch) {
+      res.status(404).json({ error: "未找到对应任务。" });
+      return;
+    }
+
+    const taskFiles = Array.isArray(taskMatch.task?.files) ? taskMatch.task.files : [];
+    const nextTaskFiles = taskFiles.filter((file) => sanitizeId(file?.id, "") !== fileId);
+    if (nextTaskFiles.length === taskFiles.length) {
+      res.status(404).json({ error: "未找到对应任务附件。" });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const teacherCoursePlans = previous.teacherCoursePlans.map((lesson, index) => {
+      if (index !== lessonIndex) return lesson;
+      const tasks = Array.isArray(lesson?.tasks) ? lesson.tasks : [];
+      const nextTasks = tasks.map((task) => {
+        if (sanitizeId(task?.id, "") !== taskId) return task;
+        return {
+          ...task,
+          files: nextTaskFiles,
+        };
+      });
+      return {
+        ...lesson,
+        tasks: nextTasks,
+        updatedAt: nowIso,
+      };
+    });
+
+    const removedDoc = await AdminClassroomLessonFile.findOneAndDelete({
+      key: ADMIN_CONFIG_KEY,
+      lessonId,
+      taskId,
+      fileId,
+    }).lean();
+    const removedOssKey = sanitizeGroupChatOssObjectKey(removedDoc?.ossKey);
+    if (removedOssKey) {
+      await deleteGroupChatOssObject(removedOssKey).catch(() => {});
+    }
+
+    const doc = await AdminConfig.findOneAndUpdate(
+      { key: ADMIN_CONFIG_KEY },
+      {
+        $set: {
+          key: ADMIN_CONFIG_KEY,
+          teacherCoursePlans,
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true,
+      },
+    ).lean();
+    const config = normalizeAdminConfigDoc(doc);
+
+    res.json({
+      ok: true,
+      lessonId,
+      taskId,
+      fileId,
+      teacherCoursePlans: config.teacherCoursePlans,
+      updatedAt: config.updatedAt,
+    });
+  },
+);
+
+app.get(
+  "/api/auth/admin/classroom-plans/files/:fileId/download",
+  requireAdminAuth,
+  async (req, res) => {
+    const fileId = sanitizeId(req.params.fileId, "");
+    if (!fileId) {
+      res.status(400).json({ error: "文件标识无效。" });
+      return;
+    }
+
+    const config = await readAdminAgentConfig();
+    const lessonMatch = findAdminClassroomLessonByFileId(config.teacherCoursePlans, fileId);
+    if (!lessonMatch) {
+      res.status(404).json({ error: "课程文件不存在或已被移除。" });
+      return;
+    }
+
+    const fileDoc = await AdminClassroomLessonFile.findOne({
+      key: ADMIN_CONFIG_KEY,
+      lessonId: sanitizeId(lessonMatch.lesson?.id, ""),
+      fileId,
+    }).lean();
+    if (!fileDoc) {
+      res.status(404).json({ error: "文件数据不存在，请重新上传。" });
+      return;
+    }
+
+    const fileName = sanitizeGroupChatFileName(
+      lessonMatch.file?.name || fileDoc.fileName || "课程文件.bin",
+    );
+    const mimeType = sanitizeGroupChatFileMimeType(
+      lessonMatch.file?.mimeType || fileDoc.mimeType,
+    );
+    const storageType = sanitizeGroupChatFileStorageType(fileDoc?.storageType);
+    const ossKey = sanitizeGroupChatOssObjectKey(fileDoc?.ossKey);
+    if (storageType === "oss" && ossKey) {
+      const downloadUrl = await buildTeacherLessonFileDownloadUrl({
+        ossKey,
+        fileName,
+      });
+      if (downloadUrl) {
+        res.json({
+          ok: true,
+          downloadUrl,
+          fileName,
+          mimeType,
+        });
+        return;
+      }
+      res.status(404).json({ error: "课程文件链接已失效，请教师重新上传。" });
+      return;
+    }
+
+    if (!Buffer.isBuffer(fileDoc.binary) || fileDoc.binary.length === 0) {
+      res.status(404).json({ error: "文件数据不存在，请重新上传。" });
+      return;
+    }
+    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Content-Disposition", buildAttachmentContentDisposition(fileName));
+    res.setHeader("Content-Length", String(fileDoc.binary.length));
+    res.send(fileDoc.binary);
+  },
+);
+
+app.get("/api/classroom/lessons/files/:fileId/download", requireChatAuth, async (req, res) => {
+  const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
+  if (teacherScopeKey !== SHANGGUAN_FUZE_TEACHER_SCOPE_KEY) {
+    res.status(403).json({ error: "当前班级暂不支持下载该课程文件。" });
+    return;
+  }
+
+  const fileId = sanitizeId(req.params.fileId, "");
+  if (!fileId) {
+    res.status(400).json({ error: "文件标识无效。" });
+    return;
+  }
+
+  const config = await readAdminAgentConfig();
+  const lessonMatch = findAdminClassroomLessonByFileId(config.teacherCoursePlans, fileId);
+  if (!lessonMatch || !sanitizeRuntimeBoolean(lessonMatch.lesson?.enabled, true)) {
+    res.status(404).json({ error: "课程文件不存在或暂未开放下载。" });
+    return;
+  }
+
+  const lessonId = sanitizeId(lessonMatch.lesson?.id, "");
+  const fileDoc = await AdminClassroomLessonFile.findOne({
+    key: ADMIN_CONFIG_KEY,
+    lessonId,
+    fileId,
+  }).lean();
+  if (!fileDoc) {
+    res.status(404).json({ error: "课程文件不存在或已失效。" });
+    return;
+  }
+
+  const fileName = sanitizeGroupChatFileName(
+    lessonMatch.file?.name || fileDoc.fileName || "课程文件.bin",
+  );
+  const mimeType = sanitizeGroupChatFileMimeType(lessonMatch.file?.mimeType || fileDoc.mimeType);
+  const storageType = sanitizeGroupChatFileStorageType(fileDoc?.storageType);
+  const ossKey = sanitizeGroupChatOssObjectKey(fileDoc?.ossKey);
+  if (storageType === "oss" && ossKey) {
+    const downloadUrl = await buildTeacherLessonFileDownloadUrl({
+      ossKey,
+      fileName,
+    });
+    if (!downloadUrl) {
+      res.status(404).json({ error: "课程文件下载链接不可用，请稍后重试。" });
+      return;
+    }
+    res.json({
+      ok: true,
+      downloadUrl,
+      fileName,
+      mimeType,
+    });
+    return;
+  }
+
+  if (!Buffer.isBuffer(fileDoc.binary) || fileDoc.binary.length === 0) {
+    res.status(404).json({ error: "课程文件不存在或已失效。" });
+    return;
+  }
+  res.setHeader("Content-Type", mimeType);
+  res.setHeader("Content-Disposition", buildAttachmentContentDisposition(fileName));
+  res.setHeader("Content-Length", String(fileDoc.binary.length));
+  res.send(fileDoc.binary);
 });
 
 app.get("/api/auth/admin/agent-e/settings", async (req, res) => {
@@ -2072,6 +2868,23 @@ app.put("/api/auth/admin/agent-e/skills", async (req, res) => {
     skills: payload.config.skills,
     availableSkills: payload.availableSkills,
     updatedAt: payload.config.updatedAt,
+  });
+});
+
+app.get("/api/auth/admin/me", async (req, res) => {
+  const admin = await authenticateAdminRequest(req, res);
+  if (!admin) return;
+
+  res.json({
+    ok: true,
+    admin: {
+      id: String(admin?._id || ""),
+      username: admin?.username || "",
+      role: admin?.role || "admin",
+      createdAt: sanitizeIsoDate(admin?.createdAt),
+      updatedAt: sanitizeIsoDate(admin?.updatedAt),
+    },
+    adminUsernames: FIXED_ADMIN_ACCOUNTS.map((item) => item.username),
   });
 });
 
@@ -9962,6 +10775,310 @@ async function writeAgentEConfig(raw) {
   return normalizeAgentEConfigDoc(doc);
 }
 
+function sanitizeAdminClassroomTaskType(value, fallback = "text") {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "link" || key === "text") return key;
+  return fallback;
+}
+
+function sanitizeAdminClassroomTaskPayload(input, index = 0) {
+  const source = input && typeof input === "object" ? input : {};
+  const type = sanitizeAdminClassroomTaskType(source.type, "text");
+  const title = sanitizeText(source.title, "", 80);
+  const content = sanitizeText(
+    source.content || source.url || source.description,
+    "",
+    type === "link" ? 500 : 1200,
+  );
+  const files = sanitizeAdminClassroomCourseFilesPayload(source.files);
+
+  return {
+    id: sanitizeId(source.id, `task-${index + 1}`),
+    type,
+    title: title || (type === "link" ? "链接任务" : "文字任务"),
+    content,
+    files,
+  };
+}
+
+function sanitizeAdminClassroomCourseFilePayload(input, index = 0) {
+  const source = input && typeof input === "object" ? input : {};
+  const fileId = sanitizeId(source.id || source.fileId, `lesson-file-${index + 1}`);
+  const fileName = sanitizeGroupChatFileName(
+    source.name || source.fileName || `课程文件-${index + 1}`,
+  );
+  const mimeType = sanitizeGroupChatFileMimeType(source.mimeType || source.type);
+  const size = sanitizeRuntimeInteger(source.size, 0, 0, MAX_FILE_SIZE_BYTES);
+  const uploadedAt = sanitizeIsoDate(source.uploadedAt) || "";
+  if (!fileId || !fileName) return null;
+
+  return {
+    id: fileId,
+    name: fileName,
+    mimeType,
+    size,
+    uploadedAt,
+  };
+}
+
+function sanitizeAdminClassroomCourseFilesPayload(input) {
+  const source = Array.isArray(input) ? input : [];
+  const files = [];
+  const seenIds = new Set();
+  for (
+    let index = 0;
+    index < source.length && files.length < ADMIN_CLASSROOM_COURSE_FILE_MAX_ITEMS;
+    index += 1
+  ) {
+    const file = sanitizeAdminClassroomCourseFilePayload(source[index], index);
+    if (!file || seenIds.has(file.id)) continue;
+    seenIds.add(file.id);
+    files.push(file);
+  }
+  return files;
+}
+
+function normalizeAdminClassroomLessonDateTimeInput(value) {
+  const iso = sanitizeIsoDate(value);
+  if (iso) return iso;
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  const legacyMatch = raw.match(
+    /^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}:\d{2})(?:\s*[-~至]\s*(\d{1,2}:\d{2}))?$/,
+  );
+  if (!legacyMatch) return "";
+  const [, year, month, day, startTime] = legacyMatch;
+  const maybeIso = sanitizeIsoDate(
+    `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T${startTime}:00`,
+  );
+  return maybeIso || "";
+}
+
+function parseAdminClassroomLegacyCourseTimeRange(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return { startAt: "", endAt: "" };
+  const match = raw.match(
+    /^(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}:\d{2})(?:\s*[-~至]\s*(\d{1,2}:\d{2}))?$/,
+  );
+  if (!match) return { startAt: "", endAt: "" };
+  const [, year, month, day, startTime, endTime] = match;
+  const dateText = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  const startAt = sanitizeIsoDate(`${dateText}T${startTime}:00`) || "";
+  const endAt = endTime ? sanitizeIsoDate(`${dateText}T${endTime}:00`) || "" : "";
+  return { startAt, endAt };
+}
+
+function buildAdminClassroomCourseTimeText(courseStartAt, courseEndAt, fallback = "") {
+  const startDate = courseStartAt ? new Date(courseStartAt) : null;
+  if (!startDate || Number.isNaN(startDate.getTime())) {
+    return sanitizeText(fallback, "", 100);
+  }
+
+  const dateLabel = startDate.toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const startLabel = startDate.toLocaleTimeString("zh-CN", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  const endDate = courseEndAt ? new Date(courseEndAt) : null;
+  if (!endDate || Number.isNaN(endDate.getTime())) {
+    return sanitizeText(`${dateLabel} ${startLabel}`, "", 100);
+  }
+  const endLabel = endDate.toLocaleTimeString("zh-CN", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return sanitizeText(`${dateLabel} ${startLabel}-${endLabel}`, "", 100);
+}
+
+function sortAdminClassroomCoursePlans(plans) {
+  return Array.isArray(plans) ? [...plans] : [];
+}
+
+function sanitizeAdminClassroomCoursePlanPayload(input, index = 0) {
+  const source = input && typeof input === "object" ? input : {};
+  const taskSource = Array.isArray(source.tasks) ? source.tasks : [];
+  const tasks = [];
+
+  for (
+    let taskIndex = 0;
+    taskIndex < taskSource.length && tasks.length < ADMIN_CLASSROOM_COURSE_TASK_MAX_ITEMS;
+    taskIndex += 1
+  ) {
+    const task = sanitizeAdminClassroomTaskPayload(taskSource[taskIndex], taskIndex);
+    if (!task) continue;
+    tasks.push(task);
+  }
+
+  const enabled = sanitizeRuntimeBoolean(source.enabled, true);
+  const files = sanitizeAdminClassroomCourseFilesPayload(source.files);
+  const courseName = sanitizeText(source.courseName || source.name, "", 80);
+  const legacyCourseRange = parseAdminClassroomLegacyCourseTimeRange(
+    source.courseTime || source.time,
+  );
+  const courseStartAt = normalizeAdminClassroomLessonDateTimeInput(
+    source.courseStartAt || source.startAt || legacyCourseRange.startAt,
+  );
+  let courseEndAt = normalizeAdminClassroomLessonDateTimeInput(
+    source.courseEndAt || source.endAt || legacyCourseRange.endAt,
+  );
+  if (courseStartAt && courseEndAt) {
+    const startMs = Date.parse(courseStartAt);
+    const endMs = Date.parse(courseEndAt);
+    if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs < startMs) {
+      courseEndAt = courseStartAt;
+    }
+  }
+  const courseTime = buildAdminClassroomCourseTimeText(
+    courseStartAt,
+    courseEndAt,
+    source.courseTime || source.time,
+  );
+  const notes = sanitizeText(source.notes || source.note, "", 300);
+  if (
+    !courseName &&
+    !courseTime &&
+    !courseStartAt &&
+    !courseEndAt &&
+    !notes &&
+    tasks.length === 0 &&
+    files.length === 0
+  ) {
+    return null;
+  }
+
+  return {
+    id: sanitizeId(source.id, `course-${index + 1}`),
+    courseName: courseName || `未命名课程 ${index + 1}`,
+    courseTime,
+    courseStartAt,
+    courseEndAt,
+    notes,
+    enabled,
+    tasks,
+    files,
+    createdAt: sanitizeIsoDate(source.createdAt) || "",
+    updatedAt: sanitizeIsoDate(source.updatedAt) || "",
+  };
+}
+
+function sanitizeAdminClassroomCoursePlansPayload(input) {
+  const source = Array.isArray(input) ? input : [];
+  const plans = [];
+  for (
+    let index = 0;
+    index < source.length && plans.length < ADMIN_CLASSROOM_COURSE_PLAN_MAX_ITEMS;
+    index += 1
+  ) {
+    const plan = sanitizeAdminClassroomCoursePlanPayload(source[index], index);
+    if (!plan) continue;
+    plans.push(plan);
+  }
+  return plans;
+}
+
+function createAdminClassroomLessonFileId() {
+  return `lesson-file-${Date.now().toString(36)}-${crypto.randomBytes(5).toString("hex")}`;
+}
+
+function normalizeAdminClassroomLessonFileDoc(doc) {
+  return {
+    id: sanitizeId(doc?.fileId || doc?.id, ""),
+    name: sanitizeGroupChatFileName(doc?.fileName || doc?.name || "课程文件.bin"),
+    mimeType: sanitizeGroupChatFileMimeType(doc?.mimeType),
+    size: sanitizeRuntimeInteger(doc?.size, 0, 0, MAX_FILE_SIZE_BYTES),
+    uploadedAt: sanitizeIsoDate(doc?.uploadedAt) || "",
+  };
+}
+
+function iterateAdminClassroomTaskFiles(lesson, onFile) {
+  const safeOnFile = typeof onFile === "function" ? onFile : null;
+  if (!safeOnFile) return;
+  const tasks = Array.isArray(lesson?.tasks) ? lesson.tasks : [];
+  tasks.forEach((task) => {
+    const taskId = sanitizeId(task?.id, "");
+    const files = Array.isArray(task?.files) ? task.files : [];
+    files.forEach((file) => {
+      safeOnFile({
+        file,
+        task,
+        taskId,
+      });
+    });
+  });
+}
+
+function collectAdminClassroomFileIdsFromLesson(lesson) {
+  const ids = [];
+  const lessonFiles = Array.isArray(lesson?.files) ? lesson.files : [];
+  lessonFiles.forEach((file) => {
+    const fileId = sanitizeId(file?.id, "");
+    if (fileId) ids.push(fileId);
+  });
+  iterateAdminClassroomTaskFiles(lesson, ({ file }) => {
+    const fileId = sanitizeId(file?.id, "");
+    if (fileId) ids.push(fileId);
+  });
+  return ids;
+}
+
+function findAdminClassroomLessonTaskById(lesson, taskId) {
+  const safeTaskId = sanitizeId(taskId, "");
+  if (!safeTaskId) return null;
+  const tasks = Array.isArray(lesson?.tasks) ? lesson.tasks : [];
+  const taskIndex = tasks.findIndex((task) => sanitizeId(task?.id, "") === safeTaskId);
+  if (taskIndex < 0) return null;
+  return {
+    task: tasks[taskIndex],
+    taskIndex,
+  };
+}
+
+function findAdminClassroomLessonByFileId(plans, fileId) {
+  const safeFileId = sanitizeId(fileId, "");
+  if (!safeFileId) return null;
+  const source = Array.isArray(plans) ? plans : [];
+  for (const lesson of source) {
+    const files = Array.isArray(lesson?.files) ? lesson.files : [];
+    const match = files.find((file) => sanitizeId(file?.id, "") === safeFileId);
+    if (match) {
+      return {
+        lesson,
+        file: match,
+        task: null,
+        taskId: "",
+      };
+    }
+    let taskMatch = null;
+    iterateAdminClassroomTaskFiles(lesson, ({ file, task, taskId }) => {
+      if (taskMatch || sanitizeId(file?.id, "") !== safeFileId) return;
+      taskMatch = {
+        file,
+        task: task || null,
+        taskId: taskId || "",
+      };
+    });
+    if (taskMatch) {
+      return {
+        lesson,
+        file: taskMatch.file,
+        task: taskMatch.task,
+        taskId: taskMatch.taskId,
+      };
+    }
+  }
+  return null;
+}
+
 function normalizeAdminConfigDoc(doc) {
   return {
     prompts: sanitizeAgentPromptPayload(doc?.agentSystemPrompts),
@@ -9970,6 +11087,7 @@ function normalizeAdminConfigDoc(doc) {
       doc?.shangguanClassTaskProductImprovementEnabled,
       false,
     ),
+    teacherCoursePlans: sanitizeAdminClassroomCoursePlansPayload(doc?.teacherCoursePlans),
     updatedAt: sanitizeIsoDate(doc?.updatedAt),
   };
 }
@@ -12668,8 +13786,16 @@ function resolveFileExtensionByMimeType(mimeType, fallback = "bin") {
   return sanitizeGroupChatOssScopeSegment(fallback || "bin", "bin");
 }
 
-function buildRuntimeOssObjectKey({ scope, userId = "", sessionId = "", fileName = "" }) {
-  const objectPrefix = sanitizeAliyunOssObjectPrefix(groupChatOssConfig?.objectPrefix);
+function buildRuntimeOssObjectKey({
+  scope,
+  userId = "",
+  sessionId = "",
+  fileName = "",
+  objectPrefix = "",
+}) {
+  const resolvedObjectPrefix = sanitizeAliyunOssObjectPrefix(
+    objectPrefix || groupChatOssConfig?.objectPrefix,
+  );
   const safeScope = sanitizeGroupChatOssScopeSegment(scope, "misc");
   const safeUserSegment =
     sanitizeId(userId, "") || sanitizeGroupChatOssScopeSegment(userId, "anonymous");
@@ -12680,17 +13806,71 @@ function buildRuntimeOssObjectKey({ scope, userId = "", sessionId = "", fileName
   const safeFileName = sanitizeGroupChatFileName(fileName)
     .replace(/\s+/g, "_")
     .slice(0, 120);
-  const segments = [objectPrefix, safeScope, safeUserSegment];
+  const segments = [resolvedObjectPrefix, safeScope, safeUserSegment];
   if (safeSessionSegment) {
     segments.push(safeSessionSegment);
   }
   return `${segments.join("/")}/${timestamp}-${randomPart}-${safeFileName}`;
 }
 
+function formatTeacherLessonOssTimeSegment(isoText) {
+  const date = isoText ? new Date(isoText) : null;
+  if (!date || Number.isNaN(date.getTime())) {
+    return new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+  }
+  const year = String(date.getFullYear()).padStart(4, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${year}${month}${day}${hour}${minute}`;
+}
+
+function buildTeacherLessonOssLessonSegment(lesson, lessonIndex = 0) {
+  const safeLessonId = sanitizeId(lesson?.id, "");
+  const safeCourseName = sanitizeGroupChatOssScopeSegment(lesson?.courseName, "lesson");
+  const indexText = String(Math.max(1, Number(lessonIndex) + 1)).padStart(2, "0");
+  if (!safeLessonId) return `lesson-${indexText}-${safeCourseName}`;
+  return `lesson-${indexText}-${safeLessonId.slice(0, 24)}`;
+}
+
+async function uploadTeacherLessonFileToOss({
+  lesson,
+  lessonIndex = 0,
+  file,
+}) {
+  if (!groupChatOssClient || !groupChatOssConfig) {
+    throw new Error("未配置阿里云 OSS，暂时无法上传课程文件。");
+  }
+  const normalizedFile = normalizeMultipartUploadFile(file);
+  if (!normalizedFile || !Buffer.isBuffer(normalizedFile.buffer) || normalizedFile.buffer.length === 0) {
+    throw new Error("课程文件为空，上传失败。");
+  }
+  const lessonSegment = buildTeacherLessonOssLessonSegment(lesson, lessonIndex);
+  const timeSegment = formatTeacherLessonOssTimeSegment(
+    lesson?.courseStartAt || lesson?.courseTime || new Date().toISOString(),
+  );
+  const uploaded = await uploadBufferToGroupChatOss({
+    scope: TEACHER_LESSON_FILE_OSS_SUB_SCOPE,
+    userId: lessonSegment,
+    sessionId: timeSegment,
+    objectPrefix: TEACHER_LESSON_FILE_OSS_SCOPE,
+    fileName: normalizedFile.originalname || "课程文件.bin",
+    mimeType: normalizedFile.mimetype || "application/octet-stream",
+    dataBuffer: normalizedFile.buffer,
+    cacheControl: "private, no-store",
+  });
+  if (!uploaded || !uploaded.ossKey) {
+    throw new Error("课程文件上传到 OSS 失败，请稍后重试。");
+  }
+  return uploaded;
+}
+
 async function uploadBufferToGroupChatOss({
   scope,
   userId = "",
   sessionId = "",
+  objectPrefix = "",
   fileName = "",
   mimeType = "application/octet-stream",
   dataBuffer,
@@ -12707,6 +13887,7 @@ async function uploadBufferToGroupChatOss({
     scope,
     userId,
     sessionId,
+    objectPrefix,
     fileName: safeFileName,
   });
   await callGroupChatOssWithTimeoutFallback(
@@ -12883,6 +14064,18 @@ async function buildGroupChatFileSignedDownloadUrl({ ossKey, fileName }) {
     );
     return "";
   }
+}
+
+async function buildTeacherLessonFileDownloadUrl({ ossKey, fileName }) {
+  const safeKey = sanitizeGroupChatOssObjectKey(ossKey);
+  if (!safeKey) return "";
+  if (groupChatOssConfig?.publicRead) {
+    return buildGroupChatOssObjectUrl(safeKey);
+  }
+  return buildGroupChatFileSignedDownloadUrl({
+    ossKey: safeKey,
+    fileName,
+  });
 }
 
 async function buildGroupChatStoredFileStoragePayload({
@@ -14133,12 +15326,6 @@ async function startServer() {
   console.log(`Mongo connected: ${mongoUri}`);
   await ensureFixedAdminAccounts();
   await ensureFixedStudentAccounts();
-  console.log(
-    `Fixed admin accounts ensured: ${FIXED_ADMIN_ACCOUNTS.map((item) => item.username).join(", ")}`,
-  );
-  console.log(
-    `Fixed student accounts ensured: ${FIXED_STUDENT_ACCOUNTS.length} accounts for ${getTeacherScopeLabel(FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY)}`,
-  );
 
   const server = http.createServer(app);
   initGroupChatWebSocketServer(server);
@@ -14462,6 +15649,21 @@ function isFixedStudentUser(user) {
 function readLockedTeacherScopeKey(value) {
   const raw = String(value || "").trim();
   return raw ? sanitizeTeacherScopeKey(raw) : "";
+}
+
+function isJiaoji231ClassName(value) {
+  const normalized = sanitizeText(value, "", 40)
+    .replace(/\s+/g, "")
+    .replace(/班/g, "");
+  return normalized.includes(CLASS_NAME_JIAOJI_231);
+}
+
+function resolveLoginLockedTeacherScopeKey(user) {
+  const className = sanitizeText(user?.profile?.className, "", 40);
+  if (isJiaoji231ClassName(className)) {
+    return YANG_JUNFENG_TEACHER_SCOPE_KEY;
+  }
+  return readLockedTeacherScopeKey(user?.lockedTeacherScopeKey);
 }
 
 function validatePassword(password) {

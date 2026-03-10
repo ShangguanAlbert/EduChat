@@ -9,6 +9,7 @@ import ProductImprovementTaskPage from "./pages/ProductImprovementTaskPage.jsx";
 import AdminSettingsPage from "./pages/AdminSettingsPage.jsx";
 import AdminOnlineUsersPage from "./pages/AdminOnlineUsersPage.jsx";
 import AdminClassroomSettingsPage from "./pages/AdminClassroomSettingsPage.jsx";
+import TeacherHomePage from "./pages/TeacherHomePage.jsx";
 import ImageGenerationPage from "./pages/ImageGenerationPage.jsx";
 import PartyChatPage from "./pages/PartyChatPage.jsx";
 import RequireAuth from "./app/RequireAuth.jsx";
@@ -86,7 +87,7 @@ export default function App() {
         path="/admin/settings"
         element={
           <RequireAdminAuth>
-            <AdminOnlineUsersPage />
+            <TeacherHomePage />
           </RequireAdminAuth>
         }
       />

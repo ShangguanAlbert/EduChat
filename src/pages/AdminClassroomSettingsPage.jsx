@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, ExternalLink, Save, SlidersHorizontal } from "lucide-react";
+import { ArrowLeft, ExternalLink, Save } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   fetchAdminClassroomSettings,
@@ -110,8 +110,8 @@ export default function AdminClassroomSettingsPage() {
               type="button"
               className="admin-icon-btn"
               onClick={() => navigate(withAuthSlot("/admin/settings", activeSlot))}
-              title="返回用户在线面板"
-              aria-label="返回用户在线面板"
+              title="返回教师主页"
+              aria-label="返回教师主页"
             >
               <ArrowLeft size={18} />
             </button>
@@ -121,14 +121,6 @@ export default function AdminClassroomSettingsPage() {
             </div>
           </div>
           <div className="admin-online-topbar-right">
-            <button
-              type="button"
-              className="admin-ghost-btn"
-              onClick={() => navigate(withAuthSlot("/admin/agent-settings", activeSlot))}
-            >
-              <SlidersHorizontal size={15} />
-              <span>智能体设置</span>
-            </button>
             <button
               type="button"
               className="admin-save-btn"

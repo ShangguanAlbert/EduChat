@@ -160,10 +160,8 @@ export default function AdminOnlineUsersPage() {
     void loadPresence({ silent: true });
   }
 
-  function onBackToLogin() {
-    clearAdminToken();
-    setAdminToken("");
-    navigate(withAuthSlot("/login", activeSlot), { replace: true });
+  function onBackToTeacherHome() {
+    navigate(withAuthSlot("/admin/settings", activeSlot));
   }
 
   return (
@@ -174,9 +172,9 @@ export default function AdminOnlineUsersPage() {
             <button
               type="button"
               className="admin-icon-btn"
-              onClick={onBackToLogin}
-              title="返回主登录界面"
-              aria-label="返回主登录界面"
+              onClick={onBackToTeacherHome}
+              title="返回教师主页"
+              aria-label="返回教师主页"
             >
               <ArrowLeft size={18} />
             </button>
@@ -190,6 +188,13 @@ export default function AdminOnlineUsersPage() {
             <div className="admin-online-refresh-status" role="status">
               最近刷新：{formatDisplayTime(lastRefreshedAt)}
             </div>
+            <button
+              type="button"
+              className="admin-ghost-btn"
+              onClick={() => navigate(withAuthSlot("/admin/settings", activeSlot))}
+            >
+              <span>教师主页</span>
+            </button>
             <button
               type="button"
               className="admin-ghost-btn"

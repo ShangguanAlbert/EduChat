@@ -63,6 +63,20 @@ export function loginAccount(payload) {
   });
 }
 
+export function fetchLoginTeacherScopeLock(username) {
+  const safeUsername = String(username || "").trim();
+  if (!safeUsername) {
+    return Promise.resolve({
+      ok: true,
+      lockedTeacherScopeKey: "",
+      teacherScopeLabel: "",
+    });
+  }
+  return request(
+    `/api/auth/login/teacher-scope-lock?username=${encodeURIComponent(safeUsername)}`,
+  );
+}
+
 export function verifyForgotAccount(payload) {
   return request("/api/auth/forgot/verify", {
     method: "POST",

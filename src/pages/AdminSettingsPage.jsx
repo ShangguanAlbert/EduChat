@@ -1315,10 +1315,6 @@ export default function AdminSettingsPage() {
     navigate(withAuthSlot("/admin/settings", activeSlot));
   }
 
-  function onOpenClassroomSettings() {
-    navigate(withAuthSlot("/admin/classroom-settings", activeSlot));
-  }
-
   async function onExportUsers() {
     if (!adminToken) return;
     setExportError("");
@@ -1992,8 +1988,8 @@ export default function AdminSettingsPage() {
               type="button"
               className="admin-icon-btn"
               onClick={onBackToOnlinePanel}
-              title="返回在线面板"
-              aria-label="返回在线面板"
+              title="返回教师主页"
+              aria-label="返回教师主页"
             >
               <ArrowLeft size={18} />
             </button>
@@ -2023,15 +2019,6 @@ export default function AdminSettingsPage() {
                   ? `保存时间 ${formatClock(lastSavedAt)}`
                   : "保存时间 --:--:--"}
             </div>
-            <button
-              type="button"
-              className="admin-ghost-btn"
-              onClick={onOpenClassroomSettings}
-              title="打开课堂任务设置"
-              aria-label="打开课堂任务设置"
-            >
-              <span>课堂任务设置</span>
-            </button>
             <button
               type="button"
               className="admin-save-btn"
