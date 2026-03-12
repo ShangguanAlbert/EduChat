@@ -160,6 +160,7 @@ const FIXED_ADMIN_ACCOUNTS = Object.freeze([
   { username: "杨占山", password: "2024111004058" },
   { username: "钟怡萱", password: "2024111004053" },
   { username: "杨俊锋", password: "20060038" },
+  { username: "李允帆", password: "2024112004080" },
 ]);
 const FIXED_ADMIN_USERNAME_KEYS = new Set(
   FIXED_ADMIN_ACCOUNTS.map((item) =>
@@ -1455,6 +1456,7 @@ const adminClassroomTaskSchema = new mongoose.Schema(
     id: { type: String, default: "" },
     type: { type: String, default: "text" },
     title: { type: String, default: "" },
+    description: { type: String, default: "" },
     content: { type: String, default: "" },
     files: { type: [adminClassroomCourseFileSchema], default: () => [] },
   },
@@ -11831,8 +11833,13 @@ function sanitizeAdminClassroomTaskPayload(input, index = 0) {
   const source = input && typeof input === "object" ? input : {};
   const type = sanitizeAdminClassroomTaskType(source.type, "text");
   const title = sanitizeText(source.title, "", 80);
+  const description = sanitizeText(source.description || source.note, "", 500);
+  const rawContent =
+    type === "link"
+      ? source.content || source.url
+      : source.content || source.text || source.description;
   const content = sanitizeText(
-    source.content || source.url || source.description,
+    rawContent,
     "",
     type === "link" ? 500 : 1200,
   );
@@ -11842,6 +11849,7 @@ function sanitizeAdminClassroomTaskPayload(input, index = 0) {
     id: sanitizeId(source.id, `task-${index + 1}`),
     type,
     title: title || (type === "link" ? "链接任务" : "文字任务"),
+    description,
     content,
     files,
   };

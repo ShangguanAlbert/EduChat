@@ -94,6 +94,30 @@ function parseTaskLinks(content) {
     .filter(Boolean);
 }
 
+function splitTaskTextContent(content) {
+  const raw = String(content || "").trim();
+  if (!raw) {
+    return {
+      body: "",
+      highlight: "",
+    };
+  }
+  const lines = raw.split(/\r?\n/);
+  const highlightStart = lines.findIndex(
+    (line, index) => index > 0 && /^最后\s*[:：]?/.test(String(line || "").trim()),
+  );
+  if (highlightStart < 0) {
+    return {
+      body: raw,
+      highlight: "",
+    };
+  }
+  return {
+    body: lines.slice(0, highlightStart).join("\n").trim(),
+    highlight: lines.slice(highlightStart).join("\n").trim(),
+  };
+}
+
 function resolveTaskLinkLabel(linkUrl) {
   const raw = String(linkUrl || "").trim();
   if (!raw) return "任务链接";
@@ -105,6 +129,12 @@ function resolveTaskLinkLabel(linkUrl) {
   } catch {
     return raw;
   }
+}
+
+function resolveTaskLinkCtaLabel(linkUrl, linkIndex = 0, total = 1) {
+  const hostLabel = resolveTaskLinkLabel(linkUrl);
+  if (total <= 1) return `打开 ${hostLabel}`;
+  return `打开链接 ${linkIndex + 1} · ${hostLabel}`;
 }
 
 function triggerBrowserDownload(blob, fileName) {
@@ -811,58 +841,91 @@ export default function ModeSelectionPage() {
                                 const taskTypeLabel = task?.type === "link" ? "链接任务" : "文字任务";
                                 const taskContent = String(task?.content || "").trim();
                                 const taskLinks = task?.type === "link" ? parseTaskLinks(taskContent) : [];
+                                const taskDescription =
+                                  task?.type === "link" ? String(task?.description || "").trim() : "";
+                                const textSections =
+                                  task?.type === "link"
+                                    ? { body: "", highlight: "" }
+                                    : splitTaskTextContent(taskContent);
                                 return (
                                   <article
                                     key={String(task?.id || `task-${index + 1}`)}
-                                    className="task-lesson-item"
+                                    className={`task-lesson-item student-task-item${
+                                      task?.type === "link" ? " student-task-item-link" : " student-task-item-text"
+                                    }`}
                                   >
-                                    <header>
-                                      <strong>{task?.title || `任务 ${index + 1}`}</strong>
+                                    <header className="student-task-item-head">
+                                      <div className="student-task-item-title">
+                                        <strong>{task?.title || `任务 ${index + 1}`}</strong>
+                                      </div>
                                       <span>{taskTypeLabel}</span>
                                     </header>
 
-                                    {task?.type === "link" && taskLinks.length > 0 ? (
-                                      <div className="student-task-link-list">
-                                        {taskLinks.map((linkUrl, linkIndex) => (
-                                          <a
-                                            key={`${task?.id || index}-link-${linkIndex + 1}`}
-                                            href={linkUrl}
-                                            target="_blank"
-                                            rel="noreferrer noopener"
-                                            className="student-task-link"
-                                          >
-                                            {resolveTaskLinkLabel(linkUrl)}
-                                          </a>
-                                        ))}
-                                      </div>
-                                    ) : null}
+                                    <div className="student-task-item-body">
+                                      {task?.type === "link" && taskDescription ? (
+                                        <p className="student-task-link-description">{taskDescription}</p>
+                                      ) : null}
 
-                                    {task?.type !== "link" && taskContent ? (
-                                      <p className="student-task-content">{taskContent}</p>
-                                    ) : null}
-
-                                    {taskFiles.length > 0 ? (
-                                      <div className="task-lesson-file-list">
-                                        {taskFiles.map((file, fileIndex) => {
-                                          const fileId = String(file?.id || "");
-                                          return (
-                                            <button
-                                              key={fileId || `task-file-${fileIndex + 1}`}
-                                              type="button"
-                                              className="task-lesson-file-btn"
-                                              onClick={() => void onDownloadLessonFile(fileId)}
-                                              disabled={!fileId || downloadingFileId === fileId}
+                                      {task?.type === "link" && taskLinks.length > 0 ? (
+                                        <div className="student-task-link-list">
+                                          {taskLinks.map((linkUrl, linkIndex) => (
+                                            <a
+                                              key={`${task?.id || index}-link-${linkIndex + 1}`}
+                                              href={linkUrl}
+                                              target="_blank"
+                                              rel="noreferrer noopener"
+                                              className="student-task-link-cta"
                                             >
+                                              <ExternalLink size={15} />
                                               <span>
-                                                <strong>{file?.name || "任务附件"}</strong>
-                                                <small>{formatFileSize(file?.size)}</small>
+                                                {resolveTaskLinkCtaLabel(
+                                                  linkUrl,
+                                                  linkIndex,
+                                                  taskLinks.length,
+                                                )}
                                               </span>
-                                              <Download size={16} />
-                                            </button>
-                                          );
-                                        })}
-                                      </div>
-                                    ) : null}
+                                            </a>
+                                          ))}
+                                        </div>
+                                      ) : null}
+
+                                      {task?.type !== "link" && taskContent ? (
+                                        <div className="student-task-text-block">
+                                          <h4>任务说明</h4>
+                                          {textSections.body ? (
+                                            <p className="student-task-content">{textSections.body}</p>
+                                          ) : null}
+                                          {textSections.highlight ? (
+                                            <div className="student-task-highlight">
+                                              {textSections.highlight}
+                                            </div>
+                                          ) : null}
+                                        </div>
+                                      ) : null}
+
+                                      {taskFiles.length > 0 ? (
+                                        <div className="task-lesson-file-list">
+                                          {taskFiles.map((file, fileIndex) => {
+                                            const fileId = String(file?.id || "");
+                                            return (
+                                              <button
+                                                key={fileId || `task-file-${fileIndex + 1}`}
+                                                type="button"
+                                                className="task-lesson-file-btn"
+                                                onClick={() => void onDownloadLessonFile(fileId)}
+                                                disabled={!fileId || downloadingFileId === fileId}
+                                              >
+                                                <span>
+                                                  <strong>{file?.name || "任务附件"}</strong>
+                                                  <small>{formatFileSize(file?.size)}</small>
+                                                </span>
+                                                <Download size={16} />
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      ) : null}
+                                    </div>
                                   </article>
                                 );
                               })}

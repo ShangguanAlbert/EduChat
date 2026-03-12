@@ -1,25 +1,52 @@
 .student-home-page {
-  background:
-    radial-gradient(920px 430px at 8% 10%, rgba(121, 156, 214, 0.2), transparent 62%),
-    radial-gradient(780px 420px at 94% 12%, rgba(160, 189, 231, 0.22), transparent 60%),
-    linear-gradient(180deg, #f3f6fb, #edf2f8);
+  background: #ffffff;
+  height: 100dvh;
+  padding: 12px;
+  box-sizing: border-box;
 }
 
 .student-home-shell {
-  max-width: 1360px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
+  gap: 0;
+  height: 100%;
 }
 
 .student-home-sidebar {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 12px;
   overscroll-behavior-y: contain;
 }
 
 .student-home-main {
-  background: rgba(255, 255, 255, 0.96);
+  border: 0;
+  border-left: 1px solid #dde5f0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 12px 12px 12px 16px;
+}
+
+.student-home-page .teacher-home-profile {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.student-home-page .teacher-home-avatar {
+  background: #2f4ea3;
+  box-shadow: none;
 }
 
 .student-panel-stack {
   gap: 16px;
+  overflow-y: auto;
+  overscroll-behavior-y: none;
+  -webkit-overflow-scrolling: auto;
 }
 
 .student-lesson-workbench {
@@ -33,6 +60,12 @@
 
 .student-lesson-detail-panel {
   overflow: hidden;
+}
+
+.student-home-page .teacher-lesson-detail-scroll {
+  overflow-y: auto;
+  overscroll-behavior-y: none;
+  -webkit-overflow-scrolling: auto;
 }
 
 .student-lesson-detail-head {
@@ -185,33 +218,114 @@
   align-items: stretch;
 }
 
-.student-task-meta {
-  display: grid;
-  gap: 6px;
+.student-lesson-section .task-lesson-item.student-task-item {
+  padding: 0;
+  border-radius: 16px;
+  border: 1px solid #d6e3f6;
+  border-left-width: 4px;
+  background: #ffffff;
+  gap: 0;
+  overflow: hidden;
 }
 
-.student-task-link {
-  width: fit-content;
-  font-size: 12px;
-  color: #234991;
-  text-decoration: none;
+.student-task-item.student-task-item-link {
+  border-left-color: #2f63c8;
+  background: linear-gradient(180deg, #fcfeff 0%, #f4f8ff 100%);
+}
+
+.student-task-item.student-task-item-text {
+  border-left-color: #cc7b2e;
+  background: linear-gradient(180deg, #fffdfa 0%, #fff8ef 100%);
+}
+
+.student-task-item-head {
+  padding: 14px 16px 10px;
+  align-items: center;
+}
+
+.student-task-item-title {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.student-task-item-head > span {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.student-task-item-body {
+  padding: 0 16px 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.student-task-link-description {
+  margin: 0;
+  font-size: 14px;
+  color: #334155;
+  line-height: 1.65;
+  white-space: pre-wrap;
 }
 
 .student-task-link-list {
   display: grid;
-  gap: 6px;
+  gap: 8px;
 }
 
-.student-task-link:hover {
-  text-decoration: underline;
+.student-task-link-cta {
+  border-radius: 12px;
+  min-height: 42px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #2f63c8;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.student-task-link-cta:hover {
+  background: #2856ad;
+}
+
+.student-task-text-block {
+  display: grid;
+  gap: 8px;
+}
+
+.student-task-text-block h4 {
+  margin: 0;
+  font-size: 13px;
+  color: #7a4c1f;
+  letter-spacing: 0.01em;
 }
 
 .student-task-content {
   margin: 0;
-  font-size: 12px;
+  font-size: 14px;
   color: #344256;
   white-space: pre-wrap;
-  line-height: 1.5;
+  line-height: 1.66;
+}
+
+.student-task-highlight {
+  border: 1px solid #f1cd97;
+  border-radius: 12px;
+  background: #fff4e2;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: #7d4b15;
+  white-space: pre-wrap;
+  line-height: 1.64;
+  font-weight: 600;
+}
+
+.student-task-item .task-lesson-file-list {
+  margin-top: 4px;
 }
 
 .student-workshop-card {
@@ -242,6 +356,20 @@
 }
 
 @media (max-width: 1080px) {
+  .student-home-shell {
+    gap: 10px;
+    height: auto;
+  }
+
+  .student-home-sidebar {
+    padding: 10px 12px;
+  }
+
+  .student-home-main {
+    border-left: 0;
+    padding: 10px 12px;
+  }
+
   .student-home-page .teacher-home-nav {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -253,11 +381,29 @@
 }
 
 @media (max-width: 860px) {
+  .student-home-page {
+    height: auto;
+    min-height: 100dvh;
+    padding: 8px;
+  }
+
   .student-home-page .teacher-home-nav {
     grid-template-columns: 1fr;
   }
 
   .student-task-card {
     padding: 10px;
+  }
+
+  .student-task-item-head {
+    padding: 12px 12px 8px;
+  }
+
+  .student-task-item-body {
+    padding: 0 12px 12px;
+  }
+
+  .student-task-link-cta {
+    justify-content: flex-start;
   }
 }

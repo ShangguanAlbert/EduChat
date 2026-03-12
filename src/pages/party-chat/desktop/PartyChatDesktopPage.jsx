@@ -125,12 +125,21 @@ export default function PartyChatDesktopPage({
     }
     return "chat";
   }, [location.search]);
+  const quickJoinRoomCode = useMemo(() => {
+    try {
+      const params = new URLSearchParams(String(location.search || ""));
+      return normalizeRoomCodeInput(params.get("joinRoomCode") || "");
+    } catch {
+      return "";
+    }
+  }, [location.search]);
   const backButtonLabel = returnTarget === "teacher-home" ? "返回教师主页" : "返回";
   const imageInputRef = useRef(null);
   const fileInputRef = useRef(null);
   const messagesViewportRef = useRef(null);
   const socketRef = useRef(null);
   const joinedRoomIdsRef = useRef(new Set());
+  const quickJoinAttemptedRoomCodeRef = useRef("");
   const latestMessageAtRef = useRef("");
   const activeRoomIdRef = useRef("");
   const latestMessageIdByRoomRef = useRef(new Map());
@@ -1510,6 +1519,54 @@ export default function PartyChatDesktopPage({
   useEffect(() => {
     void loadBootstrap();
   }, [loadBootstrap]);
+
+  useEffect(() => {
+    const roomCode = String(quickJoinRoomCode || "").trim();
+    if (!roomCode) return;
+    if (bootstrapLoading) return;
+    if (quickJoinAttemptedRoomCodeRef.current === roomCode) return;
+
+    const existedRoom = rooms.find((room) => String(room?.roomCode || "").trim() === roomCode);
+    if (existedRoom?.id) {
+      quickJoinAttemptedRoomCodeRef.current = roomCode;
+      setActiveRoomId(existedRoom.id);
+      setActionError("");
+      return;
+    }
+
+    let cancelled = false;
+    quickJoinAttemptedRoomCodeRef.current = roomCode;
+    setJoinSubmitting(true);
+
+    void (async () => {
+      try {
+        const result = await joinPartyRoom(roomCode);
+        const joinedRoom = normalizeRoom(result?.room);
+        await loadBootstrap({ silent: true });
+        if (cancelled) return;
+        if (joinedRoom?.id) {
+          setActiveRoomId(joinedRoom.id);
+        } else {
+          const foundRoom = rooms.find((room) => String(room?.roomCode || "").trim() === roomCode);
+          if (foundRoom?.id) {
+            setActiveRoomId(foundRoom.id);
+          }
+        }
+        setActionError("");
+      } catch (error) {
+        if (cancelled) return;
+        setActionError(error?.message || "加入派失败，请稍后重试。");
+      } finally {
+        if (!cancelled) {
+          setJoinSubmitting(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bootstrapLoading, loadBootstrap, quickJoinRoomCode, rooms]);
 
   useEffect(() => {
     let cancelled = false;

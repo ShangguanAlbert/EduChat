@@ -3,6 +3,7 @@ import {
   ArrowUpDown,
   Bot,
   CalendarDays,
+  CircleHelp,
   ChevronDown,
   ChevronUp,
   ClipboardList,
@@ -26,6 +27,7 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  UserPlus,
   Users,
   X,
   Image,
@@ -237,8 +239,37 @@ function buildDraftTask(type = "text") {
     id: `draft-${type}-${now}-${Math.round(Math.random() * 1000)}`,
     type,
     title: "",
+    description: "",
     content: "",
     files: [],
+  };
+}
+
+function buildTaskTypePatch(task, nextType) {
+  const safeType = nextType === "link" ? "link" : "text";
+  const source = task && typeof task === "object" ? task : {};
+  const currentType = source.type === "link" ? "link" : "text";
+  const currentDescription = String(source.description || "");
+  const currentContent = String(source.content || "");
+
+  if (safeType === currentType) {
+    return { type: safeType };
+  }
+
+  if (safeType === "link") {
+    return {
+      type: "link",
+      description: currentType === "text" ? currentContent : currentDescription,
+      content: stringifyTaskLinkContent(
+        currentType === "link" ? parseTaskLinkContent(currentContent) : [""],
+      ),
+    };
+  }
+
+  return {
+    type: "text",
+    description: currentDescription,
+    content: currentType === "link" ? currentDescription : currentContent,
   };
 }
 
@@ -364,6 +395,7 @@ export default function TeacherHomePage() {
   const [partyRoomMemberSearchInput, setPartyRoomMemberSearchInput] = useState("");
   const [partyRoomSortBy, setPartyRoomSortBy] = useState("admin-order");
   const [copiedPartyRoomId, setCopiedPartyRoomId] = useState("");
+  const [joiningPartyRoomId, setJoiningPartyRoomId] = useState("");
 
   const [onlineLoading, setOnlineLoading] = useState(false);
   const [onlineGeneratedAt, setOnlineGeneratedAt] = useState("");
@@ -690,7 +722,9 @@ export default function TeacherHomePage() {
         },
         activeSlot,
       );
-      navigate(withAuthSlot(`${pathname}?returnTo=teacher-home`, activeSlot));
+      const safePath = String(pathname || "").trim() || "/chat";
+      const joiner = safePath.includes("?") ? "&" : "?";
+      navigate(withAuthSlot(`${safePath}${joiner}returnTo=teacher-home`, activeSlot));
     } catch (rawError) {
       if (handleAuthError(rawError)) return;
       setError(readErrorMessage(rawError));
@@ -1629,6 +1663,21 @@ export default function TeacherHomePage() {
     setCopiedPartyRoomId(roomId);
   }
 
+  async function onJoinPartyRoom(room) {
+    const roomId = String(room?.id || "").trim();
+    const roomCode = String(room?.roomCode || "").trim();
+    if (!roomCode) {
+      setError("该派缺少派号，暂无法加入。");
+      return;
+    }
+    setJoiningPartyRoomId(roomId || roomCode);
+    try {
+      await openTeacherFeature(`/party?joinRoomCode=${encodeURIComponent(roomCode)}`);
+    } finally {
+      setJoiningPartyRoomId("");
+    }
+  }
+
   return (
     <div className="teacher-home-page">
       <div className="teacher-home-shell">
@@ -2036,11 +2085,13 @@ export default function TeacherHomePage() {
                                       { value: "link", label: "问卷/链接" },
                                       { value: "text", label: "文字说明" },
                                     ]}
-                                    onChange={(value) =>
-                                      onUpdateSelectedTask(selectedTask.id, {
-                                        type: value === "link" ? "link" : "text",
-                                      })
-                                    }
+                                    onChange={(value) => {
+                                      const nextType = value === "link" ? "link" : "text";
+                                      onUpdateSelectedTask(
+                                        selectedTask.id,
+                                        buildTaskTypePatch(selectedTask, nextType),
+                                      );
+                                    }}
                                   />
                                 </label>
                                 <label>
@@ -2061,57 +2112,73 @@ export default function TeacherHomePage() {
                               </div>
                               <div className="teacher-task-editor-content">
                                 {selectedTask.type === "link" ? (
-                                  <div className="teacher-link-editor-head">
-                                    <span>链接地址</span>
-                                    <button
-                                      type="button"
-                                      className="teacher-link-add-btn"
-                                      onClick={onAddSelectedTaskLink}
-                                      title="添加一条链接地址"
-                                      aria-label="添加一条链接地址"
-                                    >
-                                      <Plus size={14} />
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <span>任务内容</span>
-                                )}
-                                {selectedTask.type === "link" ? (
-                                  <div className="teacher-link-input-list">
-                                    {selectedTaskLinks.map((link, linkIndex) => (
-                                      <div
-                                        key={`link-${selectedTask.id}-${linkIndex + 1}`}
-                                        className="teacher-link-input-row"
+                                  <>
+                                    <label className="teacher-task-optional-field">
+                                      <span>
+                                        任务说明
+                                        <em>（选填）</em>
+                                      </span>
+                                      <textarea
+                                        value={selectedTask.description || ""}
+                                        onChange={(e) =>
+                                          onUpdateSelectedTask(selectedTask.id, {
+                                            description: e.target.value,
+                                          })
+                                        }
+                                        placeholder="例如：请完成本次课堂调查，约3分钟，匿名填写。"
+                                      />
+                                    </label>
+                                    <div className="teacher-link-editor-head">
+                                      <span>链接地址</span>
+                                      <button
+                                        type="button"
+                                        className="teacher-link-add-btn"
+                                        onClick={onAddSelectedTaskLink}
+                                        title="添加一条链接地址"
+                                        aria-label="添加一条链接地址"
                                       >
-                                        <input
-                                          type="text"
-                                          value={link}
-                                          onChange={(event) =>
-                                            onUpdateSelectedTaskLinkAt(linkIndex, event.target.value)
-                                          }
-                                          placeholder="请输入 https:// 开头链接"
-                                        />
-                                        <button
-                                          type="button"
-                                          className="teacher-icon-btn danger"
-                                          onClick={() => onRemoveSelectedTaskLink(linkIndex)}
-                                          disabled={selectedTaskLinks.length <= 1}
-                                          title="删除该链接地址"
-                                          aria-label="删除该链接地址"
+                                        <Plus size={14} />
+                                      </button>
+                                    </div>
+                                    <div className="teacher-link-input-list">
+                                      {selectedTaskLinks.map((link, linkIndex) => (
+                                        <div
+                                          key={`link-${selectedTask.id}-${linkIndex + 1}`}
+                                          className="teacher-link-input-row"
                                         >
-                                          <Trash2 size={14} />
-                                        </button>
-                                      </div>
-                                    ))}
-                                  </div>
+                                          <input
+                                            type="text"
+                                            value={link}
+                                            onChange={(event) =>
+                                              onUpdateSelectedTaskLinkAt(linkIndex, event.target.value)
+                                            }
+                                            placeholder="请输入 https:// 开头链接"
+                                          />
+                                          <button
+                                            type="button"
+                                            className="teacher-icon-btn danger"
+                                            onClick={() => onRemoveSelectedTaskLink(linkIndex)}
+                                            disabled={selectedTaskLinks.length <= 1}
+                                            title="删除该链接地址"
+                                            aria-label="删除该链接地址"
+                                          >
+                                            <Trash2 size={14} />
+                                          </button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </>
                                 ) : (
-                                  <textarea
-                                    value={selectedTask.content || ""}
-                                    onChange={(e) =>
-                                      onUpdateSelectedTask(selectedTask.id, { content: e.target.value })
-                                    }
-                                    placeholder="请输入任务说明、提交要求或评分标准"
-                                  />
+                                  <>
+                                    <span>任务内容</span>
+                                    <textarea
+                                      value={selectedTask.content || ""}
+                                      onChange={(e) =>
+                                        onUpdateSelectedTask(selectedTask.id, { content: e.target.value })
+                                      }
+                                      placeholder="请输入任务说明、提交要求或评分标准"
+                                    />
+                                  </>
                                 )}
                               </div>
                               <div className="teacher-task-files-block">
@@ -2284,16 +2351,6 @@ export default function TeacherHomePage() {
                           <strong>{selectedHomeworkLesson.missingStudentCount || 0}</strong>
                         </article>
                       </div>
-                      <div className="teacher-homework-lesson-meta">
-                        <strong>{selectedHomeworkLesson.courseName || "未命名课时"}</strong>
-                        <span>
-                          {buildLessonTimeLabel(
-                            selectedHomeworkLesson.courseStartAt,
-                            selectedHomeworkLesson.courseEndAt,
-                            selectedHomeworkLesson.courseTime,
-                          ) || "未设置课时时间"}
-                        </span>
-                      </div>
                       <div className="teacher-homework-table-wrap">
                         <table className="teacher-homework-table">
                           <thead>
@@ -2443,12 +2500,12 @@ export default function TeacherHomePage() {
               <section className="teacher-card teacher-image-library-card">
                 <div className="teacher-image-library-search-wrap">
                   <form className="teacher-image-library-search" onSubmit={onSubmitImageLibrarySearch}>
-                    <label htmlFor="teacher-image-library-keyword">用户搜索</label>
                     <div className="teacher-image-search-input-wrap">
                       <Search size={14} />
                       <input
                         id="teacher-image-library-keyword"
                         type="text"
+                        aria-label="用户搜索"
                         value={imageLibrarySearchInput}
                         onChange={(event) => setImageLibrarySearchInput(event.target.value)}
                         placeholder="输入用户名/姓名/学号/班级"
@@ -2723,6 +2780,8 @@ export default function TeacherHomePage() {
                     visiblePartyRoomItems.map((room, roomIndex) => {
                       const roomId = String(room?.id || "").trim() || `party-room-${roomIndex + 1}`;
                       const members = Array.isArray(room?.members) ? room.members : [];
+                      const roomCode = String(room?.roomCode || "").trim();
+                      const joiningThisRoom = joiningPartyRoomId === roomId;
                       return (
                         <article key={roomId} className="teacher-party-room-item">
                           <header className="teacher-party-room-head">
@@ -2735,19 +2794,26 @@ export default function TeacherHomePage() {
                               </p>
                             </div>
                             <div className="teacher-party-room-head-right">
-                              <span className="teacher-party-room-order">
-                                {`#${String(roomIndex + 1).padStart(2, "0")}`}
-                              </span>
                               <div className="teacher-party-room-actions">
                                 <button
                                   type="button"
                                   className="teacher-ghost-btn teacher-party-room-action-btn"
                                   onClick={() => void onCopyPartyRoomCode(room)}
+                                  disabled={!roomCode}
                                 >
                                   <Copy size={13} />
                                   <span>
                                     {copiedPartyRoomId === roomId ? "已复制" : "复制派号"}
                                   </span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="teacher-primary-btn teacher-party-room-action-btn"
+                                  onClick={() => void onJoinPartyRoom(room)}
+                                  disabled={!roomCode || joiningThisRoom}
+                                >
+                                  <UserPlus size={13} />
+                                  <span>{joiningThisRoom ? "加入中..." : "加入派"}</span>
                                 </button>
                               </div>
                             </div>
@@ -2822,8 +2888,18 @@ export default function TeacherHomePage() {
               <section className="teacher-card teacher-online-summary">
                 {classOnlineSummaries.map((item) => (
                   <div key={item.className} className="teacher-online-count-card">
-                    <p className="teacher-online-count-class">{item.className}</p>
-                    <span className="teacher-online-rule">{item.ruleText}</span>
+                    <p className="teacher-online-count-class">
+                      <span>{item.className}</span>
+                      <button
+                        type="button"
+                        className="teacher-online-rule-help"
+                        aria-label={`${item.className}在线判定标准`}
+                        title="查看在线判定标准"
+                      >
+                        <CircleHelp size={15} />
+                        <span className="teacher-online-rule-tooltip">{item.ruleText}</span>
+                      </button>
+                    </p>
                     <strong>{loading ? "--" : item.count}</strong>
                     <span className="teacher-online-count-label">在线人数</span>
                     <span className="teacher-online-count-note">
@@ -2835,7 +2911,7 @@ export default function TeacherHomePage() {
                 ))}
               </section>
 
-              <section className="teacher-card">
+              <section className="teacher-card teacher-online-list-card">
                 <div className="teacher-online-list-head">
                   <div className="teacher-online-list-head-left">
                     <h3>在线用户列表</h3>
