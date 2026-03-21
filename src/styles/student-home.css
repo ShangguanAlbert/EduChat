@@ -114,6 +114,102 @@
   cursor: not-allowed;
 }
 
+.student-seat-fill-card {
+  display: grid;
+  gap: 8px;
+}
+
+.student-seat-fill-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.student-seat-fill-head span {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.student-seat-fill-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.student-seat-fill-status > span {
+  border: 1px solid #d4dfef;
+  border-radius: 999px;
+  background: #fff;
+  color: #41526d;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+
+.student-seat-fill-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.student-seat-fill-actions select {
+  min-height: 38px;
+  border-radius: 10px;
+  border: 1px solid #cfd9e8;
+  background: #fff;
+  color: #0f172a;
+  font-size: 13px;
+  padding: 0 10px;
+  min-width: 240px;
+}
+
+.student-seat-fill-actions select:focus {
+  border-color: #517dd3;
+  box-shadow: 0 0 0 2px rgba(81, 125, 211, 0.16);
+  outline: none;
+}
+
+.student-seat-fill-actions select:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  background: #f2f4f8;
+}
+
+.student-seat-save-btn {
+  border: 1px solid #173a79;
+  border-radius: 10px;
+  min-height: 38px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: #20498f;
+  cursor: pointer;
+}
+
+.student-seat-save-btn:hover:not(:disabled) {
+  background: #1b3f7c;
+}
+
+.student-seat-save-btn:disabled {
+  opacity: 0.72;
+  cursor: not-allowed;
+}
+
+.student-seat-fill-card > small {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.55;
+}
+
 .student-homework-modal-overlay {
   position: fixed;
   inset: 0;
@@ -395,6 +491,11 @@
 
   .student-task-card {
     padding: 10px;
+  }
+
+  .student-seat-fill-actions select {
+    width: 100%;
+    min-width: 0;
   }
 
   .student-task-item-head {

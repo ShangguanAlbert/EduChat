@@ -399,6 +399,8 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     sortAdminClassroomCoursePlans,
     sanitizeAdminClassroomCoursePlanPayload,
     sanitizeAdminClassroomCoursePlansPayload,
+    sanitizeAdminClassroomSeatLayoutPayload,
+    sanitizeAdminClassroomSeatLayoutsByClassPayload,
     createAdminClassroomLessonFileId,
     createClassroomHomeworkFileId,
     normalizeAdminClassroomLessonFileDoc,
@@ -699,6 +701,78 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     return sanitizeClassroomTargetClassName(lesson?.className);
   }
 
+  function sanitizeSeatLayoutClassName(value) {
+    return sanitizeText(value, "", 40).replace(/\s+/g, "");
+  }
+
+  function normalizeSeatLayoutsByClassFromConfig(config) {
+    return sanitizeAdminClassroomSeatLayoutsByClassPayload(config?.seatLayoutsByClass);
+  }
+
+  function normalizeSeatValueToken(value) {
+    return String(value || "")
+      .trim()
+      .replace(/\s+/g, "")
+      .toLowerCase();
+  }
+
+  function buildStudentSeatIdentity(user, profile) {
+    const safeProfile = profile && typeof profile === "object" ? profile : {};
+    const username = sanitizeText(user?.username, "", 80);
+    const studentName = sanitizeText(safeProfile.name || username, "", 64);
+    const studentId = sanitizeText(safeProfile.studentId, "", 20);
+    const displayValue = `${studentName || username || "未命名学生"}${
+      studentId ? `（${studentId}）` : ""
+    }`;
+    const tokenSet = new Set(
+      [
+        normalizeSeatValueToken(displayValue),
+        normalizeSeatValueToken(studentName),
+        normalizeSeatValueToken(username),
+        normalizeSeatValueToken(studentId),
+        normalizeSeatValueToken(
+          studentId ? `${studentName || username || ""}(${studentId})` : "",
+        ),
+        normalizeSeatValueToken(
+          studentId ? `${studentName || username || ""}（${studentId}）` : "",
+        ),
+      ].filter(Boolean),
+    );
+    return {
+      username,
+      studentName,
+      studentId,
+      displayValue,
+      tokenSet,
+    };
+  }
+
+  function findSeatIndexByIdentityTokens(seats, tokenSet) {
+    if (!Array.isArray(seats) || !(tokenSet instanceof Set) || tokenSet.size === 0) return -1;
+    return seats.findIndex((seatValue) => tokenSet.has(normalizeSeatValueToken(seatValue)));
+  }
+
+  function buildSeatLayoutResponseForUser(layoutsByClass, className, user, profile) {
+    const safeClassName = sanitizeSeatLayoutClassName(className);
+    if (!safeClassName) return null;
+    const safeLayouts = sanitizeAdminClassroomSeatLayoutsByClassPayload(layoutsByClass);
+    const layout = sanitizeAdminClassroomSeatLayoutPayload(safeLayouts[safeClassName] || null);
+    const identity = buildStudentSeatIdentity(user, profile);
+    const mySeatIndex = findSeatIndexByIdentityTokens(layout.seats, identity.tokenSet);
+    return {
+      className: safeClassName,
+      rows: layout.rows,
+      columns: layout.columns,
+      seats: layout.seats,
+      studentFillEnabled: !!layout.studentFillEnabled,
+      teacherLocked: !!layout.teacherLocked,
+      mySeatIndex,
+      mySeatValue: mySeatIndex >= 0 ? String(layout.seats[mySeatIndex] || "").trim() : "",
+      myDisplayValue: identity.displayValue,
+      updatedAt: layout.updatedAt || "",
+    };
+  }
+
   app.get("/api/health", (_, res) => {
     res.json({ ok: true });
   });
@@ -747,8 +821,11 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   app.get("/api/classroom/tasks/settings", requireChatAuth, async (req, res) => {
     const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
     const isShangguanTeacher = teacherScopeKey === SHANGGUAN_FUZE_TEACHER_SCOPE_KEY;
+    const userProfile = sanitizeUserProfile(req.authUser?.profile);
+    const userClassName = sanitizeSeatLayoutClassName(userProfile.className);
     let productImprovementEnabled = false;
     let teacherCoursePlans = [];
+    let seatLayout = null;
 
     if (isShangguanTeacher) {
       const config = await readAdminAgentConfig();
@@ -761,6 +838,12 @@ export function registerAuthUserClassroomRoutes(app, deps) {
             className: resolveClassroomLessonClassName(lesson),
           })),
       );
+      seatLayout = buildSeatLayoutResponseForUser(
+        normalizeSeatLayoutsByClassFromConfig(config),
+        userClassName,
+        req.authUser,
+        userProfile,
+      );
     }
 
     res.json({
@@ -772,6 +855,93 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       questionnaireUrl: CLASSROOM_QUESTIONNAIRE_URL,
       productImprovementEnabled,
       teacherCoursePlans,
+      seatLayout,
+    });
+  });
+
+  app.put("/api/classroom/seat-layout/assignment", requireChatAuth, async (req, res) => {
+    const profile = sanitizeUserProfile(req.authUser?.profile);
+    const className = sanitizeSeatLayoutClassName(profile.className);
+    if (!className) {
+      res.status(400).json({ error: "请先完善班级信息后再填写座位。" });
+      return;
+    }
+
+    const config = await readAdminAgentConfig();
+    const seatLayoutsByClass = normalizeSeatLayoutsByClassFromConfig(config);
+    const currentLayout = sanitizeAdminClassroomSeatLayoutPayload(seatLayoutsByClass[className] || null);
+    if (!currentLayout.studentFillEnabled) {
+      res.status(403).json({ error: "教师暂未开放学生填写座位。" });
+      return;
+    }
+    if (currentLayout.teacherLocked) {
+      res.status(403).json({ error: "教师已锁定当前班级座位，暂不可修改。" });
+      return;
+    }
+
+    const identity = buildStudentSeatIdentity(req.authUser, profile);
+    const currentSeatIndex = findSeatIndexByIdentityTokens(currentLayout.seats, identity.tokenSet);
+    const incomingSeatIndexRaw = req.body?.seatIndex;
+    const clearAssignment =
+      incomingSeatIndexRaw === null ||
+      String(incomingSeatIndexRaw || "").trim() === "" ||
+      String(incomingSeatIndexRaw || "").trim().toLowerCase() === "clear";
+    const nextSeats = [...currentLayout.seats];
+    if (currentSeatIndex >= 0) {
+      nextSeats[currentSeatIndex] = "";
+    }
+
+    if (!clearAssignment) {
+      const targetSeatIndex = sanitizeRuntimeInteger(
+        incomingSeatIndexRaw,
+        -1,
+        0,
+        nextSeats.length - 1,
+      );
+      if (targetSeatIndex < 0 || targetSeatIndex >= nextSeats.length) {
+        res.status(400).json({ error: "座位编号无效，请刷新后重试。" });
+        return;
+      }
+      const occupiedValue = String(nextSeats[targetSeatIndex] || "").trim();
+      const occupiedToken = normalizeSeatValueToken(occupiedValue);
+      if (occupiedValue && !identity.tokenSet.has(occupiedToken)) {
+        res.status(409).json({ error: "该座位已被占用，请选择其他座位。" });
+        return;
+      }
+      nextSeats[targetSeatIndex] = identity.displayValue;
+    }
+
+    seatLayoutsByClass[className] = {
+      ...currentLayout,
+      seats: nextSeats,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const doc = await AdminConfig.findOneAndUpdate(
+      { key: ADMIN_CONFIG_KEY },
+      {
+        $set: {
+          key: ADMIN_CONFIG_KEY,
+          seatLayoutsByClass,
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true,
+      },
+    ).lean();
+    const normalizedConfig = normalizeAdminConfigDoc(doc);
+    const nextLayout = buildSeatLayoutResponseForUser(
+      normalizedConfig.seatLayoutsByClass,
+      className,
+      req.authUser,
+      profile,
+    );
+
+    res.json({
+      ok: true,
+      seatLayout: nextLayout,
     });
   });
 
@@ -1595,7 +1765,43 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       shangguanClassTaskProductImprovementEnabled:
         !!config.shangguanClassTaskProductImprovementEnabled,
       teacherCoursePlans: config.teacherCoursePlans,
+      seatLayoutsByClass: normalizeSeatLayoutsByClassFromConfig(config),
       updatedAt: config.updatedAt,
+    });
+  });
+
+  app.get("/api/auth/admin/classroom-seat-layouts", requireAdminAuth, async (_req, res) => {
+    const config = await readAdminAgentConfig();
+    res.json({
+      ok: true,
+      seatLayoutsByClass: normalizeSeatLayoutsByClassFromConfig(config),
+      updatedAt: config.updatedAt || new Date().toISOString(),
+    });
+  });
+
+  app.put("/api/auth/admin/classroom-seat-layouts", requireAdminAuth, async (req, res) => {
+    const seatLayoutsByClass = sanitizeAdminClassroomSeatLayoutsByClassPayload(
+      req.body?.seatLayoutsByClass,
+    );
+    const doc = await AdminConfig.findOneAndUpdate(
+      { key: ADMIN_CONFIG_KEY },
+      {
+        $set: {
+          key: ADMIN_CONFIG_KEY,
+          seatLayoutsByClass,
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true,
+      },
+    ).lean();
+    const config = normalizeAdminConfigDoc(doc);
+    res.json({
+      ok: true,
+      seatLayoutsByClass: normalizeSeatLayoutsByClassFromConfig(config),
+      updatedAt: config.updatedAt || new Date().toISOString(),
     });
   });
 
@@ -2128,6 +2334,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   app.put("/api/auth/admin/classroom-plans", async (req, res) => {
     if (!(await authenticateAdminRequest(req, res))) return;
     const previous = await readAdminAgentConfig();
+    const previousSeatLayoutsByClass = normalizeSeatLayoutsByClassFromConfig(previous);
     const rawPlans = sanitizeAdminClassroomCoursePlansPayload(req.body?.teacherCoursePlans);
     const previousById = new Map(
       previous.teacherCoursePlans.map((item) => [String(item?.id || ""), item]),
@@ -2160,6 +2367,13 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     const shangguanClassTaskProductImprovementEnabled = hasClassroomToggle
       ? sanitizeRuntimeBoolean(req.body?.shangguanClassTaskProductImprovementEnabled, false)
       : !!previous.shangguanClassTaskProductImprovementEnabled;
+    const hasSeatLayoutsPayload = Object.prototype.hasOwnProperty.call(
+      req.body || {},
+      "seatLayoutsByClass",
+    );
+    const seatLayoutsByClass = hasSeatLayoutsPayload
+      ? sanitizeAdminClassroomSeatLayoutsByClassPayload(req.body?.seatLayoutsByClass)
+      : previousSeatLayoutsByClass;
 
     const previousFileIds = new Set();
     previous.teacherCoursePlans.forEach((lesson) => {
@@ -2217,6 +2431,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
           key: ADMIN_CONFIG_KEY,
           teacherCoursePlans,
           shangguanClassTaskProductImprovementEnabled,
+          seatLayoutsByClass,
         },
       },
       {
@@ -2234,6 +2449,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       shangguanClassTaskProductImprovementEnabled:
         !!config.shangguanClassTaskProductImprovementEnabled,
       teacherCoursePlans: config.teacherCoursePlans,
+      seatLayoutsByClass: normalizeSeatLayoutsByClassFromConfig(config),
       updatedAt: config.updatedAt,
     });
   });

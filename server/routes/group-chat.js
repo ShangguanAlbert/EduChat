@@ -833,7 +833,7 @@ export function registerGroupChatRoutes(app, deps) {
         {
           _id: normalizedRoom.id,
           memberUserIds: { $ne: userId },
-          "memberUserIds.4": { $exists: false },
+          [`memberUserIds.${Math.max(0, GROUP_CHAT_MAX_MEMBERS_PER_ROOM - 1)}`]: { $exists: false },
           memberCount: { $lt: GROUP_CHAT_MAX_MEMBERS_PER_ROOM },
         },
         {

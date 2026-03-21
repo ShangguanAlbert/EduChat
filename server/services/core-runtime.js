@@ -114,6 +114,13 @@ const ADMIN_CLASSROOM_COURSE_PLAN_MAX_ITEMS = 40;
 const ADMIN_CLASSROOM_COURSE_TASK_MAX_ITEMS = 12;
 const ADMIN_CLASSROOM_COURSE_FILE_MAX_ITEMS = 20;
 const ADMIN_CLASSROOM_COURSE_FILE_UPLOAD_MAX_FILES = 6;
+const ADMIN_CLASSROOM_SEAT_LAYOUT_MIN_ROWS = 3;
+const ADMIN_CLASSROOM_SEAT_LAYOUT_MAX_ROWS = 10;
+const ADMIN_CLASSROOM_SEAT_LAYOUT_MIN_COLUMNS = 3;
+const ADMIN_CLASSROOM_SEAT_LAYOUT_MAX_COLUMNS = 10;
+const ADMIN_CLASSROOM_SEAT_LAYOUT_DEFAULT_ROWS = 6;
+const ADMIN_CLASSROOM_SEAT_LAYOUT_DEFAULT_COLUMNS = 8;
+const ADMIN_CLASSROOM_SEAT_LAYOUT_MAX_CLASS_COUNT = 120;
 const VOLCENGINE_IMAGE_GENERATION_MODEL_ID_45 = "doubao-seedream-4-5-251128";
 const VOLCENGINE_IMAGE_GENERATION_MODEL_ID_50 = "doubao-seedream-5-0-260128";
 const DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL =
@@ -136,7 +143,7 @@ const GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const GENERATED_IMAGE_HISTORY_FETCH_TIMEOUT_MS = 15 * 1000;
 const GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER = 2;
 const GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER = 8;
-const GROUP_CHAT_MAX_MEMBERS_PER_ROOM = 5;
+const GROUP_CHAT_MAX_MEMBERS_PER_ROOM = 10;
 const GROUP_CHAT_MAX_ROOMS_PER_BOOTSTRAP = 16;
 const GROUP_CHAT_DEFAULT_MESSAGES_LIMIT = 80;
 const GROUP_CHAT_MAX_MESSAGES_LIMIT = 200;
@@ -1531,6 +1538,10 @@ const adminConfigSchema = new mongoose.Schema(
     teacherCoursePlans: {
       type: [adminClassroomCoursePlanSchema],
       default: () => [],
+    },
+    seatLayoutsByClass: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({}),
     },
   },
   {
@@ -7361,6 +7372,56 @@ function sanitizeAdminClassroomClassName(value, fallback = ADMIN_CLASSROOM_DEFAU
   return sanitizeText(fallback, ADMIN_CLASSROOM_DEFAULT_CLASS_NAME, 40).replace(/\s+/g, "");
 }
 
+function sanitizeAdminSeatLayoutClassName(value) {
+  return sanitizeText(value, "", 40).replace(/\s+/g, "");
+}
+
+function sanitizeAdminClassroomSeatLayoutPayload(input) {
+  const source = input && typeof input === "object" ? input : {};
+  const rows = sanitizeRuntimeInteger(
+    source.rows,
+    ADMIN_CLASSROOM_SEAT_LAYOUT_DEFAULT_ROWS,
+    ADMIN_CLASSROOM_SEAT_LAYOUT_MIN_ROWS,
+    ADMIN_CLASSROOM_SEAT_LAYOUT_MAX_ROWS,
+  );
+  const columns = sanitizeRuntimeInteger(
+    source.columns,
+    ADMIN_CLASSROOM_SEAT_LAYOUT_DEFAULT_COLUMNS,
+    ADMIN_CLASSROOM_SEAT_LAYOUT_MIN_COLUMNS,
+    ADMIN_CLASSROOM_SEAT_LAYOUT_MAX_COLUMNS,
+  );
+  const seatCount = rows * columns;
+  const sourceSeats = Array.isArray(source.seats) ? source.seats : [];
+  const seats = Array.from({ length: seatCount }, (_, index) =>
+    sanitizeText(sourceSeats[index], "", 80),
+  );
+  return {
+    rows,
+    columns,
+    seats,
+    studentFillEnabled: sanitizeRuntimeBoolean(source.studentFillEnabled, true),
+    teacherLocked: sanitizeRuntimeBoolean(source.teacherLocked, false),
+    updatedAt: sanitizeIsoDate(source.updatedAt) || "",
+  };
+}
+
+function sanitizeAdminClassroomSeatLayoutsByClassPayload(input) {
+  const source = input && typeof input === "object" ? input : {};
+  const result = {};
+  const entries = Object.entries(source);
+  for (
+    let index = 0;
+    index < entries.length && index < ADMIN_CLASSROOM_SEAT_LAYOUT_MAX_CLASS_COUNT;
+    index += 1
+  ) {
+    const [className, layout] = entries[index];
+    const safeClassName = sanitizeAdminSeatLayoutClassName(className);
+    if (!safeClassName || Object.prototype.hasOwnProperty.call(result, safeClassName)) continue;
+    result[safeClassName] = sanitizeAdminClassroomSeatLayoutPayload(layout);
+  }
+  return result;
+}
+
 function sanitizeAdminClassroomCoursePlanPayload(input, index = 0) {
   const source = input && typeof input === "object" ? input : {};
   const taskSource = Array.isArray(source.tasks) ? source.tasks : [];
@@ -7588,6 +7649,7 @@ function normalizeAdminConfigDoc(doc) {
       false,
     ),
     teacherCoursePlans: sanitizeAdminClassroomCoursePlansPayload(doc?.teacherCoursePlans),
+    seatLayoutsByClass: sanitizeAdminClassroomSeatLayoutsByClassPayload(doc?.seatLayoutsByClass),
     updatedAt: sanitizeIsoDate(doc?.updatedAt),
   };
 }
@@ -13388,6 +13450,8 @@ export {
   sortAdminClassroomCoursePlans,
   sanitizeAdminClassroomCoursePlanPayload,
   sanitizeAdminClassroomCoursePlansPayload,
+  sanitizeAdminClassroomSeatLayoutPayload,
+  sanitizeAdminClassroomSeatLayoutsByClassPayload,
   createAdminClassroomLessonFileId,
   createClassroomHomeworkFileId,
   normalizeAdminClassroomLessonFileDoc,

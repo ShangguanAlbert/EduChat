@@ -204,6 +204,17 @@ export function saveAdminClassroomPlans(adminToken, payload) {
   });
 }
 
+export function fetchAdminClassroomSeatLayouts(adminToken) {
+  return request("/api/auth/admin/classroom-seat-layouts", adminToken);
+}
+
+export function saveAdminClassroomSeatLayouts(adminToken, payload = {}) {
+  return request("/api/auth/admin/classroom-seat-layouts", adminToken, {
+    method: "PUT",
+    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+  });
+}
+
 export function fetchAdminClassroomHomeworkOverview(adminToken) {
   return request("/api/auth/admin/classroom-homework/overview", adminToken);
 }
@@ -437,6 +448,20 @@ export function exportAdminChatsTxt(adminToken, teacherScopeKey) {
   return request(withTeacherScopeQuery("/api/auth/admin/export/chats-txt", teacherScopeKey), adminToken);
 }
 
+export function exportAdminGroupChatsTxt(adminToken, teacherScopeKey) {
+  return request(
+    withTeacherScopeQuery("/api/auth/admin/export/group-chats-txt", teacherScopeKey),
+    adminToken,
+  );
+}
+
+export function exportAdminGeneratedImagesTxt(adminToken, teacherScopeKey) {
+  return request(
+    withTeacherScopeQuery("/api/auth/admin/export/generated-images-txt", teacherScopeKey),
+    adminToken,
+  );
+}
+
 export async function exportAdminChatsZip(adminToken, teacherScopeKey) {
   const resp = await fetch(withTeacherScopeQuery("/api/auth/admin/export/chats-zip", teacherScopeKey), {
     headers: authHeader(adminToken),
@@ -462,6 +487,36 @@ export async function exportAdminChatsZip(adminToken, teacherScopeKey) {
     readContentDispositionFilename(resp.headers.get("Content-Disposition")) ||
     "educhat-chats-by-user.zip";
 
+  return { blob, filename };
+}
+
+export async function exportAdminAllRecordsZip(adminToken, teacherScopeKey) {
+  const resp = await fetch(
+    withTeacherScopeQuery("/api/auth/admin/export/all-records-zip", teacherScopeKey),
+    {
+      headers: authHeader(adminToken),
+    },
+  );
+
+  if (!resp.ok) {
+    let message = "";
+    try {
+      const data = await resp.json();
+      message = data?.error || data?.message || "";
+    } catch {
+      try {
+        message = await resp.text();
+      } catch {
+        message = "";
+      }
+    }
+    throw new Error(message || `请求失败（${resp.status}）`);
+  }
+
+  const blob = await resp.blob();
+  const filename =
+    readContentDispositionFilename(resp.headers.get("Content-Disposition")) ||
+    "educhat-all-records.zip";
   return { blob, filename };
 }
 

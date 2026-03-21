@@ -2029,79 +2029,6 @@ export default function AdminSettingsPage() {
               <span>{saving ? "保存中..." : "保存"}</span>
             </button>
 
-            <div className="admin-export-wrap" ref={menuRef}>
-              <button
-                type="button"
-                className="admin-icon-btn"
-                onClick={() => setShowExportMenu((v) => !v)}
-                title="导出与数据操作"
-                aria-label="导出与数据操作"
-              >
-                <Download size={18} />
-              </button>
-
-              {showExportMenu && (
-                <div className="admin-export-menu">
-                  <div className="admin-export-filter">
-                    <label
-                      className="admin-export-filter-label"
-                    >
-                      授课教师
-                    </label>
-                    <PortalSelect
-                      className="admin-export-filter-dropdown"
-                      value={selectedTeacherScopeKey}
-                      ariaLabel="导出授课教师"
-                      options={TEACHER_SCOPE_OPTIONS.map((item) => ({
-                        value: item.key,
-                        label:
-                          item.key === DEFAULT_TEACHER_SCOPE_KEY
-                            ? `${item.label}（历史数据）`
-                            : item.label,
-                      }))}
-                      onChange={setSelectedTeacherScopeKey}
-                      disabled={!!exportLoading || deleteLoading}
-                      compact
-                    />
-                  </div>
-                  <div className="admin-export-divider" />
-                  <button
-                    type="button"
-                    className="admin-export-item"
-                    onClick={onExportUsers}
-                    disabled={!!exportLoading || deleteLoading}
-                  >
-                    {exportLoading === "users" ? "导出中..." : "导出账号密码数据（TXT）"}
-                  </button>
-                  <button
-                    type="button"
-                    className="admin-export-item"
-                    onClick={onExportChatsTxt}
-                    disabled={!!exportLoading || deleteLoading}
-                  >
-                    {exportLoading === "chats" ? "导出中..." : "导出聊天数据（TXT）"}
-                  </button>
-                  <button
-                    type="button"
-                    className="admin-export-item"
-                    onClick={onExportChatsZip}
-                    disabled={!!exportLoading || deleteLoading}
-                  >
-                    {exportLoading === "zip" ? "打包中..." : "导出聊天数据（ZIP 按用户）"}
-                  </button>
-                  <div className="admin-export-divider" />
-                  <button
-                    type="button"
-                    className="admin-export-item danger"
-                    onClick={() => setShowDeleteConfirm(true)}
-                    disabled={!!exportLoading || deleteLoading}
-                  >
-                    <Trash2 size={15} />
-                    <span>删除当前授课教师的对话数据</span>
-                  </button>
-                </div>
-              )}
-            </div>
           </div>
         </header>
 
@@ -3364,44 +3291,6 @@ export default function AdminSettingsPage() {
         </div>
       </div>
 
-      {showDeleteConfirm && (
-        <div
-          className="admin-confirm-overlay"
-          role="presentation"
-          onClick={() => setShowDeleteConfirm(false)}
-        >
-          <div
-            className="admin-confirm-card"
-            role="dialog"
-            aria-modal="true"
-            aria-label="删除当前授课教师对话数据"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3>{`删除“${selectedTeacherScopeLabel}”授课教师的对话数据`}</h3>
-            <p>
-              此操作只会清空该授课教师作用域下的用户会话、消息和图片历史，其他授课教师的数据与账号信息会保留。
-            </p>
-            <div className="admin-confirm-actions">
-              <button
-                type="button"
-                className="admin-ghost-btn"
-                onClick={() => setShowDeleteConfirm(false)}
-                disabled={deleteLoading}
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                className="admin-danger-btn"
-                onClick={onDeleteAllChats}
-                disabled={deleteLoading}
-              >
-                {deleteLoading ? "删除中..." : "确认删除"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

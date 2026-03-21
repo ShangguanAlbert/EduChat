@@ -24,6 +24,7 @@ import {
   downloadClassroomLessonFile,
   fetchClassroomHomeworkSubmissions,
   fetchClassroomTaskSettings,
+  updateClassroomSeatAssignment,
   uploadClassroomHomeworkFiles,
 } from "./classroom/classroomApi.js";
 import "../styles/teacher-home.css";
@@ -237,6 +238,36 @@ function sortLessonPlans(plans) {
     .map((item) => item.lesson);
 }
 
+function toSeatIndexNumber(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return -1;
+  const parsed = Number.parseInt(String(value).trim(), 10);
+  return Number.isFinite(parsed) ? parsed : -1;
+}
+
+function normalizeStudentSeatLayout(input) {
+  const source = input && typeof input === "object" ? input : {};
+  const rows = Math.max(3, Math.min(10, Number.parseInt(String(source.rows || 6), 10) || 6));
+  const columns = Math.max(3, Math.min(10, Number.parseInt(String(source.columns || 8), 10) || 8));
+  const seatCount = rows * columns;
+  const sourceSeats = Array.isArray(source.seats) ? source.seats : [];
+  const seats = Array.from({ length: seatCount }, (_, index) => String(sourceSeats[index] || ""));
+  const mySeatIndexRaw = toSeatIndexNumber(source.mySeatIndex);
+  const mySeatIndex =
+    mySeatIndexRaw >= 0 && mySeatIndexRaw < seats.length ? mySeatIndexRaw : -1;
+  return {
+    className: String(source.className || "").trim(),
+    rows,
+    columns,
+    seats,
+    studentFillEnabled: source.studentFillEnabled !== false,
+    teacherLocked: source.teacherLocked === true,
+    mySeatIndex,
+    mySeatValue: String(source.mySeatValue || "").trim(),
+    myDisplayValue: String(source.myDisplayValue || "").trim(),
+    updatedAt: String(source.updatedAt || ""),
+  };
+}
+
 function WorkshopLaunchIcon() {
   return (
     <svg
@@ -290,10 +321,14 @@ export default function ModeSelectionPage() {
   const [homeworkSubmissionsByLesson, setHomeworkSubmissionsByLesson] = useState({});
   const [homeworkComposerOpenLessonId, setHomeworkComposerOpenLessonId] = useState("");
   const [homeworkDropActive, setHomeworkDropActive] = useState(false);
+  const [seatSaving, setSeatSaving] = useState(false);
+  const [seatError, setSeatError] = useState("");
+  const [seatSelectedIndex, setSeatSelectedIndex] = useState("");
   const [selectedCourseId, setSelectedCourseId] = useState("");
   const [taskSettings, setTaskSettings] = useState({
     firstLessonDate: CLASS_TASK_FALLBACK_DATE,
     teacherCoursePlans: [],
+    seatLayout: null,
   });
 
   useEffect(() => {
@@ -320,7 +355,9 @@ export default function ModeSelectionPage() {
           teacherCoursePlans: Array.isArray(data?.teacherCoursePlans)
             ? data.teacherCoursePlans
             : [],
+          seatLayout: data?.seatLayout ? normalizeStudentSeatLayout(data.seatLayout) : null,
         });
+        setSeatError("");
         setHomeworkSubmissionsByLesson(
           homeworkData && typeof homeworkData === "object"
             ? homeworkData.submissionsByLesson && typeof homeworkData.submissionsByLesson === "object"
@@ -332,6 +369,7 @@ export default function ModeSelectionPage() {
         if (cancelled) return;
         setSettingsError(readErrorMessage(error));
         setHomeworkSubmissionsByLesson({});
+        setSeatError("");
       } finally {
         if (!cancelled) {
           setSettingsLoading(false);
@@ -609,10 +647,6 @@ export default function ModeSelectionPage() {
     }
   }
 
-  if (!isShangguanTeacher) {
-    return <Navigate to={withAuthSlot("/chat", activeSlot)} replace />;
-  }
-
   const sidebarItems = [
     {
       key: "classroom",
@@ -658,6 +692,88 @@ export default function ModeSelectionPage() {
       : []
     : [];
   const homeworkUploading = homeworkUploadingLessonId === selectedLessonId;
+  const classroomSeatLayout = taskSettings.seatLayout
+    ? normalizeStudentSeatLayout(taskSettings.seatLayout)
+    : null;
+  const classroomSeatFillWritable =
+    !!classroomSeatLayout &&
+    classroomSeatLayout.studentFillEnabled &&
+    !classroomSeatLayout.teacherLocked;
+  const classroomSeatMyIndex = classroomSeatLayout ? classroomSeatLayout.mySeatIndex : -1;
+  const classroomSeatItems = useMemo(() => {
+    if (!classroomSeatLayout) return [];
+    return classroomSeatLayout.seats.map((seatValue, index) => {
+      const row = Math.floor(index / classroomSeatLayout.columns) + 1;
+      const column = (index % classroomSeatLayout.columns) + 1;
+      const valueText = String(seatValue || "").trim();
+      return {
+        index,
+        row,
+        column,
+        value: valueText,
+        occupied: !!valueText,
+        isMine: classroomSeatMyIndex >= 0 && classroomSeatMyIndex === index,
+      };
+    });
+  }, [classroomSeatLayout, classroomSeatMyIndex]);
+  const classroomSeatSelectableItems = useMemo(
+    () => classroomSeatItems.filter((item) => item.isMine || !item.occupied),
+    [classroomSeatItems],
+  );
+  const classroomSeatSelectedIndexNumber = toSeatIndexNumber(seatSelectedIndex);
+  const classroomSeatHasSelection =
+    classroomSeatSelectedIndexNumber >= 0 &&
+    classroomSeatSelectedIndexNumber < classroomSeatItems.length;
+  const classroomSeatSelectedItem = classroomSeatHasSelection
+    ? classroomSeatItems[classroomSeatSelectedIndexNumber]
+    : null;
+  const classroomSeatSelectionMatchesCurrent =
+    classroomSeatSelectedIndexNumber === classroomSeatMyIndex;
+
+  useEffect(() => {
+    if (!classroomSeatLayout) {
+      setSeatSelectedIndex("");
+      return;
+    }
+    if (classroomSeatLayout.mySeatIndex >= 0) {
+      setSeatSelectedIndex(String(classroomSeatLayout.mySeatIndex));
+      return;
+    }
+    setSeatSelectedIndex("");
+  }, [classroomSeatLayout]);
+
+  async function onSaveSeatSelection() {
+    if (!classroomSeatLayout) return;
+    if (!classroomSeatFillWritable) {
+      setSeatError(classroomSeatLayout.teacherLocked ? "教师已锁定当前班级座位。" : "教师暂未开放学生填写。");
+      return;
+    }
+    if (!classroomSeatHasSelection) {
+      setSeatError("请先选择一个空座位。");
+      return;
+    }
+    setSeatSaving(true);
+    setSeatError("");
+    try {
+      const data = await updateClassroomSeatAssignment(classroomSeatSelectedIndexNumber);
+      const nextSeatLayout = data?.seatLayout ? normalizeStudentSeatLayout(data.seatLayout) : null;
+      setTaskSettings((current) => ({
+        ...current,
+        seatLayout: nextSeatLayout,
+      }));
+      setSeatSelectedIndex(
+        nextSeatLayout && nextSeatLayout.mySeatIndex >= 0 ? String(nextSeatLayout.mySeatIndex) : "",
+      );
+    } catch (error) {
+      setSeatError(error?.message || "保存座位失败，请稍后重试。");
+    } finally {
+      setSeatSaving(false);
+    }
+  }
+
+  if (!isShangguanTeacher) {
+    return <Navigate to={withAuthSlot("/chat", activeSlot)} replace />;
+  }
 
   return (
     <div className="teacher-home-page student-home-page">
@@ -822,6 +938,78 @@ export default function ModeSelectionPage() {
                               <span>{selectedHomeworkUploadEnabled ? "提交作业" : "教师暂未开启作业上传"}</span>
                             </button>
                           </div>
+                          {classroomSeatLayout ? (
+                            <div className="teacher-info-line teacher-span-two student-seat-fill-card">
+                              <div className="student-seat-fill-head">
+                                <strong>固定座位填写</strong>
+                                <span>{`班级：${classroomSeatLayout.className || "--"}`}</span>
+                              </div>
+                              <div className="student-seat-fill-status">
+                                <span>{`学生填写：${
+                                  classroomSeatLayout.studentFillEnabled ? "已开放" : "已关闭"
+                                }`}</span>
+                                <span>{`教师锁定：${
+                                  classroomSeatLayout.teacherLocked ? "已锁定" : "未锁定"
+                                }`}</span>
+                                <span>
+                                  {classroomSeatMyIndex >= 0
+                                    ? `我的座位：${Math.floor(classroomSeatMyIndex / classroomSeatLayout.columns) + 1}-${
+                                        (classroomSeatMyIndex % classroomSeatLayout.columns) + 1
+                                      }`
+                                    : "我的座位：未填写"}
+                                </span>
+                              </div>
+                              <div className="student-seat-fill-actions">
+                                <select
+                                  value={seatSelectedIndex}
+                                  onChange={(event) => {
+                                    setSeatSelectedIndex(event.target.value);
+                                    if (seatError) setSeatError("");
+                                  }}
+                                  disabled={!classroomSeatFillWritable || seatSaving}
+                                >
+                                  <option value="">请选择座位</option>
+                                  {classroomSeatSelectableItems.map((item) => (
+                                    <option key={`student-seat-${item.index}`} value={String(item.index)}>
+                                      {`座位 ${item.row}-${item.column}${
+                                        item.isMine ? "（当前）" : item.value ? `（${item.value}）` : ""
+                                      }`}
+                                    </option>
+                                  ))}
+                                </select>
+                                <button
+                                  type="button"
+                                  className="student-seat-save-btn"
+                                  onClick={() => void onSaveSeatSelection()}
+                                  disabled={
+                                    !classroomSeatFillWritable ||
+                                    seatSaving ||
+                                    !classroomSeatHasSelection ||
+                                    classroomSeatSelectionMatchesCurrent
+                                  }
+                                >
+                                  {seatSaving ? "保存中..." : "保存座位"}
+                                </button>
+                              </div>
+                              <small>
+                                {classroomSeatLayout.teacherLocked
+                                  ? "当前已被教师锁定，学生暂不可修改。"
+                                  : classroomSeatLayout.studentFillEnabled
+                                    ? "可选择空座位后保存，保存后会自动覆盖你此前填写的位置。"
+                                    : "教师暂未开放学生填写，请等待通知。"}
+                              </small>
+                              {seatError ? (
+                                <p className="task-status-tip error" role="alert">
+                                  {seatError}
+                                </p>
+                              ) : null}
+                              {classroomSeatSelectedItem &&
+                              !classroomSeatSelectionMatchesCurrent &&
+                              classroomSeatFillWritable ? (
+                                <p className="task-status-tip">{`即将保存为：座位 ${classroomSeatSelectedItem.row}-${classroomSeatSelectedItem.column}`}</p>
+                              ) : null}
+                            </div>
+                          ) : null}
                           {String(selectedCourse?.notes || "").trim() ? (
                             <div className="teacher-info-line teacher-span-two">
                               <strong>课时备注</strong>

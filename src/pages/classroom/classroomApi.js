@@ -37,6 +37,15 @@ export function fetchClassroomTaskSettings() {
   return request("/api/classroom/tasks/settings");
 }
 
+export function updateClassroomSeatAssignment(seatIndex) {
+  const hasSeatIndex = seatIndex !== null && seatIndex !== undefined && String(seatIndex).trim() !== "";
+  const payload = hasSeatIndex ? { seatIndex: Number(seatIndex) } : { seatIndex: null };
+  return request("/api/classroom/seat-layout/assignment", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function fetchClassroomHomeworkSubmissions() {
   return request("/api/classroom/homework/submissions/me");
 }

@@ -2415,6 +2415,367 @@ export function registerAdminRoutes(app, deps) {
     });
   });
 
+  function selectTeacherScopeUsers(users, teacherScopeKey) {
+    const safeTeacherScopeKey = sanitizeTeacherScopeKey(teacherScopeKey);
+    const source = Array.isArray(users) ? users : [];
+    if (isDefaultTeacherScopeKey(safeTeacherScopeKey)) return source;
+    return source.filter(
+      (user) => resolveLoginLockedTeacherScopeKey(user) === safeTeacherScopeKey,
+    );
+  }
+
+  async function readTeacherScopeExportUserContext(teacherScopeKey) {
+    const safeTeacherScopeKey = sanitizeTeacherScopeKey(teacherScopeKey);
+    const users = await AuthUser.find({ role: "user" })
+      .sort({ createdAt: 1, _id: 1 })
+      .lean();
+    const scopedUsers = selectTeacherScopeUsers(users, safeTeacherScopeKey);
+    const scopedUserIds = scopedUsers
+      .map((user) => sanitizeId(user?._id, ""))
+      .filter(Boolean);
+    const scopedUserIdSet = new Set(scopedUserIds);
+    const scopedStorageUserIds = scopedUserIds
+      .map((userId) => buildTeacherScopedStorageUserId(userId, safeTeacherScopeKey))
+      .filter(Boolean);
+    return {
+      safeTeacherScopeKey,
+      users,
+      scopedUsers,
+      scopedUserIds,
+      scopedUserIdSet,
+      scopedStorageUserIds,
+    };
+  }
+
+  async function readTeacherScopedChatStateMap(users, teacherScopeKey) {
+    const safeTeacherScopeKey = sanitizeTeacherScopeKey(teacherScopeKey);
+    const sourceUsers = Array.isArray(users) ? users : [];
+    const userIds = sourceUsers.map((user) => user?._id).filter(Boolean);
+    if (userIds.length === 0) return new Map();
+
+    const stateDocs = await ChatState.find({ userId: { $in: userIds } }).lean();
+    return new Map(
+      stateDocs.map((doc) => {
+        const scoped = readTeacherScopedChatStateRaw(doc, safeTeacherScopeKey);
+        return [
+          String(doc.userId),
+          scoped ? normalizeChatStateDoc(doc, safeTeacherScopeKey) : null,
+        ];
+      }),
+    );
+  }
+
+  async function readAdminGroupChatsExportData(teacherScopeKey) {
+    const userContext = await readTeacherScopeExportUserContext(teacherScopeKey);
+    const roomFilter = userContext.scopedUserIds.length
+      ? isDefaultTeacherScopeKey(userContext.safeTeacherScopeKey)
+        ? {}
+        : { memberUserIds: { $in: userContext.scopedUserIds } }
+      : { _id: null };
+    const rooms = await GroupChatRoom.find(roomFilter)
+      .sort({ updatedAt: -1, _id: 1 })
+      .lean();
+    const roomIds = rooms
+      .map((room) => sanitizeId(room?._id, ""))
+      .filter(Boolean);
+
+    const messageDocs = roomIds.length
+      ? await GroupChatMessage.find({ roomId: { $in: roomIds } })
+          .sort({ roomId: 1, createdAt: 1, _id: 1 })
+          .lean()
+      : [];
+    const messagesByRoomId = new Map();
+    messageDocs.forEach((message) => {
+      const roomId = sanitizeId(message?.roomId, "");
+      if (!roomId) return;
+      if (!messagesByRoomId.has(roomId)) {
+        messagesByRoomId.set(roomId, []);
+      }
+      messagesByRoomId.get(roomId).push(message);
+    });
+
+    const participantUserIds = new Set();
+    rooms.forEach((room) => {
+      participantUserIds.add(sanitizeId(room?.ownerUserId, ""));
+      sanitizeGroupChatMemberUserIds(room?.memberUserIds).forEach((userId) => {
+        participantUserIds.add(sanitizeId(userId, ""));
+      });
+    });
+    messageDocs.forEach((message) => {
+      participantUserIds.add(sanitizeId(message?.senderUserId, ""));
+      const reactions = Array.isArray(message?.reactions) ? message.reactions : [];
+      reactions.forEach((reaction) => {
+        participantUserIds.add(sanitizeId(reaction?.userId, ""));
+      });
+    });
+
+    const participantUsers = participantUserIds.size
+      ? await AuthUser.find(
+          { _id: { $in: Array.from(participantUserIds).filter(Boolean) } },
+          { username: 1, role: 1, profile: 1, lockedTeacherScopeKey: 1 },
+        ).lean()
+      : [];
+    const userById = new Map(
+      participantUsers.map((user) => {
+        const userId = sanitizeId(user?._id, "");
+        const profile = sanitizeUserProfile(user?.profile);
+        const username = sanitizeText(user?.username, "", 64);
+        const displayName = sanitizeText(profile?.name || username || userId, "", 64);
+        return [
+          userId,
+          {
+            userId,
+            username,
+            role: sanitizeText(user?.role, "user", 20),
+            displayName,
+            studentId: sanitizeText(profile?.studentId, "", 20),
+            className: sanitizeText(profile?.className, "", 40),
+            teacherScopeKey: resolveLoginLockedTeacherScopeKey(user),
+          },
+        ];
+      }),
+    );
+
+    return {
+      ...userContext,
+      rooms,
+      messagesByRoomId,
+      userById,
+    };
+  }
+
+  function buildAdminGroupChatsExportTxt(data) {
+    const safeTeacherScopeKey = sanitizeTeacherScopeKey(data?.safeTeacherScopeKey);
+    const rooms = Array.isArray(data?.rooms) ? data.rooms : [];
+    const messagesByRoomId = data?.messagesByRoomId instanceof Map ? data.messagesByRoomId : new Map();
+    const userById = data?.userById instanceof Map ? data.userById : new Map();
+    const scopedUserCount = Number(data?.scopedUsers?.length || 0);
+    const lines = [
+      "EduChat 管理员导出：群聊聊天记录",
+      `导出时间: ${formatDisplayTime(new Date())}`,
+      `授课教师: ${getTeacherScopeLabel(safeTeacherScopeKey)}`,
+      `范围内学生数: ${scopedUserCount}`,
+      `群聊数量: ${rooms.length}`,
+      "",
+    ];
+
+    if (rooms.length === 0) {
+      lines.push("当前范围暂无群聊记录。");
+      return lines.join("\n");
+    }
+
+    rooms.forEach((room, roomIndex) => {
+      const roomId = sanitizeId(room?._id, "");
+      const roomName = sanitizeText(room?.name, "未命名群聊", 80) || "未命名群聊";
+      const roomCode = sanitizeText(room?.roomCode, "", 32);
+      const ownerId = sanitizeId(room?.ownerUserId, "");
+      const owner = ownerId ? userById.get(ownerId) : null;
+      const ownerLabel = owner
+        ? `${owner.displayName}${owner.username ? `(@${owner.username})` : ""}`
+        : sanitizeText(room?.ownerUserId, "-", 64) || "-";
+      const memberIds = sanitizeGroupChatMemberUserIds(room?.memberUserIds);
+      const messages = Array.isArray(messagesByRoomId.get(roomId))
+        ? messagesByRoomId.get(roomId)
+        : [];
+
+      lines.push(`群聊 ${roomIndex + 1}`);
+      lines.push(`名称: ${roomName}`);
+      lines.push(`群聊ID: ${roomId || "-"}`);
+      lines.push(`群号: ${roomCode || "-"}`);
+      lines.push(`群主: ${ownerLabel}`);
+      lines.push(`成员数: ${memberIds.length}`);
+      lines.push(`消息数: ${messages.length}`);
+      lines.push(`创建时间: ${formatDisplayTime(room?.createdAt)}`);
+      lines.push(`更新时间: ${formatDisplayTime(room?.updatedAt)}`);
+      if (memberIds.length > 0) {
+        lines.push("成员列表:");
+        memberIds.forEach((memberId, memberIndex) => {
+          const member = userById.get(memberId);
+          if (!member) {
+            lines.push(`  ${memberIndex + 1}. ${memberId}`);
+            return;
+          }
+          const roleLabel = member.role === "admin" ? "管理员" : "学生";
+          lines.push(
+            `  ${memberIndex + 1}. ${member.displayName}${member.username ? `(@${member.username})` : ""} · ${roleLabel}${member.className ? ` · ${member.className}` : ""}${member.studentId ? ` · ${member.studentId}` : ""}`,
+          );
+        });
+      } else {
+        lines.push("成员列表: （空）");
+      }
+
+      if (messages.length === 0) {
+        lines.push("聊天消息: （空）");
+        lines.push("");
+        return;
+      }
+
+      lines.push("聊天消息:");
+      messages.forEach((message, messageIndex) => {
+        const type = sanitizeText(message?.type, "text", 12) || "text";
+        const senderId = sanitizeId(message?.senderUserId, "");
+        const sender = senderId ? userById.get(senderId) : null;
+        const senderName =
+          sanitizeText(message?.senderName, "", 64) ||
+          sender?.displayName ||
+          (type === "system" ? "系统消息" : "未知成员");
+        lines.push(
+          `  ${messageIndex + 1}. [${formatDisplayTime(message?.createdAt)}] ${senderName} (${type})`,
+        );
+        if (type === "image") {
+          lines.push(
+            `      图片: ${sanitizeText(message?.image?.fileName, "未命名图片", 120)} · ${sanitizeText(message?.image?.mimeType, "-", 80)} · ${Number(message?.image?.size || 0)}B`,
+          );
+        } else if (type === "file") {
+          lines.push(
+            `      文件: ${sanitizeText(message?.file?.fileName, "未命名文件", 120)} · ${sanitizeText(message?.file?.mimeType, "-", 80)} · ${Number(message?.file?.size || 0)}B`,
+          );
+        }
+        const messageContent = String(message?.content || "");
+        if (messageContent.trim()) {
+          lines.push("      内容:");
+          appendIndentedBlock(lines, messageContent, 8);
+        }
+        const reactions = Array.isArray(message?.reactions) ? message.reactions : [];
+        if (reactions.length > 0) {
+          const reactionText = reactions
+            .slice(0, 20)
+            .map((reaction) => {
+              const emoji = sanitizeText(reaction?.emoji, "?", 16) || "?";
+              const reactionUserId = sanitizeId(reaction?.userId, "");
+              const reactionUser = reactionUserId ? userById.get(reactionUserId) : null;
+              const reactionName = reactionUser?.displayName || sanitizeText(reaction?.userName, "-", 64) || "-";
+              return `${emoji}(${reactionName})`;
+            })
+            .join(" ");
+          lines.push(`      反馈: ${reactionText}`);
+        }
+      });
+      lines.push("");
+    });
+
+    return lines.join("\n");
+  }
+
+  async function readAdminGeneratedImagesExportData(teacherScopeKey, userContext = null) {
+    const context =
+      userContext && typeof userContext === "object"
+        ? userContext
+        : await readTeacherScopeExportUserContext(teacherScopeKey);
+    if (context.scopedStorageUserIds.length === 0) {
+      return {
+        ...context,
+        docs: [],
+      };
+    }
+
+    const docs = await GeneratedImageHistory.find(
+      { userId: { $in: context.scopedStorageUserIds } },
+      {
+        userId: 1,
+        prompt: 1,
+        imageUrl: 1,
+        imageStorageType: 1,
+        imageMimeType: 1,
+        imageSize: 1,
+        responseFormat: 1,
+        size: 1,
+        model: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    )
+      .sort({ createdAt: -1, _id: -1 })
+      .lean();
+
+    return {
+      ...context,
+      docs,
+    };
+  }
+
+  function buildAdminGeneratedImagesExportTxt(data) {
+    const safeTeacherScopeKey = sanitizeTeacherScopeKey(data?.safeTeacherScopeKey);
+    const scopedUsers = Array.isArray(data?.scopedUsers) ? data.scopedUsers : [];
+    const docs = Array.isArray(data?.docs) ? data.docs : [];
+    const rosterById = new Map(
+      scopedUsers.map((user) => {
+        const userId = sanitizeId(user?._id, "");
+        const profile = sanitizeUserProfile(user?.profile);
+        return [
+          userId,
+          {
+            username: sanitizeText(user?.username, "", 64),
+            name: sanitizeText(profile?.name, "", 64),
+            studentId: sanitizeText(profile?.studentId, "", 20),
+            className: sanitizeText(profile?.className, "", 40),
+          },
+        ];
+      }),
+    );
+    const lines = [
+      "EduChat 管理员导出：学生生成图片记录",
+      `导出时间: ${formatDisplayTime(new Date())}`,
+      `授课教师: ${getTeacherScopeLabel(safeTeacherScopeKey)}`,
+      `范围内学生数: ${scopedUsers.length}`,
+      `图片记录数: ${docs.length}`,
+      "",
+    ];
+
+    if (docs.length === 0) {
+      lines.push("当前范围暂无图片记录。");
+      return lines.join("\n");
+    }
+
+    docs.forEach((doc, index) => {
+      const parsed = parseTeacherScopedStorageUserId(doc?.userId);
+      const baseUserId = sanitizeId(parsed?.baseUserId || doc?.userId, "");
+      const user = rosterById.get(baseUserId);
+      lines.push(`记录 ${index + 1}`);
+      lines.push(`图片ID: ${sanitizeId(doc?._id, "") || "-"}`);
+      lines.push(`用户ID: ${baseUserId || "-"}`);
+      lines.push(`账号: ${user?.username || "-"}`);
+      lines.push(`姓名: ${user?.name || "-"}`);
+      lines.push(`学号: ${user?.studentId || "-"}`);
+      lines.push(`班级: ${user?.className || "-"}`);
+      lines.push(`模型: ${sanitizeText(doc?.model, "-", 160) || "-"}`);
+      lines.push(`尺寸: ${sanitizeText(doc?.size, "-", 80) || "-"}`);
+      lines.push(`响应格式: ${sanitizeText(doc?.responseFormat, "-", 24) || "-"}`);
+      lines.push(`存储类型: ${sanitizeText(doc?.imageStorageType, "-", 24) || "-"}`);
+      lines.push(`MIME: ${sanitizeText(doc?.imageMimeType, "-", 80) || "-"}`);
+      lines.push(`图片大小: ${Number(doc?.imageSize || 0)}B`);
+      lines.push(`图片URL: ${sanitizeText(doc?.imageUrl, "-", 2400) || "-"}`);
+      lines.push(`创建时间: ${formatDisplayTime(doc?.createdAt)}`);
+      lines.push(`更新时间: ${formatDisplayTime(doc?.updatedAt)}`);
+      lines.push("提示词:");
+      appendIndentedBlock(lines, sanitizeText(doc?.prompt, "", 4000), 2);
+      lines.push("");
+    });
+
+    return lines.join("\n");
+  }
+
+  function buildAllRecordsZipReadme(payload) {
+    const safeTeacherScopeKey = sanitizeTeacherScopeKey(payload?.teacherScopeKey);
+    return [
+      "EduChat 管理员导出：全量记录归档 ZIP",
+      `导出时间: ${formatDisplayTime(payload?.exportedAt || new Date())}`,
+      `授课教师: ${getTeacherScopeLabel(safeTeacherScopeKey)}`,
+      `学生账号数: ${Number(payload?.userCount || 0)}`,
+      `作用域内学生数: ${Number(payload?.scopedUserCount || 0)}`,
+      `群聊数量: ${Number(payload?.groupRoomCount || 0)}`,
+      `图片记录数: ${Number(payload?.imageCount || 0)}`,
+      "",
+      "包含文件:",
+      "1. users.txt: 学生账号与密码数据。",
+      "2. chats.txt: 当前授课教师范围的聊天数据汇总。",
+      "3. group-chats.txt: 群聊消息记录导出。",
+      "4. generated-images.txt: 学生生成图片记录导出。",
+      "5. chats-by-user/*.txt: 当前授课教师范围下按学生拆分的聊天数据。",
+      "",
+    ].join("\n");
+  }
+
   app.get("/api/auth/admin/export/users-txt", async (req, res) => {
     if (!(await authenticateAdminRequest(req, res))) return;
 
@@ -2506,6 +2867,121 @@ export function registerAdminRoutes(app, deps) {
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Disposition", buildAttachmentContentDisposition(fileName));
     res.send(zipBuffer);
+  });
+
+  app.get("/api/auth/admin/export/group-chats-txt", async (req, res) => {
+    if (!(await authenticateAdminRequest(req, res))) return;
+    const teacherScopeKey = sanitizeTeacherScopeKey(req.query?.teacherScopeKey);
+
+    try {
+      const data = await readAdminGroupChatsExportData(teacherScopeKey);
+      const content = buildAdminGroupChatsExportTxt(data);
+      const suffix = formatFileStamp(new Date());
+      res.json({
+        ok: true,
+        filename: `educhat-group-chats-${teacherScopeKey}-${suffix}.txt`,
+        content,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "导出群聊聊天记录失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.get("/api/auth/admin/export/generated-images-txt", async (req, res) => {
+    if (!(await authenticateAdminRequest(req, res))) return;
+    const teacherScopeKey = sanitizeTeacherScopeKey(req.query?.teacherScopeKey);
+
+    try {
+      const userContext = await readTeacherScopeExportUserContext(teacherScopeKey);
+      const data = await readAdminGeneratedImagesExportData(teacherScopeKey, userContext);
+      const content = buildAdminGeneratedImagesExportTxt(data);
+      const suffix = formatFileStamp(new Date());
+      res.json({
+        ok: true,
+        filename: `educhat-generated-images-${teacherScopeKey}-${suffix}.txt`,
+        content,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "导出学生生成图片记录失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.get("/api/auth/admin/export/all-records-zip", async (req, res) => {
+    if (!(await authenticateAdminRequest(req, res))) return;
+    const teacherScopeKey = sanitizeTeacherScopeKey(req.query?.teacherScopeKey);
+
+    try {
+      const userContext = await readTeacherScopeExportUserContext(teacherScopeKey);
+      const stateByUserId = await readTeacherScopedChatStateMap(
+        userContext.users,
+        teacherScopeKey,
+      );
+      const chatsTxt = buildAdminChatsExportTxt(
+        userContext.users,
+        stateByUserId,
+        teacherScopeKey,
+      );
+      const usersTxt = buildAdminUsersExportTxt(userContext.users);
+
+      const groupChatData = await readAdminGroupChatsExportData(teacherScopeKey);
+      const groupChatsTxt = buildAdminGroupChatsExportTxt(groupChatData);
+
+      const imageData = await readAdminGeneratedImagesExportData(
+        teacherScopeKey,
+        userContext,
+      );
+      const imagesTxt = buildAdminGeneratedImagesExportTxt(imageData);
+
+      const exportedAt = new Date();
+      const userChatFiles = userContext.scopedUsers.map((user, index) => {
+        const userId = sanitizeId(user?._id, "");
+        const state = stateByUserId.get(userId);
+        const content = buildSingleUserChatExportTxt(
+          user,
+          state,
+          index + 1,
+          exportedAt,
+          teacherScopeKey,
+        );
+        const username = sanitizeZipFileNamePart(user?.username || `user-${index + 1}`);
+        const shortId = sanitizeZipFileNamePart(userId.slice(-8) || String(index + 1));
+        return {
+          name: `chats-by-user/${String(index + 1).padStart(3, "0")}-${username}-${shortId}.txt`,
+          content,
+        };
+      });
+
+      const readme = buildAllRecordsZipReadme({
+        teacherScopeKey,
+        exportedAt,
+        userCount: userContext.users.length,
+        scopedUserCount: userContext.scopedUsers.length,
+        groupRoomCount: groupChatData.rooms.length,
+        imageCount: imageData.docs.length,
+      });
+      const zipBuffer = buildZipBuffer([
+        { name: "README.txt", content: readme },
+        { name: "users.txt", content: usersTxt },
+        { name: "chats.txt", content: chatsTxt },
+        { name: "group-chats.txt", content: groupChatsTxt },
+        { name: "generated-images.txt", content: imagesTxt },
+        ...userChatFiles,
+      ]);
+
+      const suffix = formatFileStamp(exportedAt);
+      const fileName = `educhat-all-records-${teacherScopeKey}-${suffix}.zip`;
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", buildAttachmentContentDisposition(fileName));
+      res.send(zipBuffer);
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "导出全量记录失败，请稍后重试。",
+      });
+    }
   });
 
   app.delete("/api/auth/admin/chats", async (req, res) => {

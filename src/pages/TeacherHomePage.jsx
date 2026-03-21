@@ -18,6 +18,8 @@ import {
   ImageOff,
   LayoutGrid,
   Link2,
+  Lock,
+  LockOpen,
   LogOut,
   MessageCircleMore,
   Pencil,
@@ -41,16 +43,24 @@ import {
   SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
   TEACHER_SCOPE_OPTIONS,
   YANG_JUNFENG_TEACHER_SCOPE_KEY,
+  getTeacherScopeLabel,
 } from "../../shared/teacherScopes.js";
 import {
   createAdminChatSession,
   createAdminGroupChatRoom,
   createAdminUserDirectoryClassCategory,
   createAdminUserDirectoryUser,
+  deleteAllUserChats,
   deleteAdminUserDirectoryUser,
   downloadAdminGeneratedImage,
   downloadAdminClassroomHomeworkFile,
+  exportAdminAllRecordsZip,
+  exportAdminChatsTxt,
+  exportAdminChatsZip,
   exportAdminClassroomHomeworkLessonZip,
+  exportAdminGeneratedImagesTxt,
+  exportAdminGroupChatsTxt,
+  exportAdminUsersTxt,
   dissolveAdminGroupChatRoom,
   deleteAdminClassroomTaskFile,
   downloadAdminClassroomLessonFile,
@@ -63,6 +73,7 @@ import {
   fetchAdminUserDirectory,
   mergeAdminUserDirectoryUsers,
   saveAdminClassroomPlans,
+  saveAdminClassroomSeatLayouts,
   updateAdminUserDirectoryUser,
   uploadAdminClassroomTaskFiles,
 } from "./admin/adminApi.js";
@@ -86,7 +97,7 @@ const COURSE_TARGET_CLASS_VALUES = Object.freeze(
 );
 const COURSE_DEFAULT_CLASS_NAME = COURSE_TARGET_CLASS_OPTIONS[0].value;
 const CLASSROOM_MANAGE_PANEL_KEYS = Object.freeze(
-  new Set(["classroom", "homework", "seat-fixed", "random-rollcall"]),
+  new Set(["classroom", "homework", "seat-fixed", "random-rollcall", "export-center"]),
 );
 const CLASSROOM_MANAGE_HIDDEN_ADMIN_USERNAME_KEYS = Object.freeze(
   new Set(["杨占山", "钟怡萱", "杨俊锋", "施高俊"].map((name) => name.replace(/\s+/g, "").toLowerCase())),
@@ -100,6 +111,8 @@ const SEAT_LAYOUT_MIN_COLUMNS = 3;
 const SEAT_LAYOUT_MAX_COLUMNS = 10;
 const SEAT_LAYOUT_DEFAULT_ROWS = 6;
 const SEAT_LAYOUT_DEFAULT_COLUMNS = 8;
+const SEAT_LAYOUT_DEFAULT_STUDENT_FILL_ENABLED = true;
+const SEAT_LAYOUT_DEFAULT_TEACHER_LOCKED = false;
 const RANDOM_ROLLCALL_COUNT_OPTIONS = Object.freeze(
   Array.from({ length: 10 }, (_, index) => ({
     value: String(index + 1),
@@ -115,6 +128,7 @@ const USER_CREATE_BINDABLE_TEACHER_SCOPE_OPTIONS = (() => {
 const USER_CREATE_DEFAULT_TEACHER_SCOPE_KEY =
   String(USER_CREATE_BINDABLE_TEACHER_SCOPE_OPTIONS[0]?.key || DEFAULT_TEACHER_SCOPE_KEY).trim() ||
   DEFAULT_TEACHER_SCOPE_KEY;
+const PARTY_ROOM_CREATE_MAX_MEMBERS = 10;
 const USER_CREATE_CLASS_TEACHER_SCOPE_RULES = Object.freeze([
   {
     classToken: "教技231".replace(/\s+/g, "").replace(/班/g, ""),
@@ -188,7 +202,20 @@ function clampInteger(value, min, max, fallback = min) {
   return Math.min(max, Math.max(min, parsed));
 }
 
-function createSeatLayout(rawRows, rawColumns, rawSeats) {
+function readSeatToggle(value, fallback) {
+  if (typeof value === "boolean") return value;
+  if (value === 1 || value === "1" || value === "true") return true;
+  if (value === 0 || value === "0" || value === "false") return false;
+  return fallback;
+}
+
+function createSeatLayout(
+  rawRows,
+  rawColumns,
+  rawSeats,
+  rawStudentFillEnabled,
+  rawTeacherLocked,
+) {
   const rows = clampInteger(rawRows, SEAT_LAYOUT_MIN_ROWS, SEAT_LAYOUT_MAX_ROWS, SEAT_LAYOUT_DEFAULT_ROWS);
   const columns = clampInteger(
     rawColumns,
@@ -203,11 +230,22 @@ function createSeatLayout(rawRows, rawColumns, rawSeats) {
     rows,
     columns,
     seats,
+    studentFillEnabled: readSeatToggle(
+      rawStudentFillEnabled,
+      SEAT_LAYOUT_DEFAULT_STUDENT_FILL_ENABLED,
+    ),
+    teacherLocked: readSeatToggle(rawTeacherLocked, SEAT_LAYOUT_DEFAULT_TEACHER_LOCKED),
   };
 }
 
 function normalizeSeatLayout(layout) {
-  const normalized = createSeatLayout(layout?.rows, layout?.columns, layout?.seats);
+  const normalized = createSeatLayout(
+    layout?.rows,
+    layout?.columns,
+    layout?.seats,
+    layout?.studentFillEnabled,
+    layout?.teacherLocked,
+  );
   return {
     ...normalized,
     updatedAt: String(layout?.updatedAt || ""),
@@ -237,6 +275,11 @@ function reshapeSeatLayout(layout, nextRows, nextColumns) {
     rows,
     columns,
     seats: nextSeats,
+    studentFillEnabled: readSeatToggle(
+      current.studentFillEnabled,
+      SEAT_LAYOUT_DEFAULT_STUDENT_FILL_ENABLED,
+    ),
+    teacherLocked: readSeatToggle(current.teacherLocked, SEAT_LAYOUT_DEFAULT_TEACHER_LOCKED),
     updatedAt: String(layout?.updatedAt || ""),
   };
 }
@@ -257,6 +300,16 @@ function readSeatLayoutsFromStorage() {
   } catch {
     return {};
   }
+}
+
+function normalizeSeatLayoutsByClass(input) {
+  if (!input || typeof input !== "object") return {};
+  return Object.entries(input).reduce((result, entry) => {
+    const className = String(entry?.[0] || "").trim();
+    if (!className) return result;
+    result[className] = normalizeSeatLayout(entry?.[1]);
+    return result;
+  }, {});
 }
 
 function pickRandomItems(source, count) {
@@ -529,6 +582,11 @@ function triggerBrowserDownload(blob, fileName) {
   URL.revokeObjectURL(url);
 }
 
+function triggerTextDownload(fileName, content) {
+  const blob = new Blob([String(content || "")], { type: "text/plain;charset=utf-8" });
+  triggerBrowserDownload(blob, fileName || "export.txt");
+}
+
 function triggerUrlDownload(downloadUrl, fileName = "") {
   const safeUrl = String(downloadUrl || "").trim();
   if (!safeUrl) return;
@@ -698,7 +756,13 @@ export default function TeacherHomePage() {
   const [onlineWindowSeconds, setOnlineWindowSeconds] = useState(300);
   const [onlineHeartbeatStaleSeconds, setOnlineHeartbeatStaleSeconds] = useState(70);
   const [onlineClassFilter, setOnlineClassFilter] = useState("all");
+  const [exportCenterScopeKey, setExportCenterScopeKey] = useState(DEFAULT_TEACHER_SCOPE_KEY);
+  const [exportCenterLoading, setExportCenterLoading] = useState("");
+  const [exportCenterError, setExportCenterError] = useState("");
+  const [exportCenterNotice, setExportCenterNotice] = useState("");
+  const [exportCenterDeleteDialogOpen, setExportCenterDeleteDialogOpen] = useState(false);
   const [seatLayoutsByClass, setSeatLayoutsByClass] = useState(() => readSeatLayoutsFromStorage());
+  const [seatLayoutsSyncReady, setSeatLayoutsSyncReady] = useState(false);
   const [seatManageClassName, setSeatManageClassName] = useState("");
   const [randomRollcallClassName, setRandomRollcallClassName] = useState("all");
   const [randomRollcallSource, setRandomRollcallSource] = useState("seat");
@@ -708,6 +772,8 @@ export default function TeacherHomePage() {
   const [randomRollcallError, setRandomRollcallError] = useState("");
   const [randomRollcallResult, setRandomRollcallResult] = useState([]);
   const [randomRollcallGeneratedAt, setRandomRollcallGeneratedAt] = useState("");
+  const seatLayoutsSyncTimerRef = useRef(null);
+  const seatLayoutsLastSavedSnapshotRef = useRef("");
 
   const handleAuthError = useCallback(
     (rawError) => {
@@ -834,9 +900,11 @@ export default function TeacherHomePage() {
 
   const loadPageData = useCallback(async () => {
     if (!adminToken) {
+      setSeatLayoutsSyncReady(false);
       navigate(withAuthSlot("/login", activeSlot), { replace: true });
       return;
     }
+    setSeatLayoutsSyncReady(false);
     setLoading(true);
     setError("");
     try {
@@ -856,6 +924,16 @@ export default function TeacherHomePage() {
       const plans = Array.isArray(plansData?.teacherCoursePlans) ? plansData.teacherCoursePlans : [];
       const normalizedPlans = forceHomeworkUploadEnabled(plans);
       setTeacherCoursePlans(normalizedPlans);
+      const serverSeatLayouts = normalizeSeatLayoutsByClass(plansData?.seatLayoutsByClass);
+      setSeatLayoutsByClass((current) => {
+        const hasServerSeatLayouts = Object.keys(serverSeatLayouts).length > 0;
+        const nextSeatLayouts = hasServerSeatLayouts ? serverSeatLayouts : current;
+        seatLayoutsLastSavedSnapshotRef.current = hasServerSeatLayouts
+          ? JSON.stringify(nextSeatLayouts)
+          : JSON.stringify(serverSeatLayouts);
+        return nextSeatLayouts;
+      });
+      setSeatLayoutsSyncReady(true);
       const firstPlan = sortLessonPlans(normalizedPlans)[0];
       setSelectedCourseId(String(firstPlan?.id || ""));
       setClassroomUpdatedAt(String(plansData?.updatedAt || ""));
@@ -920,6 +998,50 @@ export default function TeacherHomePage() {
       // ignore storage errors to keep panel usable
     }
   }, [seatLayoutsByClass]);
+
+  useEffect(() => {
+    setExportCenterError("");
+    setExportCenterNotice("");
+  }, [exportCenterScopeKey]);
+
+  useEffect(() => {
+    if (activePanel === "export-center") return;
+    setExportCenterDeleteDialogOpen(false);
+  }, [activePanel]);
+
+  useEffect(() => {
+    if (!adminToken || !seatLayoutsSyncReady) return;
+    const nextSnapshot = JSON.stringify(seatLayoutsByClass);
+    if (nextSnapshot === seatLayoutsLastSavedSnapshotRef.current) return;
+    if (seatLayoutsSyncTimerRef.current) {
+      window.clearTimeout(seatLayoutsSyncTimerRef.current);
+    }
+    seatLayoutsSyncTimerRef.current = window.setTimeout(async () => {
+      try {
+        await saveAdminClassroomSeatLayouts(adminToken, {
+          seatLayoutsByClass,
+        });
+        seatLayoutsLastSavedSnapshotRef.current = nextSnapshot;
+      } catch (rawError) {
+        if (handleAuthError(rawError)) return;
+        setError(readErrorMessage(rawError));
+      }
+    }, 420);
+    return () => {
+      if (seatLayoutsSyncTimerRef.current) {
+        window.clearTimeout(seatLayoutsSyncTimerRef.current);
+      }
+    };
+  }, [adminToken, handleAuthError, seatLayoutsByClass, seatLayoutsSyncReady]);
+
+  useEffect(() => {
+    const message = String(error || "").trim();
+    if (!message) return;
+    const timer = window.setTimeout(() => {
+      setError("");
+    }, 2000);
+    return () => window.clearTimeout(timer);
+  }, [error]);
 
   useEffect(() => {
     const existingIds = new Set(
@@ -1104,6 +1226,21 @@ export default function TeacherHomePage() {
     });
     return options;
   }, [userDirectoryTargetClasses]);
+  const exportCenterScopeLabel = useMemo(
+    () => getTeacherScopeLabel(exportCenterScopeKey),
+    [exportCenterScopeKey],
+  );
+  const exportCenterScopeOptions = useMemo(
+    () =>
+      TEACHER_SCOPE_OPTIONS.map((item) => ({
+        value: item.key,
+        label:
+          item.key === DEFAULT_TEACHER_SCOPE_KEY
+            ? `${item.label}（历史数据）`
+            : item.label,
+      })),
+    [],
+  );
 
   const sidebarGroups = useMemo(
     () => {
@@ -1116,6 +1253,7 @@ export default function TeacherHomePage() {
             { key: "homework", label: "作业管理", icon: FileText },
             { key: "seat-fixed", label: "座位固定", icon: LayoutGrid },
             { key: "random-rollcall", label: "随机点名", icon: Dices },
+            { key: "export-center", label: "导出中心", icon: Download },
           ],
         },
         {
@@ -1287,6 +1425,42 @@ export default function TeacherHomePage() {
     });
   }
 
+  function onToggleSeatStudentFillEnabled(nextValue) {
+    const safeClassName = String(seatManageClassName || "").trim();
+    if (!safeClassName) return;
+    setSeatLayoutsByClass((current) => {
+      const currentLayout = normalizeSeatLayout(current[safeClassName]);
+      const targetValue =
+        typeof nextValue === "boolean" ? nextValue : !currentLayout.studentFillEnabled;
+      if (currentLayout.studentFillEnabled === targetValue) return current;
+      return {
+        ...current,
+        [safeClassName]: {
+          ...currentLayout,
+          studentFillEnabled: targetValue,
+          updatedAt: new Date().toISOString(),
+        },
+      };
+    });
+  }
+
+  function onToggleSeatTeacherLock() {
+    const safeClassName = String(seatManageClassName || "").trim();
+    if (!safeClassName) return;
+    setSeatLayoutsByClass((current) => {
+      const currentLayout = normalizeSeatLayout(current[safeClassName]);
+      const nextLocked = !currentLayout.teacherLocked;
+      return {
+        ...current,
+        [safeClassName]: {
+          ...currentLayout,
+          teacherLocked: nextLocked,
+          updatedAt: new Date().toISOString(),
+        },
+      };
+    });
+  }
+
   function onStartRandomRollcall() {
     const count = clampInteger(
       randomRollcallCount,
@@ -1338,6 +1512,79 @@ export default function TeacherHomePage() {
       return next;
     });
     setRandomRollcallError("");
+  }
+
+  async function runExportCenterTask(taskKey, handler) {
+    if (!adminToken || exportCenterLoading) return;
+    setExportCenterError("");
+    setExportCenterNotice("");
+    setExportCenterLoading(taskKey);
+    try {
+      await handler();
+    } catch (rawError) {
+      if (handleAuthError(rawError)) return;
+      setExportCenterError(readErrorMessage(rawError));
+    } finally {
+      setExportCenterLoading("");
+    }
+  }
+
+  async function onExportCenterUsersTxt() {
+    await runExportCenterTask("users", async () => {
+      const data = await exportAdminUsersTxt(adminToken);
+      triggerTextDownload(data?.filename || "educhat-users.txt", data?.content || "");
+      setExportCenterNotice("账号密码数据导出完成。");
+    });
+  }
+
+  async function onExportCenterChatsTxt() {
+    await runExportCenterTask("chats-txt", async () => {
+      const data = await exportAdminChatsTxt(adminToken, exportCenterScopeKey);
+      triggerTextDownload(data?.filename || "educhat-chats.txt", data?.content || "");
+      setExportCenterNotice("聊天数据（TXT）导出完成。");
+    });
+  }
+
+  async function onExportCenterChatsZip() {
+    await runExportCenterTask("chats-zip", async () => {
+      const data = await exportAdminChatsZip(adminToken, exportCenterScopeKey);
+      triggerBrowserDownload(data?.blob, data?.filename || "educhat-chats-by-user.zip");
+      setExportCenterNotice("聊天数据（ZIP）导出完成。");
+    });
+  }
+
+  async function onExportCenterGroupChatsTxt() {
+    await runExportCenterTask("group-chats", async () => {
+      const data = await exportAdminGroupChatsTxt(adminToken, exportCenterScopeKey);
+      triggerTextDownload(data?.filename || "educhat-group-chats.txt", data?.content || "");
+      setExportCenterNotice("群聊聊天记录导出完成。");
+    });
+  }
+
+  async function onExportCenterGeneratedImagesTxt() {
+    await runExportCenterTask("images", async () => {
+      const data = await exportAdminGeneratedImagesTxt(adminToken, exportCenterScopeKey);
+      triggerTextDownload(data?.filename || "educhat-generated-images.txt", data?.content || "");
+      setExportCenterNotice("学生生成图片记录导出完成。");
+    });
+  }
+
+  async function onExportCenterAllRecordsZip() {
+    await runExportCenterTask("all-records", async () => {
+      const data = await exportAdminAllRecordsZip(adminToken, exportCenterScopeKey);
+      triggerBrowserDownload(data?.blob, data?.filename || "educhat-all-records.zip");
+      setExportCenterNotice("全量记录归档导出完成。");
+    });
+  }
+
+  async function onDeleteCurrentTeacherScopeChats() {
+    await runExportCenterTask("delete-scope-chats", async () => {
+      const data = await deleteAllUserChats(adminToken, exportCenterScopeKey);
+      setExportCenterNotice(
+        `已清空“${exportCenterScopeLabel}”授课教师下 ${Number(data?.deletedCount || 0)} 条对话状态数据。`,
+      );
+      setExportCenterDeleteDialogOpen(false);
+    });
   }
 
   const classOnlineSummaries = useMemo(
@@ -1671,6 +1918,23 @@ export default function TeacherHomePage() {
       ].some((token) => String(token || "").toLowerCase().includes(keyword)),
     );
   }, [partyRoomCreateDialog.memberKeyword, partyRoomCreateOwnerOptions]);
+  const partyRoomCreateSelectedMemberIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          [
+            ...partyRoomCreateDialog.memberUserIds,
+            partyRoomCreateDialog.ownerUserId,
+          ]
+            .map((item) => String(item || "").trim())
+            .filter(Boolean),
+        ),
+      ),
+    [partyRoomCreateDialog.memberUserIds, partyRoomCreateDialog.ownerUserId],
+  );
+  const partyRoomCreateSelectedMemberCount = partyRoomCreateSelectedMemberIds.length;
+  const partyRoomCreateSelectionAtLimit =
+    partyRoomCreateSelectedMemberCount >= PARTY_ROOM_CREATE_MAX_MEMBERS;
 
   const visiblePartyRoomItems = useMemo(() => {
     let rooms = Array.isArray(partyRoomItems) ? [...partyRoomItems] : [];
@@ -1902,6 +2166,18 @@ export default function TeacherHomePage() {
         0,
       ),
     [currentSeatLayout.seats],
+  );
+  const currentSeatStudentFillEnabled = useMemo(
+    () => !!currentSeatLayout.studentFillEnabled,
+    [currentSeatLayout.studentFillEnabled],
+  );
+  const currentSeatTeacherLocked = useMemo(
+    () => !!currentSeatLayout.teacherLocked,
+    [currentSeatLayout.teacherLocked],
+  );
+  const currentSeatStudentWritable = useMemo(
+    () => currentSeatStudentFillEnabled && !currentSeatTeacherLocked,
+    [currentSeatStudentFillEnabled, currentSeatTeacherLocked],
   );
   const seatNormalizedValues = useMemo(
     () =>
@@ -2837,12 +3113,18 @@ export default function TeacherHomePage() {
         ? current.memberUserIds.map((item) => String(item || "").trim()).filter(Boolean)
         : [];
       const nextMemberSet = new Set(currentMembers);
+      if (ownerUserId) nextMemberSet.add(ownerUserId);
       if (nextMemberSet.has(safeMemberUserId)) {
         nextMemberSet.delete(safeMemberUserId);
       } else {
+        if (nextMemberSet.size >= PARTY_ROOM_CREATE_MAX_MEMBERS) {
+          return {
+            ...current,
+            error: `群成员最多 ${PARTY_ROOM_CREATE_MAX_MEMBERS} 人（含群主）。`,
+          };
+        }
         nextMemberSet.add(safeMemberUserId);
       }
-      if (ownerUserId) nextMemberSet.add(ownerUserId);
       return {
         ...current,
         memberUserIds: Array.from(nextMemberSet),
@@ -2882,6 +3164,13 @@ export default function TeacherHomePage() {
       setPartyRoomCreateDialog((current) => ({
         ...current,
         error: "请至少选择 1 位群成员。",
+      }));
+      return;
+    }
+    if (finalMemberUserIds.length > PARTY_ROOM_CREATE_MAX_MEMBERS) {
+      setPartyRoomCreateDialog((current) => ({
+        ...current,
+        error: `群成员最多 ${PARTY_ROOM_CREATE_MAX_MEMBERS} 人（含群主）。`,
       }));
       return;
     }
@@ -3479,12 +3768,6 @@ export default function TeacherHomePage() {
         </aside>
 
         <main className="teacher-home-main">
-          {error ? (
-            <p className="teacher-home-alert error" role="alert">
-              {error}
-            </p>
-          ) : null}
-
           {activePanel === "classroom" ? (
             <div className="teacher-panel-stack teacher-classroom-stack">
               <header className="teacher-panel-head">
@@ -4308,7 +4591,7 @@ export default function TeacherHomePage() {
                     type="button"
                     className="teacher-ghost-btn"
                     onClick={onClearSeatLayoutAssignments}
-                    disabled={currentSeatFilledCount === 0}
+                    disabled={currentSeatFilledCount === 0 || currentSeatTeacherLocked}
                   >
                     清空填写
                   </button>
@@ -4335,6 +4618,7 @@ export default function TeacherHomePage() {
                       value={String(currentSeatLayout.rows)}
                       compact
                       ariaLabel="座位行数"
+                      disabled={currentSeatTeacherLocked}
                       options={Array.from(
                         { length: SEAT_LAYOUT_MAX_ROWS - SEAT_LAYOUT_MIN_ROWS + 1 },
                         (_, index) => {
@@ -4352,6 +4636,7 @@ export default function TeacherHomePage() {
                       value={String(currentSeatLayout.columns)}
                       compact
                       ariaLabel="座位列数"
+                      disabled={currentSeatTeacherLocked}
                       options={Array.from(
                         { length: SEAT_LAYOUT_MAX_COLUMNS - SEAT_LAYOUT_MIN_COLUMNS + 1 },
                         (_, index) => {
@@ -4366,11 +4651,37 @@ export default function TeacherHomePage() {
                     <strong>{`${currentSeatFilledCount} / ${currentSeatLayout.seats.length}`}</strong>
                     <span>已填写座位</span>
                   </div>
+                  <div className="teacher-seat-fixed-permission-tools">
+                    <label className="teacher-ios-switch teacher-seat-fixed-student-switch">
+                      <input
+                        type="checkbox"
+                        checked={currentSeatStudentFillEnabled}
+                        onChange={(event) => onToggleSeatStudentFillEnabled(event.target.checked)}
+                        disabled={currentSeatTeacherLocked}
+                      />
+                      <span className="teacher-ios-switch-track" aria-hidden="true">
+                        <span className="teacher-ios-switch-thumb" />
+                      </span>
+                      <span className="teacher-ios-switch-text">开放学生填写</span>
+                    </label>
+                    <button
+                      type="button"
+                      className={`teacher-ghost-btn teacher-seat-fixed-lock-btn${
+                        currentSeatTeacherLocked ? " is-locked" : ""
+                      }`}
+                      onClick={onToggleSeatTeacherLock}
+                    >
+                      {currentSeatTeacherLocked ? <Lock size={14} /> : <LockOpen size={14} />}
+                      <span>{currentSeatTeacherLocked ? "教师已锁定" : "教师锁定"}</span>
+                    </button>
+                  </div>
                 </div>
 
-                <p className="teacher-seat-fixed-hint">
-                  学生可以按教师指定座位填写姓名/学号，你也可以直接在下方座位框快速调整。
-                </p>
+                <div className="teacher-seat-fixed-hints">
+                  <span>{`学生填写：${currentSeatStudentFillEnabled ? "已开放" : "已关闭"}`}</span>
+                  <span>{`教师锁定：${currentSeatTeacherLocked ? "已锁定" : "未锁定"}`}</span>
+                  <span>{`当前状态：${currentSeatStudentWritable ? "学生可填写" : "学生不可填写"}`}</span>
+                </div>
 
                 <div
                   className="teacher-seat-fixed-grid"
@@ -4398,6 +4709,7 @@ export default function TeacherHomePage() {
                         <select
                           value={safeSeatValue}
                           onChange={(event) => onUpdateSeatValue(seatIndex, event.target.value)}
+                          disabled={currentSeatTeacherLocked}
                         >
                           <option value="">
                             {seatOptions.length > 0 ? "请选择姓名/学号" : "暂无可选学生"}
@@ -4547,6 +4859,118 @@ export default function TeacherHomePage() {
                     ))}
                   </div>
                 )}
+              </section>
+            </div>
+          ) : null}
+
+          {activePanel === "export-center" ? (
+            <div className="teacher-panel-stack">
+              <header className="teacher-panel-head">
+                <div>
+                  <h2>导出中心</h2>
+                  <p className="teacher-panel-save-time">统一导出聊天、群聊、图片与归档记录</p>
+                </div>
+              </header>
+
+              <section className="teacher-card teacher-export-center-card">
+                <div className="teacher-export-center-filter">
+                  <span>授课教师范围</span>
+                  <PortalSelect
+                    className="teacher-export-center-scope-select"
+                    value={exportCenterScopeKey}
+                    ariaLabel="导出授课教师"
+                    options={exportCenterScopeOptions}
+                    onChange={setExportCenterScopeKey}
+                    disabled={!!exportCenterLoading}
+                    compact
+                  />
+                </div>
+
+                <div className="teacher-export-center-group">
+                  <h3>基础导出</h3>
+                  <div className="teacher-export-center-actions">
+                    <button
+                      type="button"
+                      className="teacher-ghost-btn"
+                      onClick={() => void onExportCenterUsersTxt()}
+                      disabled={!!exportCenterLoading}
+                    >
+                      {exportCenterLoading === "users" ? "导出中..." : "导出账号密码数据（TXT）"}
+                    </button>
+                    <button
+                      type="button"
+                      className="teacher-ghost-btn"
+                      onClick={() => void onExportCenterChatsTxt()}
+                      disabled={!!exportCenterLoading}
+                    >
+                      {exportCenterLoading === "chats-txt" ? "导出中..." : "导出聊天数据（TXT）"}
+                    </button>
+                    <button
+                      type="button"
+                      className="teacher-ghost-btn"
+                      onClick={() => void onExportCenterChatsZip()}
+                      disabled={!!exportCenterLoading}
+                    >
+                      {exportCenterLoading === "chats-zip" ? "打包中..." : "导出聊天数据（ZIP 按用户）"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="teacher-export-center-group">
+                  <h3>扩展记录</h3>
+                  <div className="teacher-export-center-actions">
+                    <button
+                      type="button"
+                      className="teacher-ghost-btn"
+                      onClick={() => void onExportCenterGroupChatsTxt()}
+                      disabled={!!exportCenterLoading}
+                    >
+                      {exportCenterLoading === "group-chats" ? "导出中..." : "导出群聊聊天记录（TXT）"}
+                    </button>
+                    <button
+                      type="button"
+                      className="teacher-ghost-btn"
+                      onClick={() => void onExportCenterGeneratedImagesTxt()}
+                      disabled={!!exportCenterLoading}
+                    >
+                      {exportCenterLoading === "images" ? "导出中..." : "导出学生生成图片记录（TXT）"}
+                    </button>
+                    <button
+                      type="button"
+                      className="teacher-primary-btn"
+                      onClick={() => void onExportCenterAllRecordsZip()}
+                      disabled={!!exportCenterLoading}
+                    >
+                      {exportCenterLoading === "all-records" ? "打包中..." : "导出全部记录（ZIP）"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="teacher-export-center-group danger">
+                  <h3>数据清理</h3>
+                  <p>{`将删除“${exportCenterScopeLabel}”授课教师范围内的会话与图片历史。`}</p>
+                  <div className="teacher-export-center-actions">
+                    <button
+                      type="button"
+                      className="teacher-delete-btn"
+                      onClick={() => setExportCenterDeleteDialogOpen(true)}
+                      disabled={!!exportCenterLoading}
+                    >
+                      {exportCenterLoading === "delete-scope-chats"
+                        ? "删除中..."
+                        : "删除当前授课教师的对话数据"}
+                    </button>
+                  </div>
+                </div>
+
+                {exportCenterError ? (
+                  <p className="teacher-export-center-error" role="alert">
+                    {exportCenterError}
+                  </p>
+                ) : null}
+                {exportCenterNotice ? (
+                  <p className="teacher-export-center-notice">{exportCenterNotice}</p>
+                ) : null}
               </section>
             </div>
           ) : null}
@@ -5305,6 +5729,42 @@ export default function TeacherHomePage() {
               </section>
             </div>
           ) : null}
+          {exportCenterDeleteDialogOpen ? (
+            <div
+              className="teacher-confirm-overlay"
+              role="presentation"
+              onClick={() => setExportCenterDeleteDialogOpen(false)}
+            >
+              <div
+                className="teacher-confirm-card"
+                role="dialog"
+                aria-modal="true"
+                aria-label="删除授课教师对话数据"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <h3>{`删除“${exportCenterScopeLabel}”授课教师的对话数据`}</h3>
+                <p>此操作会清空当前授课教师范围内的用户会话与图片历史，其他范围数据不会被删除。</p>
+                <div className="teacher-confirm-actions">
+                  <button
+                    type="button"
+                    className="teacher-ghost-btn"
+                    onClick={() => setExportCenterDeleteDialogOpen(false)}
+                    disabled={exportCenterLoading === "delete-scope-chats"}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="teacher-delete-btn"
+                    onClick={() => void onDeleteCurrentTeacherScopeChats()}
+                    disabled={exportCenterLoading === "delete-scope-chats"}
+                  >
+                    {exportCenterLoading === "delete-scope-chats" ? "删除中..." : "确认删除"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
           {partyRoomCreateDialog.open ? (
             <div
               className="teacher-time-overlay"
@@ -5320,48 +5780,52 @@ export default function TeacherHomePage() {
               >
                 <h3>后台新建群聊</h3>
                 <form className="teacher-time-form" onSubmit={onSubmitPartyRoomCreateDialog}>
-                  <label>
-                    <span>群聊名称（必填）</span>
-                    <input
-                      type="text"
-                      value={partyRoomCreateDialog.name}
-                      onChange={(event) =>
-                        setPartyRoomCreateDialog((current) => ({
-                          ...current,
-                          name: event.target.value,
-                          error: "",
-                        }))
-                      }
-                      maxLength={80}
-                      autoFocus
-                    />
-                  </label>
-                  <label>
-                    <span>群主（必选）</span>
-                    <select
-                      value={partyRoomCreateDialog.ownerUserId}
-                      onChange={(event) => onChangePartyRoomCreateOwner(event.target.value)}
-                    >
-                      <option value="">请选择群主</option>
-                      {partyRoomCreateOwnerOptions.map((item) => (
-                        <option key={`party-owner-${item.id}`} value={item.id}>
-                          {`${item.displayName}${
-                            item.username ? ` (@${item.username})` : ""
-                          } · ${readUserRoleLabel(item.role)}${
-                            item.role === "user" && item.className ? ` · ${item.className}` : ""
-                          }`}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <div className="teacher-party-create-basic-row">
+                    <label>
+                      <span>群聊名称（必填）</span>
+                      <input
+                        type="text"
+                        value={partyRoomCreateDialog.name}
+                        onChange={(event) =>
+                          setPartyRoomCreateDialog((current) => ({
+                            ...current,
+                            name: event.target.value,
+                            error: "",
+                          }))
+                        }
+                        maxLength={80}
+                        autoFocus
+                      />
+                    </label>
+                    <label>
+                      <span>群主（必选）</span>
+                      <select
+                        value={partyRoomCreateDialog.ownerUserId}
+                        onChange={(event) => onChangePartyRoomCreateOwner(event.target.value)}
+                      >
+                        <option value="">请选择群主</option>
+                        {partyRoomCreateOwnerOptions.map((item) => (
+                          <option key={`party-owner-${item.id}`} value={item.id}>
+                            {`${item.displayName}${
+                              item.username ? ` (@${item.username})` : ""
+                            } · ${readUserRoleLabel(item.role)}${
+                              item.role === "user" && item.className ? ` · ${item.className}` : ""
+                            }`}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
                   <div className="teacher-party-create-members">
                     <div className="teacher-party-create-members-head">
-                      <span>群成员（可多选）</span>
+                      <div className="teacher-party-create-members-head-left">
+                        <span>群成员（可多选）</span>
+                        <span className="teacher-party-create-members-hint">
+                          {`最多 ${PARTY_ROOM_CREATE_MAX_MEMBERS} 人（含群主）`}
+                        </span>
+                      </div>
                       <span>
-                        {`已选 ${new Set([
-                          ...partyRoomCreateDialog.memberUserIds,
-                          partyRoomCreateDialog.ownerUserId,
-                        ].filter(Boolean)).size} 人`}
+                        {`已选 ${partyRoomCreateSelectedMemberCount}/${PARTY_ROOM_CREATE_MAX_MEMBERS} 人`}
                       </span>
                     </div>
                     <div className="teacher-party-create-member-search">
@@ -5403,6 +5867,8 @@ export default function TeacherHomePage() {
                           const ownerUserId = String(partyRoomCreateDialog.ownerUserId || "").trim();
                           const isOwner = ownerUserId && ownerUserId === member.id;
                           const checked = isOwner || partyRoomCreateDialog.memberUserIds.includes(member.id);
+                          const checkboxDisabled =
+                            isOwner || (!checked && partyRoomCreateSelectionAtLimit);
                           return (
                             <label
                               key={`party-member-${member.id}`}
@@ -5414,7 +5880,7 @@ export default function TeacherHomePage() {
                                 type="checkbox"
                                 checked={checked}
                                 onChange={() => onTogglePartyRoomCreateMember(member.id)}
-                                disabled={isOwner}
+                                disabled={checkboxDisabled}
                               />
                               <div className="teacher-party-create-member-main">
                                 <strong>{member.displayName}</strong>
@@ -6206,6 +6672,13 @@ export default function TeacherHomePage() {
             </div>
           ) : null}
         </main>
+        {error ? (
+          <div className="teacher-home-toast-wrap" aria-live="polite">
+            <p className="teacher-home-alert error teacher-home-toast" role="alert">
+              {error}
+            </p>
+          </div>
+        ) : null}
       </div>
     </div>
   );

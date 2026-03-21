@@ -82,7 +82,7 @@ const COMPOSER_TOOL_EMOJIS = Object.freeze(buildComposerEmojiCatalog());
 const DEFAULT_LIMITS = Object.freeze({
   maxCreatedRoomsPerUser: 2,
   maxJoinedRoomsPerUser: 8,
-  maxMembersPerRoom: 5,
+  maxMembersPerRoom: 10,
 });
 
 const DEFAULT_COUNTS = Object.freeze({
