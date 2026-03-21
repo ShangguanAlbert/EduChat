@@ -12326,18 +12326,41 @@ function readLockedTeacherScopeKey(value) {
   return raw ? sanitizeTeacherScopeKey(raw) : "";
 }
 
-function isJiaoji231ClassName(value) {
-  const normalized = sanitizeText(value, "", 40)
+function normalizeClassNameForTeacherScope(value) {
+  return sanitizeText(value, "", 40)
     .replace(/\s+/g, "")
     .replace(/班/g, "");
-  return normalized.includes(CLASS_NAME_JIAOJI_231);
+}
+
+function resolveTeacherScopeKeyByClassName(value) {
+  const normalized = normalizeClassNameForTeacherScope(value);
+  if (!normalized) return "";
+
+  const jiaojiToken = normalizeClassNameForTeacherScope(CLASS_NAME_JIAOJI_231);
+  if (jiaojiToken && normalized.includes(jiaojiToken)) {
+    return YANG_JUNFENG_TEACHER_SCOPE_KEY;
+  }
+
+  const class810Token = normalizeClassNameForTeacherScope(CLASS_NAME_810);
+  const class811Token = normalizeClassNameForTeacherScope(CLASS_NAME_811);
+  if (
+    (class810Token && normalized.includes(class810Token)) ||
+    (class811Token && normalized.includes(class811Token))
+  ) {
+    return SHANGGUAN_FUZE_TEACHER_SCOPE_KEY;
+  }
+
+  return "";
+}
+
+function isJiaoji231ClassName(value) {
+  return resolveTeacherScopeKeyByClassName(value) === YANG_JUNFENG_TEACHER_SCOPE_KEY;
 }
 
 function resolveLoginLockedTeacherScopeKey(user) {
   const className = sanitizeText(user?.profile?.className, "", 40);
-  if (isJiaoji231ClassName(className)) {
-    return YANG_JUNFENG_TEACHER_SCOPE_KEY;
-  }
+  const classTeacherScopeKey = resolveTeacherScopeKeyByClassName(className);
+  if (classTeacherScopeKey) return classTeacherScopeKey;
   return readLockedTeacherScopeKey(user?.lockedTeacherScopeKey);
 }
 

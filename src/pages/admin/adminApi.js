@@ -65,6 +65,47 @@ export function fetchAdminMe(adminToken) {
   return request("/api/auth/admin/me", adminToken);
 }
 
+export function fetchAdminUserDirectory(adminToken) {
+  return request("/api/auth/admin/user-directory", adminToken);
+}
+
+export function createAdminUserDirectoryUser(adminToken, payload = {}) {
+  return request("/api/auth/admin/user-directory/users", adminToken, {
+    method: "POST",
+    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+  });
+}
+
+export function createAdminUserDirectoryClassCategory(adminToken, payload = {}) {
+  return request("/api/auth/admin/user-directory/class-categories", adminToken, {
+    method: "POST",
+    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+  });
+}
+
+export function updateAdminUserDirectoryUser(adminToken, userId, payload) {
+  const safeUserId = String(userId || "").trim();
+  return request(`/api/auth/admin/user-directory/users/${encodeURIComponent(safeUserId)}`, adminToken, {
+    method: "PUT",
+    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+  });
+}
+
+export function deleteAdminUserDirectoryUser(adminToken, userId, payload = {}) {
+  const safeUserId = String(userId || "").trim();
+  return request(`/api/auth/admin/user-directory/users/${encodeURIComponent(safeUserId)}`, adminToken, {
+    method: "DELETE",
+    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+  });
+}
+
+export function mergeAdminUserDirectoryUsers(adminToken, payload = {}) {
+  return request("/api/auth/admin/user-directory/merge", adminToken, {
+    method: "POST",
+    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+  });
+}
+
 export function createAdminChatSession(adminToken, payload = {}) {
   const safePayload = payload && typeof payload === "object" ? payload : {};
   return request("/api/auth/admin/chat-session", adminToken, {
@@ -169,6 +210,13 @@ export function fetchAdminClassroomHomeworkOverview(adminToken) {
 
 export function fetchAdminGroupChatRooms(adminToken) {
   return request("/api/auth/admin/group-chat/rooms", adminToken);
+}
+
+export function createAdminGroupChatRoom(adminToken, payload = {}) {
+  return request("/api/auth/admin/group-chat/rooms", adminToken, {
+    method: "POST",
+    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+  });
 }
 
 export function dissolveAdminGroupChatRoom(adminToken, roomId) {

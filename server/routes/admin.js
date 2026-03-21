@@ -48,7 +48,6 @@ export function registerAdminRoutes(app, deps) {
     ALIYUN_SEARCH_CITATION_FORMATS,
     ALIYUN_SEARCH_FRESHNESS_OPTIONS,
     ALIYUN_SEARCH_STRATEGIES,
-    DEFAULT_TEACHER_SCOPE_KEY,
     SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
     YANG_JUNFENG_TEACHER_SCOPE_KEY,
     buildTeacherScopedStorageUserId,
@@ -677,6 +676,229 @@ export function registerAdminRoutes(app, deps) {
     toPublicUser,
   } = deps;
 
+  const TERMINAL_ADMIN_USERNAME_KEY = toUsernameKey("上官福泽");
+  const USER_DIRECTORY_DEFAULT_TARGET_CLASSES = Object.freeze(["教技231", "810班", "811班"]);
+  const USER_DIRECTORY_DEFAULT_TARGET_CLASS_KEYS = new Set(
+    USER_DIRECTORY_DEFAULT_TARGET_CLASSES.map((name) =>
+      String(name || "")
+        .trim()
+        .replace(/\s+/g, ""),
+    ),
+  );
+  const userDirectoryClassCategorySchema = new mongoose.Schema(
+    {
+      key: { type: String, default: ADMIN_CONFIG_KEY, unique: true, index: true },
+      classNames: { type: [String], default: () => [] },
+    },
+    {
+      timestamps: true,
+      collection: "admin_user_directory_class_categories",
+    },
+  );
+  const UserDirectoryClassCategory =
+    mongoose.models.AdminUserDirectoryClassCategory ||
+    mongoose.model("AdminUserDirectoryClassCategory", userDirectoryClassCategorySchema);
+
+  function isTerminalAdminAccount(admin) {
+    return toUsernameKey(admin?.username) === TERMINAL_ADMIN_USERNAME_KEY;
+  }
+
+  function normalizeClassNameKey(value) {
+    return String(value || "")
+      .trim()
+      .replace(/\s+/g, "");
+  }
+
+  function sanitizeUserDirectoryTargetClasses(classNames) {
+    const source = Array.isArray(classNames) ? classNames : [];
+    const result = [];
+    const seen = new Set();
+    source.forEach((item) => {
+      const name = sanitizeText(item, "", 40);
+      const key = normalizeClassNameKey(name);
+      if (!name || !key || seen.has(key)) return;
+      seen.add(key);
+      result.push(name);
+    });
+    return result;
+  }
+
+  function mergeDefaultUserDirectoryTargetClasses(classNames) {
+    const custom = sanitizeUserDirectoryTargetClasses(classNames);
+    const merged = [];
+    const seen = new Set();
+    [...USER_DIRECTORY_DEFAULT_TARGET_CLASSES, ...custom].forEach((item) => {
+      const name = sanitizeText(item, "", 40);
+      const key = normalizeClassNameKey(name);
+      if (!name || !key || seen.has(key)) return;
+      seen.add(key);
+      merged.push(name);
+    });
+    return merged;
+  }
+
+  async function readUserDirectoryTargetClasses() {
+    const doc = await UserDirectoryClassCategory.findOne({ key: ADMIN_CONFIG_KEY }).lean();
+    return mergeDefaultUserDirectoryTargetClasses(doc?.classNames);
+  }
+
+  function resolveUserDirectoryClassBucket(className, targetClassKeys = USER_DIRECTORY_DEFAULT_TARGET_CLASS_KEYS) {
+    const normalized = normalizeClassNameKey(className);
+    if (!normalized) return "unassigned";
+    if (targetClassKeys.has(normalized)) return "target";
+    return "other";
+  }
+
+  function buildUserDirectoryItem(user, targetClassKeys = USER_DIRECTORY_DEFAULT_TARGET_CLASS_KEYS) {
+    const profile = sanitizeUserProfile(user?.profile);
+    const role = sanitizeText(user?.role, "user", 20) || "user";
+    return {
+      id: sanitizeId(user?._id, ""),
+      username: sanitizeText(user?.username, "", 64),
+      usernameKey: toUsernameKey(user?.username || user?.usernameKey),
+      role,
+      accountTag: sanitizeText(user?.accountTag, "", 40),
+      lockedTeacherScopeKey: readLockedTeacherScopeKey(user?.lockedTeacherScopeKey),
+      profile: {
+        name: sanitizeText(profile?.name, "", 20),
+        studentId: sanitizeText(profile?.studentId, "", 20),
+        gender: sanitizeText(profile?.gender, "", 12),
+        grade: sanitizeText(profile?.grade, "", 20),
+        className: sanitizeText(profile?.className, "", 40),
+      },
+      classBucket: resolveUserDirectoryClassBucket(profile?.className, targetClassKeys),
+      createdAt: sanitizeIsoDate(user?.createdAt),
+      updatedAt: sanitizeIsoDate(user?.updatedAt),
+    };
+  }
+
+  function escapeRegexForQuery(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function buildScopedUserIdRegex(baseUserId) {
+    const safeUserId = sanitizeId(baseUserId, "");
+    if (!safeUserId) return null;
+    return new RegExp(`^${escapeRegexForQuery(safeUserId)}(?:__teacher__.+)?$`);
+  }
+
+  function remapTeacherScopedStorageUserId(storageUserId, fromUserId, toUserId) {
+    const fromId = sanitizeId(fromUserId, "");
+    const toId = sanitizeId(toUserId, "");
+    if (!fromId || !toId) return "";
+    const parsed = parseTeacherScopedStorageUserId(storageUserId);
+    if (parsed.baseUserId !== fromId) return "";
+    return buildTeacherScopedStorageUserId(toId, parsed.teacherScopeKey);
+  }
+
+  async function remapCollectionStorageUserIds(Model, fromUserId, toUserId) {
+    const scopedRegex = buildScopedUserIdRegex(fromUserId);
+    if (!scopedRegex) return 0;
+    const docs = await Model.find({ userId: scopedRegex }, { _id: 1, userId: 1 }).lean();
+    if (!Array.isArray(docs) || docs.length === 0) return 0;
+    const ops = docs
+      .map((doc) => {
+        const nextUserId = remapTeacherScopedStorageUserId(doc?.userId, fromUserId, toUserId);
+        if (!nextUserId) return null;
+        return {
+          updateOne: {
+            filter: { _id: doc._id },
+            update: { $set: { userId: nextUserId } },
+          },
+        };
+      })
+      .filter(Boolean);
+    if (ops.length === 0) return 0;
+    await Model.bulkWrite(ops, { ordered: false });
+    return ops.length;
+  }
+
+  async function deleteCollectionStorageUserIds(Model, baseUserId) {
+    const scopedRegex = buildScopedUserIdRegex(baseUserId);
+    if (!scopedRegex) return 0;
+    const result = await Model.deleteMany({ userId: scopedRegex });
+    return Number(result?.deletedCount || 0);
+  }
+
+  function remapGroupChatRoomStateUsers(room, fromUserId, toUserId) {
+    const source = room && typeof room === "object" ? room : {};
+    const fromId = sanitizeId(fromUserId, "");
+    const toId = sanitizeId(toUserId, "");
+    if (!fromId || fromId === toId) return null;
+
+    let ownerUserId = sanitizeId(source?.ownerUserId, "");
+    if (ownerUserId === fromId) ownerUserId = toId || "";
+
+    const memberUserIds = sanitizeGroupChatMemberUserIds(source?.memberUserIds)
+      .map((userId) => (userId === fromId ? toId : userId))
+      .filter(Boolean);
+    const memberSet = new Set(memberUserIds.filter(Boolean));
+    if (ownerUserId) {
+      memberSet.add(ownerUserId);
+    }
+    const dedupedMemberUserIds = Array.from(memberSet);
+    if (dedupedMemberUserIds.length === 0) return null;
+    if (!ownerUserId || !memberSet.has(ownerUserId)) {
+      ownerUserId = dedupedMemberUserIds[0];
+    }
+
+    const mutedMemberUserIds = sanitizeGroupChatMutedMemberUserIds(
+      (Array.isArray(source?.mutedMemberUserIds) ? source.mutedMemberUserIds : []).map((userId) =>
+        sanitizeId(userId, "") === fromId ? toId : userId,
+      ),
+      dedupedMemberUserIds,
+      ownerUserId,
+    );
+
+    const readStateMap = new Map();
+    (Array.isArray(source?.readStates) ? source.readStates : []).forEach((state) => {
+      const nextUserId = sanitizeId(state?.userId, "") === fromId ? toId : sanitizeId(state?.userId, "");
+      if (!nextUserId || !memberSet.has(nextUserId)) return;
+      const current = readStateMap.get(nextUserId);
+      const currentTime = Date.parse(String(current?.updatedAt || current?.lastReadAt || "")) || 0;
+      const nextTime = Date.parse(String(state?.updatedAt || state?.lastReadAt || "")) || 0;
+      if (!current || nextTime >= currentTime) {
+        readStateMap.set(nextUserId, {
+          userId: nextUserId,
+          lastReadMessageId: sanitizeId(state?.lastReadMessageId, ""),
+          lastReadAt: sanitizeIsoDate(state?.lastReadAt),
+          updatedAt: sanitizeIsoDate(state?.updatedAt || state?.lastReadAt) || new Date().toISOString(),
+        });
+      }
+    });
+    const readStates = normalizeGroupChatReadStates(Array.from(readStateMap.values()), dedupedMemberUserIds);
+
+    return {
+      ownerUserId,
+      memberUserIds: dedupedMemberUserIds,
+      mutedMemberUserIds,
+      readStates,
+      memberCount: dedupedMemberUserIds.length,
+    };
+  }
+
+  async function mergeChatStateDocs(sourceUserId, targetUserId) {
+    const sourceId = sanitizeId(sourceUserId, "");
+    const targetId = sanitizeId(targetUserId, "");
+    if (!sourceId || !targetId || sourceId === targetId || !isMongoObjectIdLike(sourceId) || !isMongoObjectIdLike(targetId)) {
+      return "skipped";
+    }
+    const sourceObjectId = new mongoose.Types.ObjectId(sourceId);
+    const targetObjectId = new mongoose.Types.ObjectId(targetId);
+    const [sourceState, targetState] = await Promise.all([
+      ChatState.findOne({ userId: sourceObjectId }),
+      ChatState.findOne({ userId: targetObjectId }),
+    ]);
+    if (!sourceState) return "none";
+    if (!targetState) {
+      sourceState.userId = targetObjectId;
+      await sourceState.save();
+      return "moved";
+    }
+    await ChatState.deleteOne({ _id: sourceState._id });
+    return "dropped";
+  }
+
   app.get("/api/auth/admin/agent-e/settings", async (req, res) => {
     if (!(await authenticateAdminRequest(req, res))) return;
     const config = await readAgentEConfig();
@@ -751,6 +973,621 @@ export function registerAdminRoutes(app, deps) {
         updatedAt: item.updatedAt,
       })),
     });
+  });
+
+  app.get("/api/auth/admin/user-directory", async (req, res) => {
+    const admin = await authenticateAdminRequest(req, res);
+    if (!admin) return;
+
+    try {
+      const targetClasses = await readUserDirectoryTargetClasses();
+      const targetClassKeys = new Set(targetClasses.map((item) => normalizeClassNameKey(item)));
+      const users = await AuthUser.find({})
+        .sort({ role: 1, createdAt: 1, _id: 1 })
+        .lean();
+      const items = (Array.isArray(users) ? users : []).map((user) =>
+        buildUserDirectoryItem(user, targetClassKeys),
+      );
+
+      const summary = items.reduce(
+        (acc, item) => {
+          acc.totalCount += 1;
+          if (item.role === "admin") {
+            acc.adminCount += 1;
+            return acc;
+          }
+          acc.studentCount += 1;
+          if (item.classBucket === "target") {
+            acc.targetClassStudentCount += 1;
+          } else if (item.classBucket === "other") {
+            acc.otherClassStudentCount += 1;
+          } else {
+            acc.unassignedStudentCount += 1;
+          }
+          return acc;
+        },
+        {
+          totalCount: 0,
+          adminCount: 0,
+          studentCount: 0,
+          targetClassStudentCount: 0,
+          otherClassStudentCount: 0,
+          unassignedStudentCount: 0,
+        },
+      );
+
+      res.json({
+        ok: true,
+        updatedAt: new Date().toISOString(),
+        canManageUsers: isTerminalAdminAccount(admin),
+        targetClasses,
+        summary,
+        users: items,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "读取用户信息失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.post("/api/auth/admin/user-directory/class-categories", async (req, res) => {
+    const admin = await authenticateAdminRequest(req, res);
+    if (!admin) return;
+    if (!isTerminalAdminAccount(admin)) {
+      res.status(403).json({ error: "仅终端管理员可新增班级分类。" });
+      return;
+    }
+
+    const className = sanitizeText(req.body?.className, "", 40);
+    const classKey = normalizeClassNameKey(className);
+    if (!className || !classKey) {
+      res.status(400).json({ error: "请输入有效的班级名称。" });
+      return;
+    }
+
+    try {
+      const currentClasses = await readUserDirectoryTargetClasses();
+      const keySet = new Set(currentClasses.map((item) => normalizeClassNameKey(item)));
+      if (keySet.has(classKey)) {
+        res.status(409).json({ error: "该班级分类已存在。" });
+        return;
+      }
+
+      const nextClasses = mergeDefaultUserDirectoryTargetClasses([...currentClasses, className]);
+      await UserDirectoryClassCategory.findOneAndUpdate(
+        { key: ADMIN_CONFIG_KEY },
+        {
+          $set: {
+            key: ADMIN_CONFIG_KEY,
+            classNames: nextClasses,
+          },
+        },
+        {
+          upsert: true,
+          new: true,
+          setDefaultsOnInsert: true,
+        },
+      );
+
+      res.status(201).json({
+        ok: true,
+        updatedAt: new Date().toISOString(),
+        targetClasses: nextClasses,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "新增班级分类失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.post("/api/auth/admin/user-directory/users", async (req, res) => {
+    const admin = await authenticateAdminRequest(req, res);
+    if (!admin) return;
+    if (!isTerminalAdminAccount(admin)) {
+      res.status(403).json({ error: "仅终端管理员可新增用户账号。" });
+      return;
+    }
+
+    const payload = req.body && typeof req.body === "object" ? req.body : {};
+    const bindTeacherRaw = String(payload?.bindTeacher || "")
+      .trim()
+      .toLowerCase();
+    const bindTeacher =
+      payload?.bindTeacher === true ||
+      bindTeacherRaw === "true" ||
+      bindTeacherRaw === "1" ||
+      bindTeacherRaw === "yes";
+    let lockedTeacherScopeKey = "";
+    if (bindTeacher) {
+      const lockedTeacherScopeInput = String(payload?.lockedTeacherScopeKey || "").trim();
+      if (!lockedTeacherScopeInput) {
+        res.status(400).json({ error: "请选择要绑定的老师。" });
+        return;
+      }
+      lockedTeacherScopeKey = sanitizeTeacherScopeKey(lockedTeacherScopeInput);
+    }
+
+    const username = normalizeUsername(payload?.username) || sanitizeText(payload?.username, "", 64);
+    if (!username) {
+      res.status(400).json({ error: "账号不能为空或格式不合法。" });
+      return;
+    }
+    const usernameKey = toUsernameKey(username);
+    if (!usernameKey) {
+      res.status(400).json({ error: "账号不能为空或格式不合法。" });
+      return;
+    }
+    if (isReservedAdminUsernameKey(usernameKey)) {
+      res.status(400).json({ error: "该账号为管理员保留账号，请使用其他账号名。" });
+      return;
+    }
+    if (isFixedStudentUsernameKey(usernameKey)) {
+      res.status(400).json({ error: "该账号名已在系统预置学生账号中使用，请更换后重试。" });
+      return;
+    }
+
+    const password = String(payload?.password || "");
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      res.status(400).json({ error: passwordError });
+      return;
+    }
+
+    const profile = sanitizeUserProfile(payload?.profile);
+    if (!profile.name) {
+      res.status(400).json({ error: "姓名为必填项。" });
+      return;
+    }
+    if (!profile.studentId) {
+      res.status(400).json({ error: "学号为必填项。" });
+      return;
+    }
+    if (!profile.className) {
+      res.status(400).json({ error: "归属班级为必填项。" });
+      return;
+    }
+
+    try {
+      const duplicate = await AuthUser.findOne({ usernameKey })
+        .select({ _id: 1 })
+        .lean();
+      if (duplicate) {
+        res.status(409).json({ error: "账号已存在，请更换后重试。" });
+        return;
+      }
+
+      const passwordHash = await hashPassword(password);
+      const created = await AuthUser.create({
+        username,
+        usernameKey,
+        role: "user",
+        passwordHash,
+        passwordPlain: password,
+        profile: {
+          name: profile.name,
+          studentId: profile.studentId,
+          className: profile.className,
+          grade: profile.grade,
+          gender: profile.gender,
+        },
+        lockedTeacherScopeKey,
+      });
+
+      res.status(201).json({
+        ok: true,
+        updatedAt: new Date().toISOString(),
+        user: buildUserDirectoryItem(created),
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "新增用户账号失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.put("/api/auth/admin/user-directory/users/:userId", async (req, res) => {
+    const admin = await authenticateAdminRequest(req, res);
+    if (!admin) return;
+    if (!isTerminalAdminAccount(admin)) {
+      res.status(403).json({ error: "仅终端管理员可编辑账号信息。" });
+      return;
+    }
+
+    const userId = sanitizeId(req.params?.userId, "");
+    if (!userId || !isMongoObjectIdLike(userId)) {
+      res.status(400).json({ error: "无效用户 ID。" });
+      return;
+    }
+
+    const payload = req.body && typeof req.body === "object" ? req.body : {};
+    const username = normalizeUsername(payload?.username) || sanitizeText(payload?.username, "", 64);
+    if (!username) {
+      res.status(400).json({ error: "账号不能为空或格式不合法。" });
+      return;
+    }
+    const usernameKey = toUsernameKey(username);
+    if (!usernameKey) {
+      res.status(400).json({ error: "账号不能为空或格式不合法。" });
+      return;
+    }
+
+    try {
+      const user = await AuthUser.findById(userId);
+      if (!user) {
+        res.status(404).json({ error: "用户不存在或已删除。" });
+        return;
+      }
+      const currentAdminId = sanitizeId(admin?._id, "");
+      const targetUserId = sanitizeId(user?._id, "");
+      if (targetUserId && currentAdminId && targetUserId === currentAdminId) {
+        res.status(403).json({ error: "不支持修改当前登录账号，请联系其他终端管理员处理。" });
+        return;
+      }
+      if (isTerminalAdminAccount(user)) {
+        res.status(403).json({ error: "终端管理员账号不支持在此处修改。" });
+        return;
+      }
+
+      const nextProfile = sanitizeUserProfile(payload?.profile);
+      const duplicate = await AuthUser.findOne({
+        usernameKey,
+        _id: { $ne: user._id },
+      })
+        .select({ _id: 1 })
+        .lean();
+      if (duplicate) {
+        res.status(409).json({ error: "账号已存在，请更换后重试。" });
+        return;
+      }
+
+      user.username = username;
+      user.usernameKey = usernameKey;
+      user.profile = {
+        ...sanitizeUserProfile(user.profile),
+        ...nextProfile,
+      };
+      await user.save();
+
+      res.json({
+        ok: true,
+        updatedAt: new Date().toISOString(),
+        user: buildUserDirectoryItem(user),
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "更新账号信息失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.delete("/api/auth/admin/user-directory/users/:userId", async (req, res) => {
+    const admin = await authenticateAdminRequest(req, res);
+    if (!admin) return;
+    if (!isTerminalAdminAccount(admin)) {
+      res.status(403).json({ error: "仅终端管理员可删除账号。" });
+      return;
+    }
+
+    const userId = sanitizeId(req.params?.userId, "");
+    if (!userId || !isMongoObjectIdLike(userId)) {
+      res.status(400).json({ error: "无效用户 ID。" });
+      return;
+    }
+
+    const confirmText = sanitizeText(req.body?.confirmText, "", 20);
+    if (confirmText !== "确认删除") {
+      res.status(400).json({ error: "请输入“确认删除”完成二次确认。" });
+      return;
+    }
+
+    try {
+      const user = await AuthUser.findById(userId);
+      if (!user) {
+        res.status(404).json({ error: "用户不存在或已删除。" });
+        return;
+      }
+      const currentAdminId = sanitizeId(admin?._id, "");
+      const targetUserId = sanitizeId(user?._id, "");
+      if (targetUserId && currentAdminId && targetUserId === currentAdminId) {
+        res.status(403).json({ error: "不支持删除当前登录账号，请联系其他终端管理员处理。" });
+        return;
+      }
+      if (isTerminalAdminAccount(user)) {
+        res.status(403).json({ error: "终端管理员账号不支持在此处删除。" });
+        return;
+      }
+
+      const scopedRegex = buildScopedUserIdRegex(userId);
+      const [generatedImages, groupChatFilesByUploader, relatedRoomDocs] = await Promise.all([
+        scopedRegex
+          ? GeneratedImageHistory.find(
+              { userId: scopedRegex },
+              { _id: 1, ossKey: 1, ossBucket: 1, ossRegion: 1 },
+            ).lean()
+          : [],
+        GroupChatStoredFile.find(
+          { uploaderUserId: userId },
+          { _id: 1, ossKey: 1, ossBucket: 1, ossRegion: 1 },
+        ).lean(),
+        GroupChatRoom.find(
+          {
+            $or: [
+              { ownerUserId: userId },
+              { memberUserIds: userId },
+              { mutedMemberUserIds: userId },
+              { "readStates.userId": userId },
+            ],
+          },
+          {
+            _id: 1,
+            ownerUserId: 1,
+            memberUserIds: 1,
+            mutedMemberUserIds: 1,
+            readStates: 1,
+          },
+        ).lean(),
+      ]);
+
+      await deleteGeneratedImageHistoryOssObjects(generatedImages);
+      await deleteGroupChatStoredFileObjects(groupChatFilesByUploader);
+
+      const roomIdsToDelete = [];
+      const roomUpdateOps = [];
+      (Array.isArray(relatedRoomDocs) ? relatedRoomDocs : []).forEach((room) => {
+        const roomId = sanitizeId(room?._id, "");
+        if (!roomId) return;
+        const nextRoomState = remapGroupChatRoomStateUsers(room, userId, "");
+        if (!nextRoomState || !nextRoomState.ownerUserId) {
+          roomIdsToDelete.push(roomId);
+          return;
+        }
+        roomUpdateOps.push({
+          updateOne: {
+            filter: { _id: roomId },
+            update: {
+              $set: {
+                ownerUserId: nextRoomState.ownerUserId,
+                memberUserIds: nextRoomState.memberUserIds,
+                mutedMemberUserIds: nextRoomState.mutedMemberUserIds,
+                readStates: nextRoomState.readStates,
+                memberCount: nextRoomState.memberCount,
+              },
+            },
+          },
+        });
+      });
+
+      let deletedRoomCount = 0;
+      if (roomIdsToDelete.length > 0) {
+        const deletingRoomFiles = await GroupChatStoredFile.find(
+          { roomId: { $in: roomIdsToDelete } },
+          { _id: 1, ossKey: 1, ossBucket: 1, ossRegion: 1 },
+        ).lean();
+        await deleteGroupChatStoredFileObjects(deletingRoomFiles);
+        const [deletedRooms] = await Promise.all([
+          GroupChatRoom.deleteMany({ _id: { $in: roomIdsToDelete } }),
+          GroupChatMessage.deleteMany({ roomId: { $in: roomIdsToDelete } }),
+          GroupChatStoredFile.deleteMany({ roomId: { $in: roomIdsToDelete } }),
+        ]);
+        deletedRoomCount = Number(deletedRooms?.deletedCount || 0);
+      }
+
+      if (roomUpdateOps.length > 0) {
+        await GroupChatRoom.bulkWrite(roomUpdateOps, { ordered: false });
+      }
+
+      const reactionDocs = await GroupChatMessage.find(
+        { "reactions.userId": userId },
+        { _id: 1, reactions: 1 },
+      ).lean();
+      if (reactionDocs.length > 0) {
+        const reactionOps = reactionDocs
+          .map((doc) => {
+            const reactions = Array.isArray(doc?.reactions)
+              ? doc.reactions.filter((reaction) => sanitizeId(reaction?.userId, "") !== userId)
+              : [];
+            return {
+              updateOne: {
+                filter: { _id: doc._id },
+                update: { $set: { reactions } },
+              },
+            };
+          })
+          .filter(Boolean);
+        if (reactionOps.length > 0) {
+          await GroupChatMessage.bulkWrite(reactionOps, { ordered: false });
+        }
+      }
+
+      const sourceObjectId = new mongoose.Types.ObjectId(userId);
+      const [chatStateDeleteResult, uploadedDeleteCount, generatedDeleteResult, messageUpdateResult, fileDeleteResult] =
+        await Promise.all([
+          ChatState.deleteOne({ userId: sourceObjectId }),
+          deleteCollectionStorageUserIds(UploadedFileContext, userId),
+          GeneratedImageHistory.deleteMany(scopedRegex ? { userId: scopedRegex } : { _id: null }),
+          GroupChatMessage.updateMany({ senderUserId: userId }, { $set: { senderUserId: "" } }),
+          GroupChatStoredFile.deleteMany({ uploaderUserId: userId }),
+        ]);
+
+      await AuthUser.deleteOne({ _id: sourceObjectId });
+      userOnlinePresenceByUserId.delete(userId);
+
+      res.json({
+        ok: true,
+        userId,
+        deletedRoomCount,
+        deletedChatStateCount: Number(chatStateDeleteResult?.deletedCount || 0),
+        deletedUploadedFileContextCount: Number(uploadedDeleteCount || 0),
+        deletedGeneratedImageCount: Number(generatedDeleteResult?.deletedCount || 0),
+        anonymizedGroupMessageCount: Number(messageUpdateResult?.modifiedCount || 0),
+        deletedGroupFileCount: Number(fileDeleteResult?.deletedCount || 0),
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "删除账号失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.post("/api/auth/admin/user-directory/merge", async (req, res) => {
+    const admin = await authenticateAdminRequest(req, res);
+    if (!admin) return;
+    if (!isTerminalAdminAccount(admin)) {
+      res.status(403).json({ error: "仅终端管理员可执行账号合并。" });
+      return;
+    }
+
+    const sourceUserId = sanitizeId(req.body?.sourceUserId, "");
+    const targetUserId = sanitizeId(req.body?.targetUserId, "");
+    const confirmText = sanitizeText(req.body?.confirmText, "", 20);
+    if (confirmText !== "确认合并") {
+      res.status(400).json({ error: "请输入“确认合并”完成二次确认。" });
+      return;
+    }
+    if (!sourceUserId || !targetUserId || sourceUserId === targetUserId) {
+      res.status(400).json({ error: "请选择两个不同的学生账号执行合并。" });
+      return;
+    }
+    if (!isMongoObjectIdLike(sourceUserId) || !isMongoObjectIdLike(targetUserId)) {
+      res.status(400).json({ error: "无效用户 ID。" });
+      return;
+    }
+
+    try {
+      const [sourceUser, targetUser] = await Promise.all([
+        AuthUser.findById(sourceUserId),
+        AuthUser.findById(targetUserId),
+      ]);
+      if (!sourceUser || !targetUser) {
+        res.status(404).json({ error: "待合并账号不存在或已删除。" });
+        return;
+      }
+      if (String(sourceUser.role || "").trim() !== "user" || String(targetUser.role || "").trim() !== "user") {
+        res.status(403).json({ error: "仅支持学生账号合并。" });
+        return;
+      }
+
+      const sourceProfile = sanitizeUserProfile(sourceUser.profile);
+      const targetProfile = sanitizeUserProfile(targetUser.profile);
+      targetUser.profile = {
+        name: targetProfile.name || sourceProfile.name,
+        studentId: targetProfile.studentId || sourceProfile.studentId,
+        gender: targetProfile.gender || sourceProfile.gender,
+        grade: targetProfile.grade || sourceProfile.grade,
+        className: targetProfile.className || sourceProfile.className,
+      };
+      await targetUser.save();
+
+      await Promise.all([
+        remapCollectionStorageUserIds(UploadedFileContext, sourceUserId, targetUserId),
+        remapCollectionStorageUserIds(GeneratedImageHistory, sourceUserId, targetUserId),
+      ]);
+
+      await Promise.all([
+        GroupChatStoredFile.updateMany(
+          { uploaderUserId: sourceUserId },
+          { $set: { uploaderUserId: targetUserId } },
+        ),
+        GroupChatMessage.updateMany(
+          { senderUserId: sourceUserId },
+          { $set: { senderUserId: targetUserId } },
+        ),
+      ]);
+
+      const reactionDocs = await GroupChatMessage.find(
+        { "reactions.userId": sourceUserId },
+        { _id: 1, reactions: 1 },
+      ).lean();
+      if (reactionDocs.length > 0) {
+        const reactionOps = reactionDocs.map((doc) => {
+          const reactionMap = new Map();
+          (Array.isArray(doc?.reactions) ? doc.reactions : []).forEach((reaction) => {
+            const userId = sanitizeId(reaction?.userId, "");
+            const nextUserId = userId === sourceUserId ? targetUserId : userId;
+            const emoji = sanitizeGroupChatReactionEmoji(reaction?.emoji);
+            if (!nextUserId || !emoji) return;
+            const dedupeKey = `${nextUserId}::${emoji}`;
+            if (reactionMap.has(dedupeKey)) return;
+            reactionMap.set(dedupeKey, {
+              ...reaction,
+              userId: nextUserId,
+            });
+          });
+          return {
+            updateOne: {
+              filter: { _id: doc._id },
+              update: { $set: { reactions: Array.from(reactionMap.values()) } },
+            },
+          };
+        });
+        if (reactionOps.length > 0) {
+          await GroupChatMessage.bulkWrite(reactionOps, { ordered: false });
+        }
+      }
+
+      const relatedRoomDocs = await GroupChatRoom.find(
+        {
+          $or: [
+            { ownerUserId: sourceUserId },
+            { memberUserIds: sourceUserId },
+            { mutedMemberUserIds: sourceUserId },
+            { "readStates.userId": sourceUserId },
+          ],
+        },
+        {
+          _id: 1,
+          ownerUserId: 1,
+          memberUserIds: 1,
+          mutedMemberUserIds: 1,
+          readStates: 1,
+        },
+      ).lean();
+
+      if (relatedRoomDocs.length > 0) {
+        const roomUpdateOps = relatedRoomDocs
+          .map((room) => {
+            const nextState = remapGroupChatRoomStateUsers(room, sourceUserId, targetUserId);
+            if (!nextState) return null;
+            return {
+              updateOne: {
+                filter: { _id: room._id },
+                update: {
+                  $set: {
+                    ownerUserId: nextState.ownerUserId,
+                    memberUserIds: nextState.memberUserIds,
+                    mutedMemberUserIds: nextState.mutedMemberUserIds,
+                    readStates: nextState.readStates,
+                    memberCount: nextState.memberCount,
+                  },
+                },
+              },
+            };
+          })
+          .filter(Boolean);
+        if (roomUpdateOps.length > 0) {
+          await GroupChatRoom.bulkWrite(roomUpdateOps, { ordered: false });
+        }
+      }
+
+      const chatStateMergeMode = await mergeChatStateDocs(sourceUserId, targetUserId);
+
+      await AuthUser.deleteOne({ _id: sourceUser._id });
+      userOnlinePresenceByUserId.delete(sourceUserId);
+
+      res.json({
+        ok: true,
+        sourceUserId,
+        targetUserId,
+        updatedAt: new Date().toISOString(),
+        chatStateMergeMode,
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "账号合并失败，请稍后重试。",
+      });
+    }
   });
 
   app.get("/api/auth/admin/group-chat/rooms", async (req, res) => {
@@ -850,6 +1687,66 @@ export function registerAdminRoutes(app, deps) {
       const usersById = new Map(
         users.map((user) => [sanitizeId(user?._id, ""), user]),
       );
+      const allUsers = await AuthUser.find(
+        {},
+        { username: 1, usernameKey: 1, profile: 1, role: 1 },
+      ).lean();
+      const userOptions = (Array.isArray(allUsers) ? allUsers : [])
+        .map((user) => {
+          const userId = sanitizeId(user?._id, "");
+          if (!userId) return null;
+          const profile = sanitizeUserProfile(user?.profile);
+          const username = sanitizeText(user?.username, "", 64);
+          const displayName = sanitizeText(
+            profile.name || username,
+            username || "未知用户",
+            64,
+          );
+          const role = sanitizeText(user?.role, "user", 20).toLowerCase() === "admin" ? "admin" : "user";
+          return {
+            id: userId,
+            username,
+            displayName,
+            role,
+            className: sanitizeText(profile.className, "", 40),
+            studentId: sanitizeText(profile.studentId, "", 20),
+            adminOrder: resolveAdminOrder({
+              role,
+              username,
+              usernameKey: user?.usernameKey,
+              displayName,
+            }),
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => {
+          const roleOrderA = a.role === "admin" ? 0 : 1;
+          const roleOrderB = b.role === "admin" ? 0 : 1;
+          if (roleOrderA !== roleOrderB) return roleOrderA - roleOrderB;
+          if (a.role === "admin") {
+            if (a.adminOrder !== b.adminOrder) return a.adminOrder - b.adminOrder;
+            return String(a.displayName || "").localeCompare(String(b.displayName || ""), "zh-CN", {
+              sensitivity: "base",
+            });
+          }
+          const classCompare = String(a.className || "").localeCompare(String(b.className || ""), "zh-CN", {
+            sensitivity: "base",
+            numeric: true,
+          });
+          if (classCompare !== 0) return classCompare;
+          const studentIdCompare = String(a.studentId || "").localeCompare(
+            String(b.studentId || ""),
+            "zh-CN",
+            {
+              sensitivity: "base",
+              numeric: true,
+            },
+          );
+          if (studentIdCompare !== 0) return studentIdCompare;
+          return String(a.displayName || "").localeCompare(String(b.displayName || ""), "zh-CN", {
+            sensitivity: "base",
+          });
+        });
 
       const payloadRooms = rooms
         .map((room) => {
@@ -914,11 +1811,164 @@ export function registerAdminRoutes(app, deps) {
         ok: true,
         updatedAt: new Date().toISOString(),
         totalRoomCount: payloadRooms.length,
+        users: userOptions,
         rooms: payloadRooms,
       });
     } catch (error) {
       res.status(500).json({
         error: error?.message || "读取群聊派列表失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.post("/api/auth/admin/group-chat/rooms", async (req, res) => {
+    const admin = await authenticateAdminRequest(req, res);
+    if (!admin) return;
+
+    const roomName = sanitizeGroupChatRoomName(req.body?.name);
+    const ownerUserId = sanitizeId(req.body?.ownerUserId, "");
+    const inputMemberUserIds = Array.isArray(req.body?.memberUserIds) ? req.body.memberUserIds : [];
+    const rawMemberUserIds = Array.from(
+      new Set(
+        inputMemberUserIds
+          .map((item) => sanitizeId(item, ""))
+          .filter(Boolean),
+      ),
+    );
+
+    if (!roomName) {
+      res.status(400).json({ error: "请输入群名称。" });
+      return;
+    }
+    if (!ownerUserId || !isMongoObjectIdLike(ownerUserId)) {
+      res.status(400).json({ error: "请选择有效的群主账号。" });
+      return;
+    }
+
+    const memberUserIdSet = new Set(rawMemberUserIds);
+    memberUserIdSet.add(ownerUserId);
+    const finalMemberUserIds = Array.from(memberUserIdSet);
+    if (finalMemberUserIds.length > GROUP_CHAT_MAX_MEMBERS_PER_ROOM) {
+      res.status(400).json({
+        error: `成员数量不能超过 ${GROUP_CHAT_MAX_MEMBERS_PER_ROOM} 人。`,
+      });
+      return;
+    }
+    if (finalMemberUserIds.length === 0) {
+      res.status(400).json({ error: "请至少选择 1 位成员。" });
+      return;
+    }
+
+    try {
+      const selectedUsers = await AuthUser.find(
+        { _id: { $in: finalMemberUserIds } },
+        { username: 1, profile: 1, role: 1 },
+      ).lean();
+      const usersById = new Map(
+        (Array.isArray(selectedUsers) ? selectedUsers : []).map((user) => [
+          sanitizeId(user?._id, ""),
+          user,
+        ]),
+      );
+      if (usersById.size !== finalMemberUserIds.length) {
+        res.status(400).json({ error: "群成员中存在已失效账号，请刷新列表后重试。" });
+        return;
+      }
+      const ownerUser = usersById.get(ownerUserId);
+      if (!ownerUser) {
+        res.status(400).json({ error: "群主账号不存在，请刷新后重试。" });
+        return;
+      }
+
+      const [ownerCreatedCount, joinedCountRows] = await Promise.all([
+        GroupChatRoom.countDocuments({ ownerUserId }),
+        Promise.all(
+          finalMemberUserIds.map(async (memberUserId) => ({
+            userId: memberUserId,
+            count: await GroupChatRoom.countDocuments({ memberUserIds: memberUserId }),
+          })),
+        ),
+      ]);
+      if (ownerCreatedCount >= GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER) {
+        const ownerProfile = sanitizeUserProfile(ownerUser?.profile);
+        const ownerDisplayName = sanitizeText(
+          ownerProfile.name || ownerUser?.username,
+          ownerUser?.username || "该用户",
+          64,
+        );
+        res.status(400).json({
+          error: `群主「${ownerDisplayName}」已达到可创建群聊上限（${GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER} 个）。`,
+        });
+        return;
+      }
+      const exceededMember = joinedCountRows.find(
+        (item) => Number(item?.count || 0) >= GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER,
+      );
+      if (exceededMember) {
+        const exceededUser = usersById.get(sanitizeId(exceededMember?.userId, ""));
+        const profile = sanitizeUserProfile(exceededUser?.profile);
+        const displayName = sanitizeText(
+          profile.name || exceededUser?.username,
+          exceededUser?.username || "该成员",
+          64,
+        );
+        res.status(400).json({
+          error: `成员「${displayName}」已达到可加入群聊上限（${GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER} 个）。`,
+        });
+        return;
+      }
+
+      const roomCode = await generateUniqueGroupChatRoomCode();
+      const roomDoc = await GroupChatRoom.create({
+        roomCode,
+        name: roomName,
+        ownerUserId,
+        memberUserIds: sanitizeGroupChatMemberUserIds(finalMemberUserIds),
+        memberCount: finalMemberUserIds.length,
+      });
+      const roomId = sanitizeId(roomDoc?._id, "");
+
+      const adminName = sanitizeText(
+        buildGroupChatDisplayName(admin) || admin?.username,
+        sanitizeText(admin?.username, "管理员", 64) || "管理员",
+        64,
+      );
+      const ownerProfile = sanitizeUserProfile(ownerUser?.profile);
+      const ownerDisplayName = sanitizeText(
+        ownerProfile.name || ownerUser?.username,
+        ownerUser?.username || "派主",
+        64,
+      );
+
+      const systemMessageDoc = roomId
+        ? await createGroupChatSystemMessage({
+            roomId,
+            content: `${adminName} 在后台创建了派，派主：${ownerDisplayName}`,
+          })
+        : null;
+      if (roomId && systemMessageDoc?._id) {
+        await markGroupChatRoomReadByMessageId({
+          roomId,
+          userId: ownerUserId,
+          messageId: sanitizeId(systemMessageDoc?._id, ""),
+        });
+        broadcastGroupChatMessageCreated(roomId, systemMessageDoc);
+      }
+
+      const normalizedRoom = normalizeGroupChatRoomDoc(roomDoc);
+      if (roomId && normalizedRoom) {
+        broadcastGroupChatRoomUpdated(roomId, normalizedRoom);
+      }
+
+      res.status(201).json({
+        ok: true,
+        roomId,
+        room: normalizedRoom,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "创建群聊失败，请稍后重试。",
       });
     }
   });

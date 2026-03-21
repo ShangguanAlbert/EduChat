@@ -92,8 +92,8 @@ export default function LoginPage() {
 
   const lockedTeacherScopeKey = useMemo(
     () =>
-      resolveFixedStudentTeacherScopeKeyByUsername(username) ||
-      String(dynamicLockedTeacherScopeKey || "").trim(),
+      String(dynamicLockedTeacherScopeKey || "").trim() ||
+      resolveFixedStudentTeacherScopeKeyByUsername(username),
     [dynamicLockedTeacherScopeKey, username],
   );
   useEffect(() => {
