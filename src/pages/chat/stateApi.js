@@ -128,3 +128,16 @@ export async function prepareChatAttachments({
   }
   return data;
 }
+
+export function suggestChatSessionTitle({
+  question = "",
+  answer = "",
+} = {}) {
+  return request("/api/chat/sessions/suggest-title", {
+    method: "POST",
+    body: JSON.stringify({
+      question: String(question || ""),
+      answer: String(answer || ""),
+    }),
+  });
+}

@@ -18,7 +18,6 @@ import {
   useState,
 } from "react";
 import ReactMarkdown from "react-markdown";
-import { Virtuoso } from "react-virtuoso";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { useSessionStreamDraft } from "../pages/chat/streamDraftStore.js";
@@ -30,25 +29,38 @@ const MARKDOWN_COMPONENTS = {
   },
 };
 
-const VIRTUOSO_COMPONENTS = {
-  List: forwardRef(function MessageVirtuosoList({ style, children, ...props }, ref) {
-    return (
-      <div {...props} ref={ref} className="messages-inner" style={style}>
-        {children}
-      </div>
-    );
-  }),
-  Item: function MessageVirtuosoItem({ style, children, ...props }) {
-    return (
-      <div {...props} className="messages-virtuoso-item" style={style}>
-        {children}
-      </div>
-    );
-  },
-  Footer: function MessageVirtuosoFooter() {
-    return <div className="messages-bottom-spacer" aria-hidden="true" />;
-  },
-};
+function normalizeRenderedMarkdown(value) {
+  const text = String(value || "");
+  if (!text) return "";
+
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const current = String(lines[index] || "").trim();
+    const next = String(lines[index + 1] || "").trim();
+    if (!current || !/^(?:=|-){3,}$/.test(next)) continue;
+    if (
+      current.startsWith("#") ||
+      current.startsWith(">") ||
+      current.startsWith("```") ||
+      current.startsWith("~~~") ||
+      current.startsWith("- ") ||
+      current.startsWith("* ") ||
+      current.startsWith("+ ") ||
+      /^\d+\.\s/.test(current)
+    ) {
+      continue;
+    }
+
+    const looksLikeSentence =
+      current.length >= 16 || /[,.!?;:，。！？；：）)]$/.test(current);
+    if (!looksLikeSentence) continue;
+
+    lines.splice(index + 1, 0, "");
+    index += 1;
+  }
+
+  return lines.join("\n");
+}
 
 const MessageList = forwardRef(function MessageList({
   activeSessionId = "",
@@ -65,23 +77,16 @@ const MessageList = forwardRef(function MessageList({
   disableAssistantCopy = false,
 }, ref) {
   const streamDraft = useSessionStreamDraft(activeSessionId);
-  const virtuosoRef = useRef(null);
   const rootRef = useRef(null);
+  const messageNodeMapRef = useRef(new Map());
   const prevStreamingRef = useRef(isStreaming);
   const isAtLatestRef = useRef(true);
+  const suppressLatestStateUntilRef = useRef(0);
+  const reasoningToggleTimerRef = useRef(0);
   const displayedMessages = useMemo(() => {
     if (!streamDraft) return messages;
     return [...messages, streamDraft];
   }, [messages, streamDraft]);
-  const messageIndexMap = useMemo(() => {
-    const map = new Map();
-    displayedMessages.forEach((message, index) => {
-      if (message?.id) {
-        map.set(message.id, index);
-      }
-    });
-    return map;
-  }, [displayedMessages]);
   const promptMap = useMemo(
     () => buildNearestPromptMap(displayedMessages),
     [displayedMessages],
@@ -111,7 +116,8 @@ const MessageList = forwardRef(function MessageList({
   }, []);
 
   const setLatestState = useCallback(
-    (next) => {
+    (next, force = false) => {
+      if (!force && Date.now() < suppressLatestStateUntilRef.current) return;
       const value = !!next;
       if (value === isAtLatestRef.current) return;
       isAtLatestRef.current = value;
@@ -131,13 +137,14 @@ const MessageList = forwardRef(function MessageList({
   }, [setLatestState]);
 
   const jumpToLatest = useCallback(() => {
+    const root = rootRef.current;
+    if (!root) return;
     if (!displayedMessages.length) {
       checkIsAtLatest();
       return;
     }
-    virtuosoRef.current?.scrollToIndex?.({
-      index: "LAST",
-      align: "end",
+    root.scrollTo({
+      top: root.scrollHeight,
       behavior: "auto",
     });
     requestAnimationFrame(() => {
@@ -147,40 +154,61 @@ const MessageList = forwardRef(function MessageList({
 
   const scrollMessageToAnchor = useCallback(
     (messageId, duration = 620) => {
+      const root = rootRef.current;
+      const targetNode = messageNodeMapRef.current.get(messageId);
       if (!messageId) return;
-      const targetIndex = messageIndexMap.get(messageId);
-      if (typeof targetIndex !== "number") return;
+      if (!root || !targetNode) return;
       setLatestState(false);
-      virtuosoRef.current?.scrollToIndex?.({
-        index: targetIndex,
-        align: "start",
+      const rootRect = root.getBoundingClientRect();
+      const targetRect = targetNode.getBoundingClientRect();
+      root.scrollTo({
+        top: Math.max(0, root.scrollTop + (targetRect.top - rootRect.top) - 8),
         behavior: duration > 0 ? "smooth" : "auto",
       });
       requestAnimationFrame(() => {
         checkIsAtLatest();
       });
     },
-    [messageIndexMap, setLatestState, checkIsAtLatest],
+    [setLatestState, checkIsAtLatest],
   );
 
   const scrollToLatest = useCallback(
     (duration = 420) => {
-      if (!displayedMessages.length) return;
-      virtuosoRef.current?.scrollToIndex?.({
-        index: "LAST",
-        align: "end",
+      const root = rootRef.current;
+      if (!root || !displayedMessages.length) return;
+      root.scrollTo({
+        top: root.scrollHeight,
         behavior: duration > 0 ? "smooth" : "auto",
       });
     },
     [displayedMessages.length],
   );
 
-  const onAtBottomStateChange = useCallback(
-    (atBottom) => {
-      setLatestState(atBottom);
-    },
-    [setLatestState],
-  );
+  const prepareForReasoningToggle = useCallback(() => {
+    const root = rootRef.current;
+    if (!root) return;
+
+    const capturedScrollTop = root.scrollTop;
+    suppressLatestStateUntilRef.current = Date.now() + 420;
+    if (reasoningToggleTimerRef.current) {
+      window.clearTimeout(reasoningToggleTimerRef.current);
+      reasoningToggleTimerRef.current = 0;
+    }
+    setLatestState(false, true);
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const currentRoot = rootRef.current;
+        if (!currentRoot) return;
+        currentRoot.scrollTop = capturedScrollTop;
+        reasoningToggleTimerRef.current = window.setTimeout(() => {
+          suppressLatestStateUntilRef.current = 0;
+          reasoningToggleTimerRef.current = 0;
+          checkIsAtLatest();
+        }, 160);
+      });
+    });
+  }, [checkIsAtLatest, setLatestState]);
 
   const renderMessageItem = useCallback(
     (index, m) => {
@@ -192,6 +220,7 @@ const MessageList = forwardRef(function MessageList({
           onAssistantFeedback={onAssistantFeedback}
           onAssistantRegenerate={onAssistantRegenerate}
           onAssistantForward={onAssistantForward}
+          onReasoningToggle={prepareForReasoningToggle}
           promptMessageId={promptMap.get(m.id) || ""}
           showAssistantActions={showAssistantActions}
           disableAssistantCopy={disableAssistantCopy}
@@ -208,6 +237,15 @@ const MessageList = forwardRef(function MessageList({
       disableAssistantCopy,
     ],
   );
+
+  const registerMessageNode = useCallback((messageId, node) => {
+    if (!messageId) return;
+    if (node) {
+      messageNodeMapRef.current.set(messageId, node);
+      return;
+    }
+    messageNodeMapRef.current.delete(messageId);
+  }, []);
 
   useImperativeHandle(
     ref,
@@ -231,6 +269,30 @@ const MessageList = forwardRef(function MessageList({
     }
     prevStreamingRef.current = isStreaming;
   }, [isStreaming, focusMessageId, scrollMessageToAnchor]);
+
+  useEffect(() => {
+    const nodeMap = messageNodeMapRef.current;
+    const visibleIds = new Set(
+      displayedMessages
+        .map((message) => String(message?.id || "").trim())
+        .filter(Boolean),
+    );
+    nodeMap.forEach((node, messageId) => {
+      if (!visibleIds.has(messageId) || !node?.isConnected) {
+        nodeMap.delete(messageId);
+      }
+    });
+  }, [displayedMessages]);
+
+  useEffect(() => {
+    return () => {
+      if (reasoningToggleTimerRef.current) {
+        window.clearTimeout(reasoningToggleTimerRef.current);
+        reasoningToggleTimerRef.current = 0;
+      }
+      messageNodeMapRef.current.clear();
+    };
+  }, []);
 
   useEffect(() => {
     setLatestState(true);
@@ -357,20 +419,31 @@ const MessageList = forwardRef(function MessageList({
 
   return (
     <>
-      <Virtuoso
-        ref={virtuosoRef}
+      <div
         className="messages"
+        ref={setScrollerRef}
         style={virtuosoStyle}
-        data={displayedMessages}
-        computeItemKey={(index, item) => item?.id || index}
-        components={VIRTUOSO_COMPONENTS}
-        scrollerRef={setScrollerRef}
-        atBottomThreshold={40}
-        atBottomStateChange={onAtBottomStateChange}
+        onScroll={checkIsAtLatest}
         onMouseUp={onMessageAreaMouseUp}
         onKeyUp={onMessageAreaMouseUp}
-        itemContent={renderMessageItem}
-      />
+      >
+        <div className="messages-inner">
+          {displayedMessages.map((message, index) => {
+            const messageKey = message?.id || index;
+            return (
+              <div
+                key={messageKey}
+                className="messages-list-item"
+                data-message-id={message?.id || ""}
+                ref={(node) => registerMessageNode(message?.id, node)}
+              >
+                {renderMessageItem(index, message)}
+              </div>
+            );
+          })}
+          <div className="messages-bottom-spacer" aria-hidden="true" />
+        </div>
+      </div>
       {askPopover.open && typeof onAskSelection === "function" && (
         <button
           type="button"
@@ -397,13 +470,14 @@ const MessageItem = memo(function MessageItem({
   onAssistantFeedback,
   onAssistantRegenerate,
   onAssistantForward,
+  onReasoningToggle,
   promptMessageId,
   showAssistantActions,
   disableAssistantCopy,
 }) {
   const [copied, setCopied] = useState(false);
-  const [copiedAttachmentKey, setCopiedAttachmentKey] = useState("");
-  const [previewImage, setPreviewImage] = useState(null);
+  const reasoningMarkdown = normalizeRenderedMarkdown(m.reasoning);
+  const contentMarkdown = normalizeRenderedMarkdown(m.content);
 
   async function copyContent() {
     const text = m.content?.trim() || "";
@@ -418,23 +492,51 @@ const MessageItem = memo(function MessageItem({
     }
   }
 
-  async function copyAttachmentUrl(url, key) {
+  async function downloadAttachment(url, filename) {
     if (!url) return;
+
+    const triggerDownload = (href, suggestedName = "") => {
+      const link = document.createElement("a");
+      link.href = href;
+      if (suggestedName) link.download = suggestedName;
+      link.rel = "noopener noreferrer";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+
     try {
-      await navigator.clipboard.writeText(url);
-      setCopiedAttachmentKey(String(key || ""));
-      setTimeout(() => setCopiedAttachmentKey(""), 1200);
+      const response = await fetch(url, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error(`download failed: ${response.status}`);
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      triggerDownload(objectUrl, String(filename || "").trim());
+      window.setTimeout(() => {
+        URL.revokeObjectURL(objectUrl);
+      }, 1000);
     } catch {
-      setCopiedAttachmentKey("");
+      triggerDownload(url, String(filename || "").trim());
     }
   }
 
   return (
     <div className={`msg ${m.role}`}>
       <div className={`msg-bubble ${m.role}`}>
-        {m.reasoning?.trim() && (
+        {reasoningMarkdown.trim() && (
           <details className="reasoning-panel">
-            <summary className="reasoning-summary">
+            <summary
+              className="reasoning-summary"
+              onPointerDownCapture={() => onReasoningToggle?.()}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  onReasoningToggle?.();
+                }
+              }}
+            >
               <span className="reasoning-summary-icon" aria-hidden="true">
                 <Sparkles size={18} />
               </span>
@@ -449,7 +551,7 @@ const MessageItem = memo(function MessageItem({
                 rehypePlugins={[rehypeRaw]}
                 components={MARKDOWN_COMPONENTS}
               >
-                {m.reasoning}
+                {reasoningMarkdown}
               </ReactMarkdown>
             </div>
           </details>
@@ -461,96 +563,81 @@ const MessageItem = memo(function MessageItem({
               const attachmentUrl = readAttachmentUrl(a);
               const imageAttachment = isImageAttachment(a);
               const attachmentKey = `${a?.name || "file"}-${idx}`;
-              const copiedLink = copiedAttachmentKey === attachmentKey;
-              if (imageAttachment && attachmentUrl) {
+              const attachmentThumbnailUrl = readAttachmentThumbnailUrl(a);
+              const imageSrc = attachmentThumbnailUrl || attachmentUrl;
+              if (imageAttachment && imageSrc) {
                 return (
                   <div className="file-card file-card-image" key={attachmentKey}>
-                    <button
-                      type="button"
-                      className="file-image-btn"
-                      onClick={() =>
-                        setPreviewImage({
-                          url: attachmentUrl,
-                          name: a?.name || "图片附件",
-                        })
-                      }
-                      aria-label="预览图片附件"
-                      title="点击放大"
-                    >
-                      <img
-                        src={attachmentUrl}
-                        alt={a?.name || "图片附件"}
-                        className="file-image-thumb"
-                      />
-                    </button>
-                    <div className="file-meta">
-                      <div className="file-name" title={a?.name}>
-                        {a?.name || "图片附件"}
-                      </div>
-                      <div className="file-sub">
-                        {a?.type ? a.type : "image"}
-                        {typeof a?.size === "number" ? ` · ${formatBytes(a.size)}` : ""}
-                      </div>
-                    </div>
-                    <div className="file-inline-actions">
-                      <button
-                        type="button"
-                        className={`msg-action-btn ${copiedLink ? "active" : ""}`}
-                        title={copiedLink ? "已复制链接" : "复制链接"}
-                        aria-label="复制链接"
-                        onClick={() => copyAttachmentUrl(attachmentUrl, attachmentKey)}
-                      >
-                        <Copy size={14} />
-                      </button>
+                    {attachmentUrl ? (
                       <a
                         href={attachmentUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="file-open-link"
+                        className="file-image-btn"
+                        aria-label="下载图片附件"
+                        title="点击下载图片"
+                        download={a?.name || true}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          downloadAttachment(attachmentUrl, a?.name);
+                        }}
                       >
-                        打开
+                        <img
+                          src={imageSrc}
+                          alt={a?.name || "图片附件"}
+                          className="file-image-thumb"
+                          loading="eager"
+                          decoding="async"
+                        />
                       </a>
-                    </div>
+                    ) : (
+                      <div className="file-image-btn" aria-hidden="true">
+                        <img
+                          src={imageSrc}
+                          alt={a?.name || "图片附件"}
+                          className="file-image-thumb"
+                          loading="eager"
+                          decoding="async"
+                        />
+                      </div>
+                    )}
                   </div>
                 );
               }
 
               return (
-                <div className="file-card" key={attachmentKey}>
+                <a
+                  key={attachmentKey}
+                  href={attachmentUrl || undefined}
+                  className={`file-card ${attachmentUrl ? "file-card-link" : "file-card-static"}`}
+                  aria-disabled={!attachmentUrl}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    if (!attachmentUrl) return;
+                    downloadAttachment(attachmentUrl, a?.name);
+                  }}
+                >
                   <div className="file-icon">📄</div>
                   <div className="file-meta">
                     <div className="file-name" title={a?.name}>
                       {a?.name}
                     </div>
                     <div className="file-sub">
-                      {a?.type ? a.type : "file"}
-                      {typeof a?.size === "number" ? ` · ${formatBytes(a.size)}` : ""}
+                      {typeof a?.size === "number" ? formatBytes(a.size) : "文件"}
                     </div>
                   </div>
-                  {attachmentUrl ? (
-                    <a
-                      href={attachmentUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="file-open-link"
-                    >
-                      打开
-                    </a>
-                  ) : null}
-                </div>
+                </a>
               );
             })}
           </div>
         )}
 
-        {m.content?.trim() ? (
+        {contentMarkdown.trim() ? (
           <div className="msg-text md-body">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeRaw]}
               components={MARKDOWN_COMPONENTS}
             >
-              {m.content}
+              {contentMarkdown}
             </ReactMarkdown>
           </div>
         ) : m.streaming ? (
@@ -618,39 +705,6 @@ const MessageItem = memo(function MessageItem({
           </div>
         )}
       </div>
-      {previewImage?.url ? (
-        <div
-          className="msg-image-lightbox"
-          onClick={() => setPreviewImage(null)}
-          role="presentation"
-        >
-          <div
-            className="msg-image-lightbox-content"
-            onClick={(event) => event.stopPropagation()}
-            role="presentation"
-          >
-            <img src={previewImage.url} alt={previewImage.name || "图片预览"} />
-            <div className="msg-image-lightbox-actions">
-              <button
-                type="button"
-                className="msg-action-btn"
-                onClick={() => copyAttachmentUrl(previewImage.url, "lightbox")}
-              >
-                <Copy size={14} />
-                <span>复制链接</span>
-              </button>
-              <a
-                href={previewImage.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="file-open-link"
-              >
-                打开原图
-              </a>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 });
@@ -695,6 +749,12 @@ function getElementFromNode(node) {
 
 function readAttachmentUrl(attachment) {
   return String(attachment?.url || attachment?.fileUrl || "").trim();
+}
+
+function readAttachmentThumbnailUrl(attachment) {
+  return String(
+    attachment?.thumbnailUrl || attachment?.thumbUrl || attachment?.previewUrl || "",
+  ).trim();
 }
 
 function isImageAttachment(attachment) {

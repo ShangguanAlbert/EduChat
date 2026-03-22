@@ -709,7 +709,10 @@ export function registerGroupChatRoutes(app, deps) {
             : "user",
         },
         limits: {
-          maxCreatedRoomsPerUser: GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER,
+          maxCreatedRoomsPerUser:
+            sanitizeText(req.authUser?.role, "user", 20).toLowerCase() === "admin"
+              ? null
+              : GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER,
           maxJoinedRoomsPerUser: GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER,
           maxMembersPerRoom: GROUP_CHAT_MAX_MEMBERS_PER_ROOM,
         },
@@ -729,6 +732,7 @@ export function registerGroupChatRoutes(app, deps) {
 
   app.post("/api/group-chat/rooms", requireChatAuth, async (req, res) => {
     const userId = sanitizeId(req.authUser?._id, "");
+    const userRole = sanitizeText(req.authUser?.role, "user", 20).toLowerCase();
     const roomName = sanitizeGroupChatRoomName(req.body?.name);
     if (!userId) {
       res.status(400).json({ error: "无效用户身份。" });
@@ -745,7 +749,7 @@ export function registerGroupChatRoutes(app, deps) {
         GroupChatRoom.countDocuments({ memberUserIds: userId }),
       ]);
 
-      if (createdCount >= GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER) {
+      if (userRole !== "admin" && createdCount >= GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER) {
         res.status(400).json({
           error: `每个用户最多创建 ${GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER} 个群聊。`,
         });

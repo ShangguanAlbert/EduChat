@@ -62,6 +62,7 @@ const PROVIDER_OPTIONS = [
 ];
 const KNOWN_PROVIDERS = new Set(["openrouter", "volcengine", "aliyun"]);
 const AGENT_E_FIXED_MAX_OUTPUT_TOKENS = 131072;
+const AGENT_C_FIXED_MODEL = "doubao-seed-2-0-pro-260215";
 const AGENT_E_LOCKED_RUNTIME_FIELDS = new Set([
   "provider",
   "model",
@@ -78,6 +79,10 @@ const AGENT_D_LOCKED_RUNTIME_FIELDS = new Set([
 ]);
 const AGENT_C_LOCKED_RUNTIME_FIELDS = new Set([
   "provider",
+  "model",
+  "protocol",
+  "maxOutputTokens",
+  "thinkingEffort",
 ]);
 const OPENROUTER_PDF_ENGINE_OPTIONS = [
   { value: "auto", label: "自动（默认）" },
@@ -124,6 +129,36 @@ const DEBUG_IMAGE_EXTENSIONS = new Set([
   "avif",
 ]);
 const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = [
+  {
+    id: "doubao-seed-2-0-pro-260215",
+    aliases: [
+      "doubao-seed-2-0-pro-260215",
+      "doubao-seed-2-0-pro",
+      "doubao-seed-2.0-pro-260215",
+      "doubao-seed-2.0-pro",
+    ],
+    supportsThinking: true,
+  },
+  {
+    id: "doubao-seed-2-0-lite-260215",
+    aliases: [
+      "doubao-seed-2-0-lite-260215",
+      "doubao-seed-2-0-lite",
+      "doubao-seed-2.0-lite-260215",
+      "doubao-seed-2.0-lite",
+    ],
+    supportsThinking: true,
+  },
+  {
+    id: "doubao-seed-2-0-mini-260215",
+    aliases: [
+      "doubao-seed-2-0-mini-260215",
+      "doubao-seed-2-0-mini",
+      "doubao-seed-2.0-mini-260215",
+      "doubao-seed-2.0-mini",
+    ],
+    supportsThinking: true,
+  },
   {
     id: "doubao-seed-1-8-251228",
     aliases: ["doubao-seed-1-8-251228", "doubao-seed-1-8"],
@@ -180,7 +215,7 @@ function createDefaultAgentModelMap() {
   return {
     A: "doubao-seed-1-6-251015",
     B: "glm-4-7-251222",
-    C: "deepseek-v3-2-251201",
+    C: AGENT_C_FIXED_MODEL,
     D: "qwen3.5-plus",
   };
 }
@@ -210,6 +245,7 @@ function sanitizeAgentModelMap(raw) {
       .trim()
       .slice(0, 180);
   });
+  next.C = AGENT_C_FIXED_MODEL;
   next.D = "qwen3.5-plus";
   return next;
 }
@@ -431,15 +467,6 @@ function mergeAttachmentsWithUploadedLinks(attachments, rawLinks) {
       ossKey: matched.ossKey || attachment?.ossKey || "",
     };
   });
-}
-
-function formatTokenCountAsK(value) {
-  const amount = Number(value || 0);
-  if (!Number.isFinite(amount) || amount <= 0) return "0k";
-  if (amount % 1000 === 0) return `${amount / 1000}k`;
-  if (amount % 1024 === 0) return `${amount / 1024}k`;
-  const rounded = Math.round((amount / 1000) * 10) / 10;
-  return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)}k`;
 }
 
 function stripVolcengineReadonlyTokenFields(runtimeConfigs) {
@@ -749,42 +776,12 @@ export default function AdminSettingsPage() {
     () => isVolcengineFixedSamplingModel(selectedModelForMatching),
     [selectedModelForMatching],
   );
-  const matchedTokenProfile = useMemo(
-    () => resolveRuntimeTokenProfileByModel(selectedModelForMatching),
-    [selectedModelForMatching],
-  );
-  const volcMatchedMaxOutputText = useMemo(() => {
-    const raw =
-      matchedTokenProfile?.maxOutputTokens ?? selectedRuntime?.maxOutputTokens ?? 0;
-    return formatTokenCountAsK(raw);
-  }, [matchedTokenProfile?.maxOutputTokens, selectedRuntime?.maxOutputTokens]);
   const volcWebSearchCapability = useMemo(
     () => resolveVolcengineWebSearchCapability(selectedModelForMatching),
     [selectedModelForMatching],
   );
   const webSearchSupported = showVolcenginePanel && volcWebSearchCapability.supported;
   const webSearchSwitchDisabled = loading || !webSearchSupported;
-  const webSearchCapabilityHint = useMemo(() => {
-    if (!showVolcenginePanel) return "";
-    if (!selectedModelForMatching) {
-      return "请输入火山模型 ID 以匹配联网搜索支持列表。";
-    }
-    if (!webSearchSupported) {
-      return "该模型未命中联网搜索支持列表，联网搜索已自动关闭。";
-    }
-    return `已匹配支持联网搜索的模型：${volcWebSearchCapability.matchedModelId}`;
-  }, [
-    selectedModelForMatching,
-    showVolcenginePanel,
-    volcWebSearchCapability.matchedModelId,
-    webSearchSupported,
-  ]);
-  const webSearchThinkingHint =
-    !webSearchSupported
-      ? "当前模型未启用联网搜索能力，系统不会注入“边想边搜”策略提示词。"
-      : volcWebSearchCapability.supportsThinking
-        ? "该模型支持深度思考，开启联网搜索后会自动注入“边想边搜”规范提示词。"
-        : "该模型不支持深度思考联动，联网搜索将按默认模式直接调用。";
 
   const isAgentESelected = selectedAgent === "E";
   const isAgentCSelected = selectedAgent === "C";
@@ -2432,24 +2429,9 @@ export default function AdminSettingsPage() {
                       ? `留空则使用默认模型：${selectedModelDefault}`
                       : "留空则走 .env 里对应 AGENT_MODEL_*"
                   }
-                  disabled={loading || isAgentDSelected}
+                  disabled={loading || isAgentCSelected || isAgentDSelected}
                 />
               </label>
-              {showVolcenginePanel ? (
-                <p className="admin-field-note">
-                  {`已自动匹配长度限制：最大输出 ${volcMatchedMaxOutputText}。`}
-                </p>
-              ) : !showOpenRouterPanel && !showAliyunPanel ? (
-                matchedTokenProfile ? (
-                  <p className="admin-field-note">
-                    {`已自动匹配长度限制：上下文 ${matchedTokenProfile.contextWindowTokens}，最大输入 ${matchedTokenProfile.maxInputTokens}，最大输出 ${matchedTokenProfile.maxOutputTokens}。`}
-                  </p>
-                ) : (
-                  <p className="admin-field-note">
-                    未匹配到内置模型长度规则，将使用当前智能体默认规格。
-                  </p>
-                )
-              ) : null}
                   {showOpenRouterPanel ? (
                     <p className="admin-field-note">
                       Openrouter api仅支持最大输出（max_tokens）配置。
@@ -2467,12 +2449,6 @@ export default function AdminSettingsPage() {
               ) : !showVolcenginePanel ? (
                 <p className="admin-field-note">
                   说明：Chat 协议下，上下文窗口、最大输入长度、最大输出长度可独立编辑；最大输出会映射到上游接口参数。
-                </p>
-              ) : null}
-              {samplingLockedByModel ? (
-                <p className="admin-field-note">
-                  当前模型已固定采样参数：temperature = {VOLCENGINE_FIXED_TEMPERATURE}、
-                  top_p = {VOLCENGINE_FIXED_TOP_P}；已禁用手动调节。
                 </p>
               ) : null}
 
@@ -2529,7 +2505,7 @@ export default function AdminSettingsPage() {
                       max={1048576}
                       step={64}
                       onChange={(next) => updateRuntimeField("maxOutputTokens", next)}
-                      disabled={loading}
+                      disabled={loading || isAgentCSelected}
                     />
                   </label>
 
@@ -2686,15 +2662,6 @@ export default function AdminSettingsPage() {
                     />
                   </label>
 
-                  <p className="admin-field-note">
-                    当前服务商：{selectedProviderName}
-                    {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
-                    火山引擎 Ark 仅使用 Responses API，已移除 Chat Completions 选项。
-                  </p>
-                  <p className={`admin-field-note ${webSearchSupported ? "" : "warning"}`}>
-                    {webSearchCapabilityHint}
-                  </p>
-                  <p className="admin-field-note">{webSearchThinkingHint}</p>
                 </>
               ) : (
                 <>
@@ -2892,7 +2859,7 @@ export default function AdminSettingsPage() {
                       max={1048576}
                       step={64}
                       onChange={(next) => updateRuntimeField("maxOutputTokens", next)}
-                      disabled={loading || showAliyunPanel}
+                      disabled={loading || showAliyunPanel || isAgentCSelected}
                     />
                   </label>
                   {showAliyunPanel && aliyunWebSearchAllowed ? (

@@ -6,6 +6,10 @@ const AGENT_D_FIXED_PROVIDER = "aliyun";
 const AGENT_D_FIXED_MODEL = "qwen3.5-plus";
 const AGENT_D_FIXED_MAX_OUTPUT_TOKENS = 65536;
 const AGENT_C_FIXED_PROVIDER = "volcengine";
+const AGENT_C_FIXED_MODEL = "doubao-seed-2-0-pro-260215";
+const AGENT_C_FIXED_PROTOCOL = "responses";
+const AGENT_C_FIXED_MAX_OUTPUT_TOKENS = 131072;
+const AGENT_C_FIXED_THINKING_EFFORT = "medium";
 const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
 const RUNTIME_MAX_INPUT_TOKENS = 512000;
 const RUNTIME_MAX_OUTPUT_TOKENS = 1048576;
@@ -35,7 +39,7 @@ export const ALIYUN_MINIMAX_FIXED_TOP_P = 0.95;
 const DEFAULT_AGENT_MODEL_BY_AGENT = Object.freeze({
   A: "doubao-seed-1-6-251015",
   B: "glm-4-7-251222",
-  C: "deepseek-v3-2-251201",
+  C: AGENT_C_FIXED_MODEL,
   D: AGENT_D_FIXED_MODEL,
 });
 const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
@@ -376,6 +380,20 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   openrouterUseResponseHealing: false,
   openrouterPdfEngine: "auto",
 });
+const AGENT_C_ALWAYS_ON_WEB_SEARCH_MODEL_ALIASES = new Set([
+  "doubao-seed-2-0-pro-260215",
+  "doubao-seed-2-0-pro",
+  "doubao-seed-2.0-pro-260215",
+  "doubao-seed-2.0-pro",
+  "doubao-seed-2-0-lite-260215",
+  "doubao-seed-2-0-lite",
+  "doubao-seed-2.0-lite-260215",
+  "doubao-seed-2.0-lite",
+  "doubao-seed-2-0-mini-260215",
+  "doubao-seed-2-0-mini",
+  "doubao-seed-2.0-mini-260215",
+  "doubao-seed-2.0-mini",
+]);
 const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
   A: Object.freeze({
     contextWindowTokens: 256000,
@@ -390,10 +408,14 @@ const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
     maxReasoningTokens: 128000,
   }),
   C: Object.freeze({
-    contextWindowTokens: 128000,
-    maxInputTokens: 96000,
-    maxOutputTokens: 32000,
-    maxReasoningTokens: 32000,
+    provider: AGENT_C_FIXED_PROVIDER,
+    model: AGENT_C_FIXED_MODEL,
+    protocol: AGENT_C_FIXED_PROTOCOL,
+    contextWindowTokens: 256000,
+    maxInputTokens: 256000,
+    maxOutputTokens: AGENT_C_FIXED_MAX_OUTPUT_TOKENS,
+    maxReasoningTokens: 131072,
+    thinkingEffort: AGENT_C_FIXED_THINKING_EFFORT,
   }),
   D: Object.freeze({
     provider: AGENT_D_FIXED_PROVIDER,
@@ -465,6 +487,12 @@ function startsWithAny(value, prefixes = []) {
     if (normalized.startsWith(`${prefix}-`)) return true;
     return normalized.startsWith(prefix);
   });
+}
+
+function isAgentCAlwaysOnWebSearchModel(model = "") {
+  return getNormalizedModelCandidates(model).some((candidate) =>
+    AGENT_C_ALWAYS_ON_WEB_SEARCH_MODEL_ALIASES.has(candidate),
+  );
 }
 
 export function resolveAliyunModelPolicyForRuntime(model = "") {
@@ -841,6 +869,21 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
 
   if (normalizedAgentId === "C") {
     next.provider = AGENT_C_FIXED_PROVIDER;
+    next.model = AGENT_C_FIXED_MODEL;
+    next.protocol = AGENT_C_FIXED_PROTOCOL;
+    next.temperature = VOLCENGINE_FIXED_TEMPERATURE;
+    next.topP = VOLCENGINE_FIXED_TOP_P;
+    next.maxOutputTokens = AGENT_C_FIXED_MAX_OUTPUT_TOKENS;
+    next.thinkingEffort = AGENT_C_FIXED_THINKING_EFFORT;
+    const fixedProfile = resolveRuntimeTokenProfileByModel(AGENT_C_FIXED_MODEL);
+    if (fixedProfile) {
+      next.contextWindowTokens = fixedProfile.contextWindowTokens;
+      next.maxInputTokens = fixedProfile.maxInputTokens;
+      next.maxReasoningTokens = fixedProfile.maxReasoningTokens;
+    }
+    if (isAgentCAlwaysOnWebSearchModel(AGENT_C_FIXED_MODEL)) {
+      next.enableWebSearch = true;
+    }
   }
 
   return next;

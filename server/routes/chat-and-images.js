@@ -677,6 +677,116 @@ export function registerChatAndImageRoutes(app, deps) {
     toPublicUser,
   } = deps;
 
+  const SESSION_TITLE_MODEL_AGENT_ID = "C";
+
+  function buildSessionTitleQuestionText(question, answer) {
+    const safeQuestion = sanitizeText(question, "", 600);
+    const safeAnswer = sanitizeText(answer, "", 1200);
+    return [
+      "请根据下面这轮对话，生成一个简短、具体的中文会话标题。",
+      "",
+      "要求：",
+      "1. 只输出标题本身，不要解释，不要引号，不要序号。",
+      "2. 长度尽量控制在 6-18 个汉字。",
+      "3. 重点体现用户真实意图，避免“新对话”“聊天记录”“问题咨询”这类泛化标题。",
+      "",
+      `用户问题：${safeQuestion || "（无）"}`,
+      `助手回答：${safeAnswer || "（无）"}`,
+    ].join("\n");
+  }
+
+  function normalizeGeneratedSessionTitle(title, fallback = "新对话") {
+    const cleaned = sanitizeText(title, "", 80)
+      .replace(/^["'“”‘’【\[]+|["'“”‘’】\]]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleaned) return fallback;
+    const clipped = cleaned.length > 24 ? cleaned.slice(0, 24).trim() : cleaned;
+    return clipped || fallback;
+  }
+
+  async function generateSessionTitleByModel({ question = "", answer = "" } = {}) {
+    const runtimeConfig = await getResolvedAgentRuntimeConfig(SESSION_TITLE_MODEL_AGENT_ID);
+    const provider = getProviderByAgent(SESSION_TITLE_MODEL_AGENT_ID, runtimeConfig);
+    const model = getModelByAgent(SESSION_TITLE_MODEL_AGENT_ID, runtimeConfig);
+    const protocol = resolveRequestProtocol(runtimeConfig.protocol, provider, model).value;
+    const providerConfig = getProviderConfig(provider);
+    const endpoint =
+      protocol === "responses" ? providerConfig.responsesEndpoint : providerConfig.chatEndpoint;
+    if (!endpoint || !providerConfig.apiKey) {
+      throw new Error("标题生成模型未配置完成。");
+    }
+
+    const prompt = buildSessionTitleQuestionText(question, answer);
+    const headers = buildProviderHeaders(provider, providerConfig.apiKey, protocol);
+    let payload = null;
+
+    if (protocol === "responses") {
+      payload = {
+        model,
+        stream: false,
+        input: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: prompt }],
+          },
+        ],
+        instructions:
+          "你是会话标题生成器。你只能输出一个简短中文标题，不要输出任何解释、标点装饰或多余内容。",
+        max_output_tokens: 48,
+        thinking: { type: "disabled" },
+      };
+    } else {
+      payload = {
+        model,
+        stream: false,
+        temperature: 0.2,
+        top_p: 0.9,
+        max_tokens: 48,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是会话标题生成器。你只能输出一个简短中文标题，不要输出任何解释、标点装饰或多余内容。",
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+      };
+    }
+
+    const upstream = await sendProviderRequestWithRetry({
+      endpoint,
+      headers,
+      body: JSON.stringify(payload),
+      provider,
+      protocol,
+    });
+
+    if (!upstream.ok) {
+      const detail = await safeReadText(upstream);
+      throw new Error(
+        formatProviderUpstreamError(provider, protocol, upstream.status, detail),
+      );
+    }
+
+    const data = await safeReadJson(upstream);
+    let rawTitle = "";
+    if (protocol === "responses") {
+      rawTitle = extractResponsesOutputTextFromCompleted(data);
+    } else {
+      const firstChoice = data?.choices?.[0] || {};
+      rawTitle =
+        extractDeltaText(firstChoice?.message?.content) ||
+        extractDeltaText(firstChoice?.text) ||
+        extractDeltaText(data?.output_text);
+    }
+
+    return normalizeGeneratedSessionTitle(rawTitle, "新对话");
+  }
+
   app.post(
     "/api/auth/admin/agent-debug-stream",
     requireAdminAuth,
@@ -789,14 +899,24 @@ export function registerChatAndImageRoutes(app, deps) {
           source: "admin-volcengine-files-api",
           stopOnError: false,
         });
-        const refsWithOss = uploadedBundle.uploadedRefs.map((item, idx) => {
-          const oss = uploadedToOss[idx] || null;
-          return {
-            ...item,
-            url: sanitizeGroupChatHttpUrl(oss?.fileUrl),
-            ossKey: sanitizeGroupChatOssObjectKey(oss?.ossKey),
-          };
-        });
+        const refsWithOss = await Promise.all(
+          uploadedBundle.uploadedRefs.map(async (item, idx) => {
+            const oss = uploadedToOss[idx] || null;
+            const ossKey = sanitizeGroupChatOssObjectKey(oss?.ossKey);
+            const directUrl = sanitizeGroupChatHttpUrl(oss?.fileUrl);
+            const signedUrl = ossKey
+              ? await buildGroupChatFileSignedDownloadUrl({
+                  ossKey,
+                  fileName: String(item?.name || oss?.fileName || ""),
+                })
+              : "";
+            return {
+              ...item,
+              url: sanitizeGroupChatHttpUrl(signedUrl || directUrl),
+              ossKey,
+            };
+          }),
+        );
 
         res.json({
           ok: true,
@@ -927,6 +1047,34 @@ export function registerChatAndImageRoutes(app, deps) {
   );
 
   app.post(
+    "/api/chat/sessions/suggest-title",
+    requireChatAuth,
+    async (req, res) => {
+      const question = sanitizeText(req.body?.question, "", 600);
+      const answer = sanitizeText(req.body?.answer, "", 1200);
+      if (!question || !answer) {
+        res.status(400).json({ error: "缺少用于生成标题的首轮问答内容。" });
+        return;
+      }
+
+      try {
+        const title = await generateSessionTitleByModel({
+          question,
+          answer,
+        });
+        res.json({
+          ok: true,
+          title,
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "会话标题生成失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
+  app.post(
     "/api/chat/volcengine-files/upload",
     requireChatAuth,
     upload.array("files", MAX_FILES),
@@ -973,14 +1121,24 @@ export function registerChatAndImageRoutes(app, deps) {
           source: "chat-volcengine-files-api",
           stopOnError: false,
         });
-        const refsWithOss = uploadedBundle.uploadedRefs.map((item, idx) => {
-          const oss = uploadedToOss[idx] || null;
-          return {
-            ...item,
-            url: sanitizeGroupChatHttpUrl(oss?.fileUrl),
-            ossKey: sanitizeGroupChatOssObjectKey(oss?.ossKey),
-          };
-        });
+        const refsWithOss = await Promise.all(
+          uploadedBundle.uploadedRefs.map(async (item, idx) => {
+            const oss = uploadedToOss[idx] || null;
+            const ossKey = sanitizeGroupChatOssObjectKey(oss?.ossKey);
+            const directUrl = sanitizeGroupChatHttpUrl(oss?.fileUrl);
+            const signedUrl = ossKey
+              ? await buildGroupChatFileSignedDownloadUrl({
+                  ossKey,
+                  fileName: String(item?.name || oss?.fileName || ""),
+                })
+              : "";
+            return {
+              ...item,
+              url: sanitizeGroupChatHttpUrl(signedUrl || directUrl),
+              ossKey,
+            };
+          }),
+        );
 
         res.json({
           ok: true,

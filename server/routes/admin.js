@@ -1889,7 +1889,10 @@ export function registerAdminRoutes(app, deps) {
           })),
         ),
       ]);
-      if (ownerCreatedCount >= GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER) {
+      if (
+        sanitizeText(ownerUser?.role, "user", 20).toLowerCase() !== "admin" &&
+        ownerCreatedCount >= GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER
+      ) {
         const ownerProfile = sanitizeUserProfile(ownerUser?.profile);
         const ownerDisplayName = sanitizeText(
           ownerProfile.name || ownerUser?.username,

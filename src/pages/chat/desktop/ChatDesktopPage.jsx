@@ -53,6 +53,7 @@ import {
   saveChatSessionMessages,
   saveChatStateMeta,
   saveUserProfile,
+  suggestChatSessionTitle,
   uploadVolcengineChatFiles,
 } from "../stateApi.js";
 import { clearUserAuthSession, withAuthSlot } from "../../../app/authStorage.js";
@@ -88,6 +89,11 @@ const DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
 const SIDEBAR_VISIBILITY_STORAGE_KEY = "chat_sidebar_visible";
 const TEACHER_SCOPE_YANG_JUNFENG = "yang-junfeng";
 const AGENT_C_LOCKED_PROVIDER = "volcengine";
+const AGENT_C_LOCKED_MODEL = "doubao-seed-2-0-pro-260215";
+const AGENT_C_LOCKED_PROTOCOL = "responses";
+const AGENT_C_LOCKED_MAX_OUTPUT_TOKENS = 131072;
+const CHAT_ATTACHMENT_THUMBNAIL_MAX_EDGE = 176;
+const CHAT_ATTACHMENT_THUMBNAIL_QUALITY = 0.76;
 const TEACHER_HOME_DEFAULT_GRADE = GRADE_OPTIONS.includes("大学四年级")
   ? "大学四年级"
   : (GRADE_OPTIONS[0] || "");
@@ -117,6 +123,144 @@ function readInitialSidebarVisible() {
     // Ignore localStorage errors and fall back to viewport-based defaults.
   }
   return !detectMobileViewport();
+}
+
+function isImageUploadFile(file) {
+  const mime = String(file?.type || "")
+    .trim()
+    .toLowerCase();
+  if (mime.startsWith("image/")) return true;
+  const name = String(file?.name || "")
+    .trim()
+    .toLowerCase();
+  return /\.(png|jpg|jpeg|gif|webp|bmp|svg|heic|avif)$/i.test(name);
+}
+
+function loadImageElementFromObjectUrl(objectUrl) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("decode image failed"));
+    image.src = objectUrl;
+  });
+}
+
+async function loadImageSourceFromFile(file) {
+  if (!(file instanceof File)) {
+    throw new Error("invalid image file");
+  }
+
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(file);
+    return {
+      node: bitmap,
+      width: bitmap.width,
+      height: bitmap.height,
+      release: () => {
+        if (typeof bitmap.close === "function") {
+          bitmap.close();
+        }
+      },
+    };
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = await loadImageElementFromObjectUrl(objectUrl);
+    return {
+      node: image,
+      width: image.naturalWidth || image.width,
+      height: image.naturalHeight || image.height,
+      release: () => {
+        URL.revokeObjectURL(objectUrl);
+      },
+    };
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
+}
+
+async function buildImageThumbnailDataUrl(file) {
+  if (!(file instanceof File) || !isImageUploadFile(file)) return "";
+
+  try {
+    const source = await loadImageSourceFromFile(file);
+    const width = Math.max(1, Number(source.width || 0));
+    const height = Math.max(1, Number(source.height || 0));
+    const scale = Math.min(1, CHAT_ATTACHMENT_THUMBNAIL_MAX_EDGE / Math.max(width, height));
+    const targetWidth = Math.max(1, Math.round(width * scale));
+    const targetHeight = Math.max(1, Math.round(height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      source.release();
+      return "";
+    }
+    context.drawImage(source.node, 0, 0, targetWidth, targetHeight);
+    source.release();
+    return canvas.toDataURL("image/jpeg", CHAT_ATTACHMENT_THUMBNAIL_QUALITY);
+  } catch {
+    return "";
+  }
+}
+
+function isUntitledSessionTitle(value) {
+  return /^新对话(?:\s*\d+)?$/.test(String(value || "").trim());
+}
+
+function stripMarkdownForSessionTitle(value) {
+  return String(value || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)]\([^)]*\)/g, "$1")
+    .replace(/^>\s*/gm, "")
+    .replace(/[#*_~>-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function clipSessionTitleText(value, maxLength = 22) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.length > maxLength ? `${text.slice(0, maxLength).trim()}...` : text;
+}
+
+function buildSessionRenameQuestion(message) {
+  const text = clipSessionTitleText(stripMarkdownForSessionTitle(message?.content || ""), 120);
+  const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+  const attachmentNames = attachments
+    .map((item) => String(item?.name || "").trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  const attachmentText =
+    attachmentNames.length > 0 ? `附件：${attachmentNames.join("、")}` : "";
+  return [text, attachmentText].filter(Boolean).join("\n");
+}
+
+function buildSessionRenameAnswer(message) {
+  return clipSessionTitleText(stripMarkdownForSessionTitle(message?.content || ""), 240);
+}
+
+function fallbackSessionTitleFromQuestion(question) {
+  const normalized = clipSessionTitleText(
+    stripMarkdownForSessionTitle(question).replace(/^附件：/u, "").trim(),
+    18,
+  );
+  return normalized || "新对话";
+}
+
+function normalizeSuggestedSessionTitle(value, fallback = "新对话") {
+  const text = clipSessionTitleText(
+    stripMarkdownForSessionTitle(value)
+      .replace(/^["'“”‘’【\[]+|["'“”‘’】\]]+$/g, "")
+      .trim(),
+    22,
+  );
+  return text || fallback;
 }
 
 function sanitizeProvider(value, fallback = "openrouter") {
@@ -206,6 +350,19 @@ function fillTeacherHomeDefaultUserInfo(profile) {
 function resolveRuntimeConfigForAgent(agentId, runtimeConfigs) {
   const safeAgentId = AGENT_META[agentId] ? agentId : "A";
   const base = runtimeConfigs?.[safeAgentId] || DEFAULT_AGENT_RUNTIME_CONFIG;
+  if (safeAgentId === "C") {
+    return {
+      ...base,
+      provider: AGENT_C_LOCKED_PROVIDER,
+      model: AGENT_C_LOCKED_MODEL,
+      protocol: AGENT_C_LOCKED_PROTOCOL,
+      temperature: 1,
+      topP: 0.95,
+      maxOutputTokens: AGENT_C_LOCKED_MAX_OUTPUT_TOKENS,
+      thinkingEffort: "medium",
+      enableWebSearch: true,
+    };
+  }
   if (safeAgentId !== "E") return base;
   return {
     ...base,
@@ -559,6 +716,8 @@ export default function ChatDesktopPage() {
   const pendingMetaSaveRef = useRef(false);
   const messageUpsertQueueRef = useRef(new Map());
   const messageUpsertRevisionRef = useRef(new Map());
+  const sessionsRef = useRef(DEFAULT_SESSIONS);
+  const autoSessionTitleRequestRef = useRef(new Set());
 
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeId) || null,
@@ -572,6 +731,10 @@ export default function ChatDesktopPage() {
     () => sessionMessages[activeId] || [],
     [sessionMessages, activeId],
   );
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
   const roundCount = useMemo(
     () => messages.filter((m) => m.role === "user").length,
     [messages],
@@ -750,6 +913,44 @@ export default function ChatDesktopPage() {
         messageUpsertRevisionRef.current.delete(key);
       }
     });
+  }
+
+  async function autoRenameSessionFromFirstExchange(sessionId, userMessage, assistantMessage) {
+    const sid = String(sessionId || "").trim();
+    if (!sid || autoSessionTitleRequestRef.current.has(sid)) return;
+
+    const currentSession = sessionsRef.current.find((item) => item?.id === sid) || null;
+    if (!isUntitledSessionTitle(currentSession?.title)) return;
+
+    const question = buildSessionRenameQuestion(userMessage);
+    const answer = buildSessionRenameAnswer(assistantMessage);
+    if (!question || !answer) return;
+
+    autoSessionTitleRequestRef.current.add(sid);
+    let nextTitle = "";
+    try {
+      const result = await suggestChatSessionTitle({
+        question,
+        answer,
+      });
+      nextTitle = normalizeSuggestedSessionTitle(
+        result?.title,
+        fallbackSessionTitleFromQuestion(question),
+      );
+    } catch {
+      nextTitle = fallbackSessionTitleFromQuestion(question);
+    } finally {
+      autoSessionTitleRequestRef.current.delete(sid);
+    }
+
+    if (!nextTitle || isUntitledSessionTitle(nextTitle)) return;
+    setSessions((prev) =>
+      prev.map((session) => {
+        if (session.id !== sid) return session;
+        if (!isUntitledSessionTitle(session.title)) return session;
+        return { ...session, title: nextTitle };
+      }),
+    );
   }
 
   function updateUserInfoField(field, value) {
@@ -1159,16 +1360,19 @@ export default function ChatDesktopPage() {
         isPdf: isPdfUploadFile(file),
       }));
       const pdfCandidates = indexedPicked.filter((item) => item.isPdf);
-      const localItems = indexedPicked
-        .filter((item) => !item.isPdf)
-        .map((item) => ({
-          index: item.index,
-          kind: "local",
-          file: item.file,
-          name: String(item.file?.name || ""),
-          size: Number(item.file?.size || 0),
-          type: String(item.file?.type || ""),
-        }));
+      const localItems = await Promise.all(
+        indexedPicked
+          .filter((item) => !item.isPdf)
+          .map(async (item) => ({
+            index: item.index,
+            kind: "local",
+            file: item.file,
+            name: String(item.file?.name || ""),
+            size: Number(item.file?.size || 0),
+            type: String(item.file?.type || ""),
+            thumbnailUrl: await buildImageThumbnailDataUrl(item.file),
+          })),
+      );
 
       if (pdfCandidates.length > 0) {
         const prepareResult = await prepareChatAttachments({
@@ -1219,13 +1423,16 @@ export default function ChatDesktopPage() {
     }
 
     if (!shouldUseVolcengineFilesApi(runtimeConfig)) {
-      return safePicked.map((file) => ({
-        kind: "local",
-        file,
-        name: String(file?.name || ""),
-        size: Number(file?.size || 0),
-        type: String(file?.type || ""),
-      }));
+      return Promise.all(
+        safePicked.map(async (file) => ({
+          kind: "local",
+          file,
+          name: String(file?.name || ""),
+          size: Number(file?.size || 0),
+          type: String(file?.type || ""),
+          thumbnailUrl: await buildImageThumbnailDataUrl(file),
+        })),
+      );
     }
 
     const indexedPicked = safePicked.map((file, index) => ({
@@ -1235,14 +1442,17 @@ export default function ChatDesktopPage() {
     }));
     const remoteCandidates = indexedPicked.filter((item) => !!item.inputType);
     const localCandidates = indexedPicked.filter((item) => !item.inputType);
-    const localItems = localCandidates.map((item) => ({
-      index: item.index,
-      kind: "local",
-      file: item.file,
-      name: String(item.file?.name || ""),
-      size: Number(item.file?.size || 0),
-      type: String(item.file?.type || ""),
-    }));
+    const localItems = await Promise.all(
+      localCandidates.map(async (item) => ({
+        index: item.index,
+        kind: "local",
+        file: item.file,
+        name: String(item.file?.name || ""),
+        size: Number(item.file?.size || 0),
+        type: String(item.file?.type || ""),
+        thumbnailUrl: await buildImageThumbnailDataUrl(item.file),
+      })),
+    );
 
     if (remoteCandidates.length === 0) {
       return localItems.sort((a, b) => a.index - b.index);
@@ -1257,20 +1467,23 @@ export default function ChatDesktopPage() {
       throw new Error("文件上传结果异常，请重试。");
     }
 
-    const remoteItems = remoteRefs.map((ref, idx) => ({
-      index: remoteCandidates[idx].index,
-      kind: "volc_ref",
-      // Keep the original File for local preview in composer.
-      file: remoteCandidates[idx].file,
-      name: String(remoteCandidates[idx].file?.name || ref?.name || ""),
-      size: Number(ref?.size || remoteCandidates[idx].file?.size || 0),
-      type: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
-      mimeType: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
-      inputType: String(ref?.inputType || remoteCandidates[idx].inputType || ""),
-      fileId: String(ref?.fileId || ""),
-      url: String(ref?.url || "").trim(),
-      ossKey: String(ref?.ossKey || "").trim(),
-    }));
+    const remoteItems = await Promise.all(
+      remoteRefs.map(async (ref, idx) => ({
+        index: remoteCandidates[idx].index,
+        kind: "volc_ref",
+        // Keep the original File for local preview in composer.
+        file: remoteCandidates[idx].file,
+        name: String(remoteCandidates[idx].file?.name || ref?.name || ""),
+        size: Number(ref?.size || remoteCandidates[idx].file?.size || 0),
+        type: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
+        mimeType: String(ref?.mimeType || remoteCandidates[idx].file?.type || ""),
+        inputType: String(ref?.inputType || remoteCandidates[idx].inputType || ""),
+        fileId: String(ref?.fileId || ""),
+        url: String(ref?.url || "").trim(),
+        ossKey: String(ref?.ossKey || "").trim(),
+        thumbnailUrl: await buildImageThumbnailDataUrl(remoteCandidates[idx].file),
+      })),
+    );
 
     return [...localItems, ...remoteItems]
       .sort((a, b) => a.index - b.index)
@@ -1307,6 +1520,7 @@ export default function ChatDesktopPage() {
           name: String(item?.name || "文件"),
           size: Number(item?.size || 0),
           type: String(item?.mimeType || item?.type || ""),
+          thumbnailUrl: String(item?.thumbnailUrl || "").trim(),
         };
       }
       if (item?.kind === "volc_ref") {
@@ -1334,6 +1548,7 @@ export default function ChatDesktopPage() {
           inputType,
           url: String(item?.url || "").trim(),
           ossKey: String(item?.ossKey || "").trim(),
+          thumbnailUrl: String(item?.thumbnailUrl || "").trim(),
         };
       }
 
@@ -1344,6 +1559,7 @@ export default function ChatDesktopPage() {
           name: rawFile.name,
           size: rawFile.size,
           type: rawFile.type,
+          thumbnailUrl: String(item?.thumbnailUrl || "").trim(),
         };
       }
 
@@ -1376,8 +1592,20 @@ export default function ChatDesktopPage() {
     };
 
     const currentSessionId = activeId;
+    const priorMessages = sessionMessages[currentSessionId] || [];
+    const shouldAutoRenameSession =
+      isUntitledSessionTitle(
+        sessionsRef.current.find((item) => item?.id === currentSessionId)?.title || "",
+      ) &&
+      !priorMessages.some((item) => {
+        if (item?.role !== "user") return false;
+        const hasText = String(item?.content || "").trim().length > 0;
+        const hasAttachments =
+          Array.isArray(item?.attachments) && item.attachments.some(Boolean);
+        return hasText || hasAttachments;
+      });
     const currentHistory = [
-      ...(sessionMessages[currentSessionId] || []),
+      ...priorMessages,
       userMsg,
     ];
 
@@ -1524,6 +1752,9 @@ export default function ChatDesktopPage() {
           };
         });
         queueMessageUpsert(currentSessionId, completedMsg);
+        if (shouldAutoRenameSession && String(completedMsg.content || "").trim()) {
+          void autoRenameSessionFromFirstExchange(currentSessionId, userMsg, completedMsg);
+        }
       }
       streamTargetRef.current = { sessionId: "", assistantId: "", mode: "draft" };
       setIsStreaming(false);

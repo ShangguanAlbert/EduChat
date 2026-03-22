@@ -80,7 +80,7 @@ const QUICK_REACTION_EMOJIS = Object.freeze(["👍", "👏", "🎉", "😄", "�
 const COMPOSER_TOOL_EMOJIS = Object.freeze(buildComposerEmojiCatalog());
 
 const DEFAULT_LIMITS = Object.freeze({
-  maxCreatedRoomsPerUser: 2,
+  maxCreatedRoomsPerUser: null,
   maxJoinedRoomsPerUser: 8,
   maxMembersPerRoom: 10,
 });
@@ -96,6 +96,52 @@ const PARTY_MESSAGE_MARKDOWN_COMPONENTS = {
     return <a {...props} target="_blank" rel="noopener noreferrer" />;
   },
 };
+
+function normalizeRenderedMarkdown(value) {
+  const text = String(value || "");
+  if (!text) return "";
+
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const current = String(lines[index] || "").trim();
+    const next = String(lines[index + 1] || "").trim();
+    if (!current || !/^(?:=|-){3,}$/.test(next)) continue;
+    if (
+      current.startsWith("#") ||
+      current.startsWith(">") ||
+      current.startsWith("```") ||
+      current.startsWith("~~~") ||
+      current.startsWith("- ") ||
+      current.startsWith("* ") ||
+      current.startsWith("+ ") ||
+      /^\d+\.\s/.test(current)
+    ) {
+      continue;
+    }
+
+    const looksLikeSentence =
+      current.length >= 16 || /[,.!?;:，。！？；：）)]$/.test(current);
+    if (!looksLikeSentence) continue;
+
+    lines.splice(index + 1, 0, "");
+    index += 1;
+  }
+
+  return lines.join("\n");
+}
+
+function normalizeRoomLimit(value, fallback = null) {
+  if (value == null || value === "") return fallback;
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return fallback;
+  return num;
+}
+
+function formatRoomLimit(value) {
+  const normalized = normalizeRoomLimit(value, null);
+  if (normalized == null) return "无限";
+  return String(normalized);
+}
 
 export default function PartyChatDesktopPage({
   isMobileSidebarDrawer = false,
@@ -1336,8 +1382,10 @@ export default function PartyChatDesktopPage({
         role: String(result?.me?.role || "user").toLowerCase() === "admin" ? "admin" : "user",
       });
       setLimits({
-        maxCreatedRoomsPerUser:
-          Number(result?.limits?.maxCreatedRoomsPerUser) || DEFAULT_LIMITS.maxCreatedRoomsPerUser,
+        maxCreatedRoomsPerUser: normalizeRoomLimit(
+          result?.limits?.maxCreatedRoomsPerUser,
+          DEFAULT_LIMITS.maxCreatedRoomsPerUser,
+        ),
         maxJoinedRoomsPerUser:
           Number(result?.limits?.maxJoinedRoomsPerUser) || DEFAULT_LIMITS.maxJoinedRoomsPerUser,
         maxMembersPerRoom:
@@ -3017,7 +3065,7 @@ export default function PartyChatDesktopPage({
             <div className="party-side-head-actions">
               <div className="party-room-list-chip-group">
                 <span className="party-limit-chip">
-                  已建 {counts.createdRooms}/{limits.maxCreatedRoomsPerUser}
+                  已建 {counts.createdRooms}/{formatRoomLimit(limits.maxCreatedRoomsPerUser)}
                 </span>
                 <span className="party-limit-chip">
                   已加 {counts.joinedRooms}/{limits.maxJoinedRoomsPerUser}
@@ -4704,10 +4752,11 @@ function isPartyAgentForwardMessage(message) {
 function renderPartyMessageText(content) {
   const markdownText = decodePartyForwardMarkdown(content);
   if (markdownText !== null) {
+    const normalizedMarkdown = normalizeRenderedMarkdown(markdownText);
     return (
       <div className="party-message-text md-body is-markdown">
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={PARTY_MESSAGE_MARKDOWN_COMPONENTS}>
-          {markdownText}
+          {normalizedMarkdown}
         </ReactMarkdown>
       </div>
     );

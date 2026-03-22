@@ -241,6 +241,10 @@ const AGENT_D_FIXED_PROVIDER = "aliyun";
 const AGENT_D_FIXED_MODEL = "qwen3.5-plus";
 const AGENT_D_FIXED_MAX_OUTPUT_TOKENS = 65536;
 const AGENT_C_FIXED_PROVIDER = "volcengine";
+const AGENT_C_FIXED_MODEL = "doubao-seed-2-0-pro-260215";
+const AGENT_C_FIXED_PROTOCOL = "responses";
+const AGENT_C_FIXED_MAX_OUTPUT_TOKENS = 131072;
+const AGENT_C_FIXED_THINKING_EFFORT = "medium";
 const GROUP_CHAT_VOLCENGINE_SUPPORTED_IMAGE_EXTENSIONS = new Set([
   "jpg",
   "jpeg",
@@ -319,6 +323,20 @@ const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   openrouterUseResponseHealing: false,
   openrouterPdfEngine: "auto",
 });
+const AGENT_C_ALWAYS_ON_WEB_SEARCH_MODEL_ALIASES = new Set([
+  "doubao-seed-2-0-pro-260215",
+  "doubao-seed-2-0-pro",
+  "doubao-seed-2.0-pro-260215",
+  "doubao-seed-2.0-pro",
+  "doubao-seed-2-0-lite-260215",
+  "doubao-seed-2-0-lite",
+  "doubao-seed-2.0-lite-260215",
+  "doubao-seed-2.0-lite",
+  "doubao-seed-2-0-mini-260215",
+  "doubao-seed-2-0-mini",
+  "doubao-seed-2.0-mini-260215",
+  "doubao-seed-2.0-mini",
+]);
 const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
   A: Object.freeze({
     contextWindowTokens: 256000,
@@ -333,10 +351,14 @@ const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
     maxReasoningTokens: 128000,
   }),
   C: Object.freeze({
-    contextWindowTokens: 128000,
-    maxInputTokens: 96000,
-    maxOutputTokens: 32000,
-    maxReasoningTokens: 32000,
+    provider: AGENT_C_FIXED_PROVIDER,
+    model: AGENT_C_FIXED_MODEL,
+    protocol: AGENT_C_FIXED_PROTOCOL,
+    contextWindowTokens: 256000,
+    maxInputTokens: 256000,
+    maxOutputTokens: AGENT_C_FIXED_MAX_OUTPUT_TOKENS,
+    maxReasoningTokens: 131072,
+    thinkingEffort: AGENT_C_FIXED_THINKING_EFFORT,
   }),
   D: Object.freeze({
     provider: AGENT_D_FIXED_PROVIDER,
@@ -5587,6 +5609,12 @@ function getNormalizedModelCandidates(model) {
   return Array.from(set);
 }
 
+function isAgentCAlwaysOnWebSearchModel(model = "") {
+  return getNormalizedModelCandidates(model).some((candidate) =>
+    AGENT_C_ALWAYS_ON_WEB_SEARCH_MODEL_ALIASES.has(candidate),
+  );
+}
+
 function readModelAllowlistFromEnv(envName) {
   return String(process.env[envName] || "")
     .split(",")
@@ -6785,6 +6813,10 @@ async function pipeResponsesSse(
           writeEvent(res, "reasoning_token", { text: completedReasoning });
         }
       }
+      const citationsAppendix = formatResponsesCitationAppendix(json?.response);
+      if (citationsAppendix) {
+        writeEvent(res, "token", { text: citationsAppendix });
+      }
       if (emitSearchUsage) {
         writeEvent(res, "search_usage", extractResponsesWebSearchUsage(json?.response));
       }
@@ -6855,6 +6887,88 @@ function extractResponsesReasoningTextFromCompleted(responseObj) {
   });
 
   return chunks.join("");
+}
+
+function extractResponsesUrlCitations(responseObj) {
+  const output = Array.isArray(responseObj?.output) ? responseObj.output : [];
+  const citations = [];
+  const seenUrls = new Set();
+
+  const pushCitation = (raw) => {
+    if (!raw || typeof raw !== "object") return;
+    const url = sanitizeText(raw.url || raw.uri, "", 2000);
+    if (!url || seenUrls.has(url)) return;
+    seenUrls.add(url);
+    citations.push({
+      url,
+      title: sanitizeText(raw.title || raw.text || raw.label, "", 200) || simplifyCitationUrl(url),
+    });
+  };
+
+  const scanAnnotations = (value) => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      value.forEach(scanAnnotations);
+      return;
+    }
+    if (typeof value !== "object") return;
+
+    const directAnnotations = Array.isArray(value.annotations) ? value.annotations : [];
+    directAnnotations.forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      if (item.type === "url_citation" || item.url || item.uri) {
+        pushCitation(item);
+      }
+    });
+
+    if (value.text && typeof value.text === "object") {
+      scanAnnotations(value.text);
+    }
+    if (value.content && typeof value.content === "object") {
+      scanAnnotations(value.content);
+    }
+  };
+
+  output.forEach((item) => {
+    if (!item || item.type !== "message") return;
+    scanAnnotations(item.content);
+  });
+
+  return citations;
+}
+
+function formatResponsesCitationAppendix(responseObj) {
+  const citations = extractResponsesUrlCitations(responseObj);
+  if (citations.length === 0) return "";
+
+  const lines = citations
+    .slice(0, 8)
+    .map(
+      (item, index) =>
+        `${index + 1}. [${escapeMarkdownLabel(item.title)}](${item.url})`,
+    );
+  if (lines.length === 0) return "";
+  return `\n\n参考链接：\n${lines.join("\n")}`;
+}
+
+function escapeMarkdownLabel(value) {
+  return String(value || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]")
+    .replace(/\r?\n/g, " ")
+    .trim();
+}
+
+function simplifyCitationUrl(url) {
+  const text = String(url || "").trim();
+  if (!text) return "来源链接";
+  try {
+    const parsed = new URL(text);
+    return parsed.hostname.replace(/^www\./i, "");
+  } catch {
+    return text.length > 48 ? `${text.slice(0, 45)}...` : text;
+  }
 }
 
 function extractResponsesTokenUsage(responseObj) {
@@ -7136,6 +7250,10 @@ async function safeReadJson(response) {
 }
 
 function getModelByAgent(agentId, runtimeConfig = null) {
+  const targetAgent = sanitizeAgent(agentId);
+  if (targetAgent === "C") {
+    return AGENT_C_FIXED_MODEL;
+  }
   const runtimeModel = sanitizeRuntimeModel(runtimeConfig?.model);
   if (runtimeModel) return runtimeModel;
 
@@ -7146,7 +7264,6 @@ function getModelByAgent(agentId, runtimeConfig = null) {
     D: AGENT_D_FIXED_MODEL,
   };
 
-  const targetAgent = sanitizeAgent(agentId);
   const map = {
     A: process.env.AGENT_MODEL_A || defaults.A,
     B: process.env.AGENT_MODEL_B || defaults.B,
@@ -7986,6 +8103,21 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
 
   if (normalizedAgentId === "C") {
     next.provider = AGENT_C_FIXED_PROVIDER;
+    next.model = AGENT_C_FIXED_MODEL;
+    next.protocol = AGENT_C_FIXED_PROTOCOL;
+    next.temperature = VOLCENGINE_FIXED_TEMPERATURE;
+    next.topP = VOLCENGINE_FIXED_TOP_P;
+    next.maxOutputTokens = AGENT_C_FIXED_MAX_OUTPUT_TOKENS;
+    next.thinkingEffort = AGENT_C_FIXED_THINKING_EFFORT;
+    const fixedProfile = resolveRuntimeTokenProfileByModel(AGENT_C_FIXED_MODEL);
+    if (fixedProfile) {
+      next.contextWindowTokens = fixedProfile.contextWindowTokens;
+      next.maxInputTokens = fixedProfile.maxInputTokens;
+      next.maxReasoningTokens = fixedProfile.maxReasoningTokens;
+    }
+    if (isAgentCAlwaysOnWebSearchModel(AGENT_C_FIXED_MODEL)) {
+      next.enableWebSearch = true;
+    }
   }
 
   return next;
@@ -9229,6 +9361,9 @@ function sanitizeMessage(msg, idx) {
             ? inputType
             : "";
         const attachmentUrl = sanitizeGroupChatHttpUrl(a?.url || a?.fileUrl);
+        const thumbnailUrl = normalizeGeneratedImageStoreUrl(
+          a?.thumbnailUrl || a?.thumbUrl || a?.previewUrl,
+        );
         const ossKey = sanitizeGroupChatOssObjectKey(a?.ossKey);
 
         return {
@@ -9238,6 +9373,7 @@ function sanitizeMessage(msg, idx) {
           ...(fileId ? { fileId } : {}),
           ...(fileId && safeInputType ? { inputType: safeInputType } : {}),
           ...(attachmentUrl ? { url: attachmentUrl } : {}),
+          ...(thumbnailUrl ? { thumbnailUrl } : {}),
           ...(ossKey ? { ossKey } : {}),
         };
       })
