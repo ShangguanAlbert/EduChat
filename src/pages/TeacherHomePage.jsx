@@ -97,7 +97,7 @@ const COURSE_TARGET_CLASS_VALUES = Object.freeze(
 );
 const COURSE_DEFAULT_CLASS_NAME = COURSE_TARGET_CLASS_OPTIONS[0].value;
 const CLASSROOM_MANAGE_PANEL_KEYS = Object.freeze(
-  new Set(["classroom", "homework", "seat-fixed", "random-rollcall", "export-center"]),
+  new Set(["classroom", "homework", "seat-fixed", "random-rollcall"]),
 );
 const CLASSROOM_MANAGE_HIDDEN_ADMIN_USERNAME_KEYS = Object.freeze(
   new Set(["杨占山", "钟怡萱", "杨俊锋", "施高俊"].map((name) => name.replace(/\s+/g, "").toLowerCase())),
@@ -415,6 +415,19 @@ function fromDateTimeLocalValue(value) {
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return "";
   return date.toISOString();
+}
+
+function readTodayDateInputValue() {
+  const date = new Date();
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isValidDateInputValue(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
 }
 
 function buildLessonTimeLabel(startAt, endAt, fallback = "") {
@@ -757,6 +770,7 @@ export default function TeacherHomePage() {
   const [onlineHeartbeatStaleSeconds, setOnlineHeartbeatStaleSeconds] = useState(70);
   const [onlineClassFilter, setOnlineClassFilter] = useState("all");
   const [exportCenterScopeKey, setExportCenterScopeKey] = useState(DEFAULT_TEACHER_SCOPE_KEY);
+  const [exportCenterDate, setExportCenterDate] = useState(() => readTodayDateInputValue());
   const [exportCenterLoading, setExportCenterLoading] = useState("");
   const [exportCenterError, setExportCenterError] = useState("");
   const [exportCenterNotice, setExportCenterNotice] = useState("");
@@ -774,6 +788,7 @@ export default function TeacherHomePage() {
   const [randomRollcallGeneratedAt, setRandomRollcallGeneratedAt] = useState("");
   const seatLayoutsSyncTimerRef = useRef(null);
   const seatLayoutsLastSavedSnapshotRef = useRef("");
+  const exportCenterNoticeTimerRef = useRef(null);
 
   const handleAuthError = useCallback(
     (rawError) => {
@@ -1003,6 +1018,24 @@ export default function TeacherHomePage() {
     setExportCenterError("");
     setExportCenterNotice("");
   }, [exportCenterScopeKey]);
+
+  useEffect(() => {
+    if (exportCenterNoticeTimerRef.current) {
+      window.clearTimeout(exportCenterNoticeTimerRef.current);
+      exportCenterNoticeTimerRef.current = null;
+    }
+    if (!exportCenterNotice) return undefined;
+    exportCenterNoticeTimerRef.current = window.setTimeout(() => {
+      setExportCenterNotice("");
+      exportCenterNoticeTimerRef.current = null;
+    }, 2000);
+    return () => {
+      if (exportCenterNoticeTimerRef.current) {
+        window.clearTimeout(exportCenterNoticeTimerRef.current);
+        exportCenterNoticeTimerRef.current = null;
+      }
+    };
+  }, [exportCenterNotice]);
 
   useEffect(() => {
     if (activePanel === "export-center") return;
@@ -1251,9 +1284,8 @@ export default function TeacherHomePage() {
           items: [
             { key: "classroom", label: "课时管理", icon: ClipboardList },
             { key: "homework", label: "作业管理", icon: FileText },
-            { key: "seat-fixed", label: "座位固定", icon: LayoutGrid },
+            { key: "seat-fixed", label: "座位管理", icon: LayoutGrid },
             { key: "random-rollcall", label: "随机点名", icon: Dices },
-            { key: "export-center", label: "导出中心", icon: Download },
           ],
         },
         {
@@ -1261,6 +1293,7 @@ export default function TeacherHomePage() {
           label: "用户管理",
           items: [
             { key: "user-manage", label: "用户信息", icon: Users },
+            { key: "export-center", label: "导出中心", icon: Download },
             { key: "image-library", label: "图片管理", icon: Image },
             { key: "party-manage", label: "群聊管理", icon: MessageCircleMore },
             { key: "online", label: "在线状态", icon: Eye },
@@ -1553,11 +1586,47 @@ export default function TeacherHomePage() {
     });
   }
 
+  async function onExportCenterChatsZipByDate() {
+    const safeExportDate = String(exportCenterDate || "").trim();
+    if (!isValidDateInputValue(safeExportDate)) {
+      setExportCenterError("请选择有效的导出日期。");
+      return;
+    }
+    await runExportCenterTask("chats-zip-date", async () => {
+      const data = await exportAdminChatsZip(adminToken, exportCenterScopeKey, {
+        exportDate: safeExportDate,
+      });
+      triggerBrowserDownload(
+        data?.blob,
+        data?.filename || `educhat-chats-by-user-${safeExportDate}.zip`,
+      );
+      setExportCenterNotice(`聊天数据（${safeExportDate}）导出完成。`);
+    });
+  }
+
   async function onExportCenterGroupChatsTxt() {
     await runExportCenterTask("group-chats", async () => {
       const data = await exportAdminGroupChatsTxt(adminToken, exportCenterScopeKey);
       triggerTextDownload(data?.filename || "educhat-group-chats.txt", data?.content || "");
       setExportCenterNotice("群聊聊天记录导出完成。");
+    });
+  }
+
+  async function onExportCenterGroupChatsTxtByDate() {
+    const safeExportDate = String(exportCenterDate || "").trim();
+    if (!isValidDateInputValue(safeExportDate)) {
+      setExportCenterError("请选择有效的导出日期。");
+      return;
+    }
+    await runExportCenterTask("group-chats-date", async () => {
+      const data = await exportAdminGroupChatsTxt(adminToken, exportCenterScopeKey, {
+        exportDate: safeExportDate,
+      });
+      triggerTextDownload(
+        data?.filename || `educhat-group-chats-${safeExportDate}.txt`,
+        data?.content || "",
+      );
+      setExportCenterNotice(`群聊聊天记录（${safeExportDate}）导出完成。`);
     });
   }
 
@@ -4579,7 +4648,7 @@ export default function TeacherHomePage() {
             <div className="teacher-panel-stack">
               <header className="teacher-panel-head">
                 <div>
-                  <h2>座位固定</h2>
+                  <h2>座位管理</h2>
                   <p className="teacher-panel-save-time">
                     {`当前班级：${seatManageClassName || "--"} · 最近编辑：${formatDisplayTime(
                       currentSeatLayout.updatedAt,
@@ -4652,6 +4721,16 @@ export default function TeacherHomePage() {
                     <span>已填写座位</span>
                   </div>
                   <div className="teacher-seat-fixed-permission-tools">
+                    <button
+                      type="button"
+                      className={`teacher-ghost-btn teacher-seat-fixed-lock-btn${
+                        currentSeatTeacherLocked ? " is-locked" : ""
+                      }`}
+                      onClick={onToggleSeatTeacherLock}
+                    >
+                      {currentSeatTeacherLocked ? <Lock size={14} /> : <LockOpen size={14} />}
+                      <span>{currentSeatTeacherLocked ? "已锁定" : "锁定"}</span>
+                    </button>
                     <label className="teacher-ios-switch teacher-seat-fixed-student-switch">
                       <input
                         type="checkbox"
@@ -4664,16 +4743,6 @@ export default function TeacherHomePage() {
                       </span>
                       <span className="teacher-ios-switch-text">开放学生填写</span>
                     </label>
-                    <button
-                      type="button"
-                      className={`teacher-ghost-btn teacher-seat-fixed-lock-btn${
-                        currentSeatTeacherLocked ? " is-locked" : ""
-                      }`}
-                      onClick={onToggleSeatTeacherLock}
-                    >
-                      {currentSeatTeacherLocked ? <Lock size={14} /> : <LockOpen size={14} />}
-                      <span>{currentSeatTeacherLocked ? "教师已锁定" : "教师锁定"}</span>
-                    </button>
                   </div>
                 </div>
 
@@ -4873,76 +4942,131 @@ export default function TeacherHomePage() {
               </header>
 
               <section className="teacher-card teacher-export-center-card">
-                <div className="teacher-export-center-filter">
-                  <span>授课教师范围</span>
-                  <PortalSelect
-                    className="teacher-export-center-scope-select"
-                    value={exportCenterScopeKey}
-                    ariaLabel="导出授课教师"
-                    options={exportCenterScopeOptions}
-                    onChange={setExportCenterScopeKey}
-                    disabled={!!exportCenterLoading}
-                    compact
-                  />
-                </div>
-
-                <div className="teacher-export-center-group">
-                  <h3>基础导出</h3>
-                  <div className="teacher-export-center-actions">
-                    <button
-                      type="button"
-                      className="teacher-ghost-btn"
-                      onClick={() => void onExportCenterUsersTxt()}
-                      disabled={!!exportCenterLoading}
-                    >
-                      {exportCenterLoading === "users" ? "导出中..." : "导出账号密码数据（TXT）"}
-                    </button>
-                    <button
-                      type="button"
-                      className="teacher-ghost-btn"
-                      onClick={() => void onExportCenterChatsTxt()}
-                      disabled={!!exportCenterLoading}
-                    >
-                      {exportCenterLoading === "chats-txt" ? "导出中..." : "导出聊天数据（TXT）"}
-                    </button>
-                    <button
-                      type="button"
-                      className="teacher-ghost-btn"
-                      onClick={() => void onExportCenterChatsZip()}
-                      disabled={!!exportCenterLoading}
-                    >
-                      {exportCenterLoading === "chats-zip" ? "打包中..." : "导出聊天数据（ZIP 按用户）"}
-                    </button>
+                <div className="teacher-export-center-filter-card">
+                  <div className="teacher-export-center-filter-head">
+                    <h3>统一筛选</h3>
+                    <p>先选择授课教师和日期，再按下方分类执行导出。日期仅作用于“按日期导出”的按钮。</p>
+                  </div>
+                  <div className="teacher-export-center-filter-fields">
+                    <label className="teacher-export-center-field">
+                      <span>授课教师范围</span>
+                      <PortalSelect
+                        className="teacher-export-center-scope-select"
+                        value={exportCenterScopeKey}
+                        ariaLabel="导出授课教师"
+                        options={exportCenterScopeOptions}
+                        onChange={(value) => {
+                          setExportCenterScopeKey(value);
+                          setExportCenterError("");
+                        }}
+                        disabled={!!exportCenterLoading}
+                        compact
+                      />
+                    </label>
+                    <label className="teacher-export-center-field">
+                      <span>导出日期</span>
+                      <input
+                        type="date"
+                        className="teacher-export-center-date-input"
+                        value={exportCenterDate}
+                        onChange={(event) => {
+                          setExportCenterDate(event.target.value);
+                          setExportCenterError("");
+                        }}
+                        disabled={!!exportCenterLoading}
+                      />
+                    </label>
                   </div>
                 </div>
 
-                <div className="teacher-export-center-group">
-                  <h3>扩展记录</h3>
-                  <div className="teacher-export-center-actions">
-                    <button
-                      type="button"
-                      className="teacher-ghost-btn"
-                      onClick={() => void onExportCenterGroupChatsTxt()}
-                      disabled={!!exportCenterLoading}
-                    >
-                      {exportCenterLoading === "group-chats" ? "导出中..." : "导出群聊聊天记录（TXT）"}
-                    </button>
-                    <button
-                      type="button"
-                      className="teacher-ghost-btn"
-                      onClick={() => void onExportCenterGeneratedImagesTxt()}
-                      disabled={!!exportCenterLoading}
-                    >
-                      {exportCenterLoading === "images" ? "导出中..." : "导出学生生成图片记录（TXT）"}
-                    </button>
-                    <button
-                      type="button"
-                      className="teacher-primary-btn"
-                      onClick={() => void onExportCenterAllRecordsZip()}
-                      disabled={!!exportCenterLoading}
-                    >
-                      {exportCenterLoading === "all-records" ? "打包中..." : "导出全部记录（ZIP）"}
-                    </button>
+                <div className="teacher-export-center-grid">
+                  <div className="teacher-export-center-group">
+                    <h3>聊天记录</h3>
+                    <p>{`面向“${exportCenterScopeLabel}”授课教师范围导出聊天内容，支持全量和按日期导出。`}</p>
+                    <div className="teacher-export-center-actions">
+                      <button
+                        type="button"
+                        className="teacher-ghost-btn"
+                        onClick={() => void onExportCenterChatsTxt()}
+                        disabled={!!exportCenterLoading}
+                      >
+                        {exportCenterLoading === "chats-txt" ? "导出中..." : "导出聊天数据（TXT）"}
+                      </button>
+                      <button
+                        type="button"
+                        className="teacher-ghost-btn"
+                        onClick={() => void onExportCenterChatsZip()}
+                        disabled={!!exportCenterLoading}
+                      >
+                        {exportCenterLoading === "chats-zip" ? "打包中..." : "导出聊天数据（ZIP 按用户）"}
+                      </button>
+                      <button
+                        type="button"
+                        className="teacher-primary-btn"
+                        onClick={() => void onExportCenterChatsZipByDate()}
+                        disabled={!!exportCenterLoading || !isValidDateInputValue(exportCenterDate)}
+                      >
+                        {exportCenterLoading === "chats-zip-date"
+                          ? "打包中..."
+                          : "导出指定日期聊天记录（ZIP）"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="teacher-export-center-group">
+                    <h3>群聊与图片</h3>
+                    <p>群聊支持按范围或按日期导出，图片记录单独导出为 TXT。</p>
+                    <div className="teacher-export-center-actions">
+                      <button
+                        type="button"
+                        className="teacher-ghost-btn"
+                        onClick={() => void onExportCenterGroupChatsTxt()}
+                        disabled={!!exportCenterLoading}
+                      >
+                        {exportCenterLoading === "group-chats" ? "导出中..." : "导出群聊聊天记录（TXT）"}
+                      </button>
+                      <button
+                        type="button"
+                        className="teacher-ghost-btn"
+                        onClick={() => void onExportCenterGroupChatsTxtByDate()}
+                        disabled={!!exportCenterLoading || !isValidDateInputValue(exportCenterDate)}
+                      >
+                        {exportCenterLoading === "group-chats-date"
+                          ? "导出中..."
+                          : "导出指定日期群聊记录（TXT）"}
+                      </button>
+                      <button
+                        type="button"
+                        className="teacher-ghost-btn"
+                        onClick={() => void onExportCenterGeneratedImagesTxt()}
+                        disabled={!!exportCenterLoading}
+                      >
+                        {exportCenterLoading === "images" ? "导出中..." : "导出学生生成图片记录（TXT）"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="teacher-export-center-group">
+                    <h3>账号与归档</h3>
+                    <p>导出账号密码清单，或一次性导出当前范围内的全部归档记录。</p>
+                    <div className="teacher-export-center-actions">
+                      <button
+                        type="button"
+                        className="teacher-ghost-btn"
+                        onClick={() => void onExportCenterUsersTxt()}
+                        disabled={!!exportCenterLoading}
+                      >
+                        {exportCenterLoading === "users" ? "导出中..." : "导出账号密码数据（TXT）"}
+                      </button>
+                      <button
+                        type="button"
+                        className="teacher-primary-btn"
+                        onClick={() => void onExportCenterAllRecordsZip()}
+                        disabled={!!exportCenterLoading}
+                      >
+                        {exportCenterLoading === "all-records" ? "打包中..." : "导出全部记录（ZIP）"}
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -4967,9 +5091,6 @@ export default function TeacherHomePage() {
                   <p className="teacher-export-center-error" role="alert">
                     {exportCenterError}
                   </p>
-                ) : null}
-                {exportCenterNotice ? (
-                  <p className="teacher-export-center-notice">{exportCenterNotice}</p>
                 ) : null}
               </section>
             </div>
@@ -6672,11 +6793,18 @@ export default function TeacherHomePage() {
             </div>
           ) : null}
         </main>
-        {error ? (
+        {error || exportCenterNotice ? (
           <div className="teacher-home-toast-wrap" aria-live="polite">
-            <p className="teacher-home-alert error teacher-home-toast" role="alert">
-              {error}
-            </p>
+            {error ? (
+              <p className="teacher-home-alert error teacher-home-toast" role="alert">
+                {error}
+              </p>
+            ) : null}
+            {exportCenterNotice ? (
+              <p className="teacher-home-alert success teacher-home-toast teacher-home-toast-fade" role="status">
+                {exportCenterNotice}
+              </p>
+            ) : null}
           </div>
         ) : null}
       </div>

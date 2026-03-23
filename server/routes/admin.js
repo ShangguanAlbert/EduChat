@@ -685,6 +685,14 @@ export function registerAdminRoutes(app, deps) {
         .replace(/\s+/g, ""),
     ),
   );
+  const EXPORT_DATE_INPUT_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const EXPORT_CHAT_TIME_ZONE = "Asia/Shanghai";
+  const exportDateFormatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: EXPORT_CHAT_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
   const userDirectoryClassCategorySchema = new mongoose.Schema(
     {
       key: { type: String, default: ADMIN_CONFIG_KEY, unique: true, index: true },
@@ -2468,7 +2476,138 @@ export function registerAdminRoutes(app, deps) {
     );
   }
 
-  async function readAdminGroupChatsExportData(teacherScopeKey) {
+  function sanitizeExportDate(value) {
+    const safeValue = String(value || "").trim();
+    return EXPORT_DATE_INPUT_RE.test(safeValue) ? safeValue : "";
+  }
+
+  function readExportDateKey(value) {
+    const date = value ? new Date(value) : null;
+    if (!date || Number.isNaN(date.getTime())) return "";
+    const parts = exportDateFormatter.formatToParts(date);
+    const year = parts.find((item) => item.type === "year")?.value || "";
+    const month = parts.find((item) => item.type === "month")?.value || "";
+    const day = parts.find((item) => item.type === "day")?.value || "";
+    if (!year || !month || !day) return "";
+    return `${year}-${month}-${day}`;
+  }
+
+  function formatExportDateLabel(exportDate) {
+    const safeExportDate = sanitizeExportDate(exportDate);
+    if (!safeExportDate) return "未知日期";
+    const [year, month, day] = safeExportDate.split("-");
+    return `${year}年${month}月${day}日`;
+  }
+
+  function doesMessageMatchExportDate(message, exportDate) {
+    const safeExportDate = sanitizeExportDate(exportDate);
+    if (!safeExportDate) return true;
+    return [message?.askedAt, message?.startedAt, message?.firstTextAt].some(
+      (value) => readExportDateKey(value) === safeExportDate,
+    );
+  }
+
+  function filterChatStateByExportDate(state, exportDate) {
+    const safeExportDate = sanitizeExportDate(exportDate);
+    if (!state || !safeExportDate) return null;
+
+    const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
+    const sessionMessages =
+      state?.sessionMessages && typeof state.sessionMessages === "object"
+        ? state.sessionMessages
+        : {};
+    const filteredSessions = [];
+    const filteredSessionMessages = {};
+
+    sessions.forEach((session) => {
+      const sessionId = sanitizeId(session?.id, "");
+      if (!sessionId) return;
+      const messages = Array.isArray(sessionMessages[sessionId]) ? sessionMessages[sessionId] : [];
+      const matchedMessages = messages.filter((message) =>
+        doesMessageMatchExportDate(message, safeExportDate),
+      );
+      if (matchedMessages.length === 0) return;
+      filteredSessions.push(session);
+      filteredSessionMessages[sessionId] = matchedMessages;
+    });
+
+    if (filteredSessions.length === 0) return null;
+
+    const visibleGroupIds = new Set(
+      filteredSessions
+        .map((session) => sanitizeId(session?.groupId, ""))
+        .filter(Boolean),
+    );
+    const groups = Array.isArray(state?.groups)
+      ? state.groups.filter((group) => visibleGroupIds.has(sanitizeId(group?.id, "")))
+      : [];
+    const activeId = filteredSessions.some((session) => session?.id === state?.activeId)
+      ? state.activeId
+      : filteredSessions[0]?.id || "";
+
+    return {
+      activeId,
+      groups,
+      sessions: filteredSessions,
+      sessionMessages: filteredSessionMessages,
+      settings: state?.settings && typeof state.settings === "object" ? state.settings : {},
+    };
+  }
+
+  function buildDateScopedUserExportReadme(payload = {}) {
+    const exportedAt = payload?.exportedAt || new Date();
+    const teacherScopeKey = sanitizeTeacherScopeKey(payload?.teacherScopeKey);
+    const exportDate = sanitizeExportDate(payload?.exportDate);
+    const exportedCount = Number(payload?.exportedCount || 0);
+    const omittedUsers = Array.isArray(payload?.omittedUsers) ? payload.omittedUsers : [];
+    const lines = [
+      "EduChat 管理员导出：按日期筛选聊天数据 ZIP",
+      `导出时间: ${formatDisplayTime(exportedAt)}`,
+      `授课教师: ${getTeacherScopeLabel(teacherScopeKey)}`,
+      `聊天日期: ${formatExportDateLabel(exportDate)}`,
+      `已导出用户数: ${exportedCount}`,
+      `未导出用户数: ${omittedUsers.length}`,
+      "",
+      "说明:",
+      "1. 仅保留所选日期内的聊天消息，并按用户分别导出为 TXT 文件。",
+      "2. 当天没有聊天记录的用户不会生成 TXT 文件。",
+      "3. 未导出的用户列表见下方“未导出用户”。",
+      "",
+    ];
+
+    if (omittedUsers.length === 0) {
+      lines.push("未导出用户: （无）");
+      lines.push("");
+      return lines.join("\n");
+    }
+
+    lines.push("未导出用户:");
+    omittedUsers.forEach((user, index) => {
+      const profile = sanitizeUserProfile(user?.profile);
+      const username = sanitizeText(user?.username, "", 64);
+      const name = sanitizeText(profile?.name, "", 64);
+      const className = sanitizeText(profile?.className, "", 40);
+      const studentId = sanitizeText(profile?.studentId, "", 20);
+      const title = name || username || sanitizeId(user?._id, `user-${index + 1}`);
+      const details = [
+        username && username !== title ? `@${username}` : "",
+        className,
+        studentId,
+      ].filter(Boolean);
+      lines.push(`  ${index + 1}. ${title}${details.length > 0 ? ` · ${details.join(" · ")}` : ""}`);
+    });
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  function filterGroupChatMessagesByExportDate(messages, exportDate) {
+    const safeExportDate = sanitizeExportDate(exportDate);
+    const sourceMessages = Array.isArray(messages) ? messages : [];
+    if (!safeExportDate) return sourceMessages;
+    return sourceMessages.filter((message) => readExportDateKey(message?.createdAt) === safeExportDate);
+  }
+
+  async function readAdminGroupChatsExportData(teacherScopeKey, exportDate = "") {
     const userContext = await readTeacherScopeExportUserContext(teacherScopeKey);
     const roomFilter = userContext.scopedUserIds.length
       ? isDefaultTeacherScopeKey(userContext.safeTeacherScopeKey)
@@ -2487,28 +2626,41 @@ export function registerAdminRoutes(app, deps) {
           .sort({ roomId: 1, createdAt: 1, _id: 1 })
           .lean()
       : [];
-    const messagesByRoomId = new Map();
+    const rawMessagesByRoomId = new Map();
     messageDocs.forEach((message) => {
       const roomId = sanitizeId(message?.roomId, "");
       if (!roomId) return;
-      if (!messagesByRoomId.has(roomId)) {
-        messagesByRoomId.set(roomId, []);
+      if (!rawMessagesByRoomId.has(roomId)) {
+        rawMessagesByRoomId.set(roomId, []);
       }
-      messagesByRoomId.get(roomId).push(message);
+      rawMessagesByRoomId.get(roomId).push(message);
+    });
+    const safeExportDate = sanitizeExportDate(exportDate);
+    const messagesByRoomId = new Map();
+    const roomsForExport = [];
+    rooms.forEach((room) => {
+      const roomId = sanitizeId(room?._id, "");
+      if (!roomId) return;
+      const messages = filterGroupChatMessagesByExportDate(rawMessagesByRoomId.get(roomId), safeExportDate);
+      if (safeExportDate && messages.length === 0) return;
+      roomsForExport.push(room);
+      messagesByRoomId.set(roomId, messages);
     });
 
     const participantUserIds = new Set();
-    rooms.forEach((room) => {
+    roomsForExport.forEach((room) => {
       participantUserIds.add(sanitizeId(room?.ownerUserId, ""));
       sanitizeGroupChatMemberUserIds(room?.memberUserIds).forEach((userId) => {
         participantUserIds.add(sanitizeId(userId, ""));
       });
     });
-    messageDocs.forEach((message) => {
-      participantUserIds.add(sanitizeId(message?.senderUserId, ""));
-      const reactions = Array.isArray(message?.reactions) ? message.reactions : [];
-      reactions.forEach((reaction) => {
-        participantUserIds.add(sanitizeId(reaction?.userId, ""));
+    messagesByRoomId.forEach((messages) => {
+      messages.forEach((message) => {
+        participantUserIds.add(sanitizeId(message?.senderUserId, ""));
+        const reactions = Array.isArray(message?.reactions) ? message.reactions : [];
+        reactions.forEach((reaction) => {
+          participantUserIds.add(sanitizeId(reaction?.userId, ""));
+        });
       });
     });
 
@@ -2541,14 +2693,16 @@ export function registerAdminRoutes(app, deps) {
 
     return {
       ...userContext,
-      rooms,
+      rooms: roomsForExport,
       messagesByRoomId,
       userById,
+      exportDate: safeExportDate,
     };
   }
 
   function buildAdminGroupChatsExportTxt(data) {
     const safeTeacherScopeKey = sanitizeTeacherScopeKey(data?.safeTeacherScopeKey);
+    const exportDate = sanitizeExportDate(data?.exportDate);
     const rooms = Array.isArray(data?.rooms) ? data.rooms : [];
     const messagesByRoomId = data?.messagesByRoomId instanceof Map ? data.messagesByRoomId : new Map();
     const userById = data?.userById instanceof Map ? data.userById : new Map();
@@ -2557,13 +2711,14 @@ export function registerAdminRoutes(app, deps) {
       "EduChat 管理员导出：群聊聊天记录",
       `导出时间: ${formatDisplayTime(new Date())}`,
       `授课教师: ${getTeacherScopeLabel(safeTeacherScopeKey)}`,
+      ...(exportDate ? [`聊天日期: ${formatExportDateLabel(exportDate)}`] : []),
       `范围内学生数: ${scopedUserCount}`,
       `群聊数量: ${rooms.length}`,
       "",
     ];
 
     if (rooms.length === 0) {
-      lines.push("当前范围暂无群聊记录。");
+      lines.push(exportDate ? "当前日期下暂无群聊记录。" : "当前范围暂无群聊记录。");
       return lines.join("\n");
     }
 
@@ -2826,6 +2981,12 @@ export function registerAdminRoutes(app, deps) {
   app.get("/api/auth/admin/export/chats-zip", async (req, res) => {
     if (!(await authenticateAdminRequest(req, res))) return;
     const teacherScopeKey = sanitizeTeacherScopeKey(req.query?.teacherScopeKey);
+    const exportDate = sanitizeExportDate(req.query?.exportDate);
+
+    if (req.query?.exportDate != null && !exportDate) {
+      res.status(400).json({ error: "请选择有效的导出日期。" });
+      return;
+    }
 
     const users = await AuthUser.find({ role: "user" })
       .sort({ createdAt: 1, _id: 1 })
@@ -2843,30 +3004,49 @@ export function registerAdminRoutes(app, deps) {
     );
 
     const exportedAt = new Date();
-    const userFiles = users.map((user, idx) => {
+    const omittedUsers = [];
+    const userFiles = [];
+
+    users.forEach((user, idx) => {
       const userId = String(user?._id || "");
-      const state = stateByUserId.get(userId);
+      const rawState = stateByUserId.get(userId);
+      const state = exportDate ? filterChatStateByExportDate(rawState, exportDate) : rawState;
+      if (exportDate && !state) {
+        omittedUsers.push(user);
+        return;
+      }
+      const exportIndex = userFiles.length + 1;
       const content = buildSingleUserChatExportTxt(
         user,
         state,
-        idx + 1,
+        exportIndex,
         exportedAt,
         teacherScopeKey,
       );
       const username = sanitizeZipFileNamePart(user?.username || `user-${idx + 1}`);
-      const shortId = sanitizeZipFileNamePart(userId.slice(-8) || String(idx + 1));
-      const fileName = `${String(idx + 1).padStart(3, "0")}-${username}-${shortId}.txt`;
-      return { name: fileName, content };
+      const shortId = sanitizeZipFileNamePart(userId.slice(-8) || String(exportIndex));
+      const fileName = `${String(exportIndex).padStart(3, "0")}-${username}-${shortId}.txt`;
+      userFiles.push({ name: fileName, content });
     });
 
-    const readmeContent = buildZipReadme(userFiles.length, exportedAt, teacherScopeKey);
+    const readmeContent = exportDate
+      ? buildDateScopedUserExportReadme({
+          exportedAt,
+          teacherScopeKey,
+          exportDate,
+          exportedCount: userFiles.length,
+          omittedUsers,
+        })
+      : buildZipReadme(userFiles.length, exportedAt, teacherScopeKey);
     const zipBuffer = buildZipBuffer([
       { name: "README.txt", content: readmeContent },
       ...userFiles,
     ]);
 
     const suffix = formatFileStamp(exportedAt);
-    const fileName = `educhat-chats-by-user-${teacherScopeKey}-${suffix}.zip`;
+    const fileName = exportDate
+      ? `educhat-chats-by-user-${teacherScopeKey}-${exportDate}-${suffix}.zip`
+      : `educhat-chats-by-user-${teacherScopeKey}-${suffix}.zip`;
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Disposition", buildAttachmentContentDisposition(fileName));
     res.send(zipBuffer);
@@ -2875,14 +3055,22 @@ export function registerAdminRoutes(app, deps) {
   app.get("/api/auth/admin/export/group-chats-txt", async (req, res) => {
     if (!(await authenticateAdminRequest(req, res))) return;
     const teacherScopeKey = sanitizeTeacherScopeKey(req.query?.teacherScopeKey);
+    const exportDate = sanitizeExportDate(req.query?.exportDate);
+
+    if (req.query?.exportDate != null && !exportDate) {
+      res.status(400).json({ error: "请选择有效的导出日期。" });
+      return;
+    }
 
     try {
-      const data = await readAdminGroupChatsExportData(teacherScopeKey);
+      const data = await readAdminGroupChatsExportData(teacherScopeKey, exportDate);
       const content = buildAdminGroupChatsExportTxt(data);
       const suffix = formatFileStamp(new Date());
       res.json({
         ok: true,
-        filename: `educhat-group-chats-${teacherScopeKey}-${suffix}.txt`,
+        filename: exportDate
+          ? `educhat-group-chats-${teacherScopeKey}-${exportDate}-${suffix}.txt`
+          : `educhat-group-chats-${teacherScopeKey}-${suffix}.txt`,
         content,
       });
     } catch (error) {

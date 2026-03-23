@@ -197,6 +197,7 @@ export default function PartyChatDesktopPage({
   const messageMenuRef = useRef(null);
   const composerToolbarRef = useRef(null);
   const composeTextareaRef = useRef(null);
+  const composeSelectionRef = useRef({ start: null, end: null });
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
   const [bootstrapError, setBootstrapError] = useState("");
   const [actionError, setActionError] = useState("");
@@ -1129,6 +1130,100 @@ export default function PartyChatDesktopPage({
     textarea.style.height = `${nextHeight}px`;
     textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
   }, [isMobileSidebarDrawer]);
+
+  const rememberComposeSelection = useCallback(() => {
+    const textarea = composeTextareaRef.current;
+    if (!textarea) return;
+    composeSelectionRef.current = {
+      start: Number.isFinite(textarea.selectionStart) ? textarea.selectionStart : null,
+      end: Number.isFinite(textarea.selectionEnd) ? textarea.selectionEnd : null,
+    };
+  }, []);
+
+  const readComposeSelection = useCallback((text) => {
+    const currentText = String(text || "");
+    const textLength = currentText.length;
+    const rawStart = composeSelectionRef.current.start;
+    const rawEnd = composeSelectionRef.current.end;
+    const fallback = textLength;
+    const start =
+      Number.isFinite(rawStart) && rawStart != null ? Math.min(Math.max(rawStart, 0), textLength) : fallback;
+    const end =
+      Number.isFinite(rawEnd) && rawEnd != null ? Math.min(Math.max(rawEnd, start), textLength) : start;
+    return { start, end };
+  }, []);
+
+  const buildComposerInsertionText = useCallback((currentText, range, insertedText) => {
+    const current = String(currentText || "");
+    const safeInsertedText = String(insertedText || "");
+    if (!safeInsertedText) {
+      return {
+        text: current,
+        selectionStart: range.start,
+        selectionEnd: range.end,
+      };
+    }
+
+    const beforeText = current.slice(0, range.start);
+    const afterText = current.slice(range.end);
+    const prevChar = beforeText.slice(-1);
+    const nextChar = afterText.charAt(0);
+    const needLeadingSpace = Boolean(beforeText) && prevChar && !/\s/u.test(prevChar);
+    const needTrailingSpace = !nextChar || !/\s/u.test(nextChar);
+    const insertedSegment = `${needLeadingSpace ? " " : ""}${safeInsertedText}${needTrailingSpace ? " " : ""}`;
+    const nextText = `${beforeText}${insertedSegment}${afterText}`;
+    const caret = beforeText.length + insertedSegment.length;
+    return {
+      text: nextText,
+      selectionStart: caret,
+      selectionEnd: caret,
+    };
+  }, []);
+
+  const replaceComposeSelection = useCallback((insertedText) => {
+    setComposeText((prev) => {
+      const current = String(prev || "");
+      const range = readComposeSelection(current);
+      const next = buildComposerInsertionText(current, range, insertedText);
+      composeSelectionRef.current = {
+        start: next.selectionStart,
+        end: next.selectionEnd,
+      };
+      return next.text;
+    });
+  }, [buildComposerInsertionText, readComposeSelection]);
+
+  const focusComposeTextarea = useCallback((selectionMode = "preserve") => {
+    if (activeRoomSelfMuted) return;
+    requestAnimationFrame(() => {
+      const textarea = composeTextareaRef.current;
+      if (!textarea) return;
+      textarea.focus({ preventScroll: true });
+      const textLength = String(textarea.value || "").length;
+      const fallbackPosition = textLength;
+      const nextStart =
+        selectionMode === "end"
+          ? fallbackPosition
+          : Number.isFinite(composeSelectionRef.current.start) &&
+              composeSelectionRef.current.start != null
+            ? Math.min(composeSelectionRef.current.start, textLength)
+            : fallbackPosition;
+      const nextEnd =
+        selectionMode === "end"
+          ? fallbackPosition
+          : Number.isFinite(composeSelectionRef.current.end) &&
+              composeSelectionRef.current.end != null
+            ? Math.min(composeSelectionRef.current.end, textLength)
+            : nextStart;
+      textarea.setSelectionRange(nextStart, nextEnd);
+      resizeComposeTextarea();
+    });
+  }, [activeRoomSelfMuted, resizeComposeTextarea]);
+
+  const keepComposeFocusOnMouseDown = useCallback((event) => {
+    rememberComposeSelection();
+    event.preventDefault();
+  }, [rememberComposeSelection]);
 
   const isNearLatest = useCallback((root) => {
     if (!root) return true;
@@ -2428,17 +2523,16 @@ export default function PartyChatDesktopPage({
   function onComposerEmojiSelect(emoji) {
     const safeEmoji = String(emoji || "").trim();
     if (!safeEmoji) return;
-    setComposeText((prev) => {
-      const current = String(prev || "");
-      if (!current.trim()) return `${safeEmoji} `;
-      const needSpace = /\s$/.test(current) ? "" : " ";
-      return `${current}${needSpace}${safeEmoji} `;
-    });
+    rememberComposeSelection();
+    replaceComposeSelection(safeEmoji);
+    focusComposeTextarea("preserve");
   }
 
   function toggleMentionPicker() {
+    rememberComposeSelection();
     setShowComposerEmojiPanel(false);
     setShowMentionPicker((prev) => !prev);
+    focusComposeTextarea("preserve");
   }
 
   function openImagePicker() {
@@ -2617,24 +2711,14 @@ export default function PartyChatDesktopPage({
   function insertMention(name) {
     const memberName = String(name || "").trim();
     if (!memberName) return;
-    const mention = `@${memberName}`;
-    setComposeText((prev) => {
-      const current = String(prev || "");
-      const mentionPattern = new RegExp(
-        `(?:^|\\s)${escapeRegExpForRegex(mention)}(?=\\s|$)`,
-      );
-      if (mentionPattern.test(current)) {
-        return current;
-      }
-      if (!current.trim()) return `${mention} `;
-      const needSpace = /\s$/.test(current) ? "" : " ";
-      return `${current}${needSpace}${mention} `;
-    });
+    rememberComposeSelection();
+    replaceComposeSelection(`@${memberName}`);
   }
 
   function pickMention(name) {
     insertMention(name);
     setShowMentionPicker(false);
+    focusComposeTextarea("preserve");
   }
 
   function openCreateRoomModal() {
@@ -3696,9 +3780,12 @@ export default function PartyChatDesktopPage({
                           className={`party-tool-btn${showComposerEmojiPanel ? " active" : ""}`}
                           title="表情"
                           disabled={activeRoomSelfMuted}
+                          onMouseDown={keepComposeFocusOnMouseDown}
                           onClick={() => {
+                            rememberComposeSelection();
                             setShowMentionPicker(false);
                             setShowComposerEmojiPanel((prev) => !prev);
+                            focusComposeTextarea("preserve");
                           }}
                         >
                           <Smile size={17} />
@@ -3708,6 +3795,7 @@ export default function PartyChatDesktopPage({
                           className={`party-tool-btn${showMentionPicker ? " active" : ""}`}
                           title="@成员"
                           disabled={activeRoomSelfMuted}
+                          onMouseDown={keepComposeFocusOnMouseDown}
                           onClick={toggleMentionPicker}
                         >
                           <AtSign size={17} />
@@ -3738,6 +3826,7 @@ export default function PartyChatDesktopPage({
                                 key={`compose-emoji-${emoji}`}
                                 type="button"
                                 className="party-compose-emoji-btn"
+                                onMouseDown={keepComposeFocusOnMouseDown}
                                 onClick={() => onComposerEmojiSelect(emoji)}
                               >
                                 {emoji}
@@ -3752,6 +3841,7 @@ export default function PartyChatDesktopPage({
                               <button
                                 type="button"
                                 className="party-mention-picker-item is-all"
+                                onMouseDown={keepComposeFocusOnMouseDown}
                                 onClick={() => pickMention("所有人")}
                               >
                                 <span className="party-mention-picker-at" aria-hidden="true">
@@ -3764,6 +3854,7 @@ export default function PartyChatDesktopPage({
                                   key={`mention-${member.id}`}
                                   type="button"
                                   className="party-mention-picker-item"
+                                  onMouseDown={keepComposeFocusOnMouseDown}
                                   onClick={() => pickMention(member.name)}
                                 >
                                   <NameAvatar name={member.name} small />
@@ -3833,19 +3924,26 @@ export default function PartyChatDesktopPage({
                           className="party-compose-textarea"
                           placeholder={activeRoomSelfMuted ? PARTY_MEMBER_MUTED_BLOCKED_MESSAGE : "请输入消息"}
                           value={composeText}
-                          onChange={(event) => setComposeText(event.target.value)}
+                          onChange={(event) => {
+                            setComposeText(event.target.value);
+                            rememberComposeSelection();
+                          }}
                           onPaste={onComposerPaste}
                           disabled={activeRoomSelfMuted}
                           rows={isMobileSidebarDrawer ? 1 : 4}
                           onFocus={() => {
+                            rememberComposeSelection();
                             resizeComposeTextarea();
                           }}
+                          onClick={rememberComposeSelection}
+                          onSelect={rememberComposeSelection}
                           onKeyDown={(event) => {
                             if (event.key !== "Enter" || event.shiftKey) return;
                             const composing =
                               Boolean(event.nativeEvent?.isComposing) ||
                               Number(event.nativeEvent?.keyCode) === 229;
                             if (composing) return;
+                            rememberComposeSelection();
                             event.preventDefault();
                             void handleSendComposer();
                           }}
@@ -5398,8 +5496,4 @@ function computeHue(text) {
     hash = (hash * 31 + value.charCodeAt(index)) % 360;
   }
   return Math.abs(hash);
-}
-
-function escapeRegExpForRegex(text) {
-  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

@@ -39,6 +39,13 @@ function withTeacherScopeQuery(path, teacherScopeKey) {
   return `${path}${joiner}teacherScopeKey=${encodeURIComponent(key)}`;
 }
 
+function withExportDateQuery(path, exportDate) {
+  const safeExportDate = String(exportDate || "").trim();
+  if (!safeExportDate) return path;
+  const joiner = path.includes("?") ? "&" : "?";
+  return `${path}${joiner}exportDate=${encodeURIComponent(safeExportDate)}`;
+}
+
 async function request(path, adminToken, options = {}) {
   const resp = await fetch(path, {
     method: "GET",
@@ -448,9 +455,12 @@ export function exportAdminChatsTxt(adminToken, teacherScopeKey) {
   return request(withTeacherScopeQuery("/api/auth/admin/export/chats-txt", teacherScopeKey), adminToken);
 }
 
-export function exportAdminGroupChatsTxt(adminToken, teacherScopeKey) {
+export function exportAdminGroupChatsTxt(adminToken, teacherScopeKey, options = {}) {
   return request(
-    withTeacherScopeQuery("/api/auth/admin/export/group-chats-txt", teacherScopeKey),
+    withExportDateQuery(
+      withTeacherScopeQuery("/api/auth/admin/export/group-chats-txt", teacherScopeKey),
+      options?.exportDate,
+    ),
     adminToken,
   );
 }
@@ -462,8 +472,12 @@ export function exportAdminGeneratedImagesTxt(adminToken, teacherScopeKey) {
   );
 }
 
-export async function exportAdminChatsZip(adminToken, teacherScopeKey) {
-  const resp = await fetch(withTeacherScopeQuery("/api/auth/admin/export/chats-zip", teacherScopeKey), {
+export async function exportAdminChatsZip(adminToken, teacherScopeKey, options = {}) {
+  const path = withExportDateQuery(
+    withTeacherScopeQuery("/api/auth/admin/export/chats-zip", teacherScopeKey),
+    options?.exportDate,
+  );
+  const resp = await fetch(path, {
     headers: authHeader(adminToken),
   });
 
