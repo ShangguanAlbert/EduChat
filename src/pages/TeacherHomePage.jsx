@@ -22,6 +22,7 @@ import {
   LockOpen,
   LogOut,
   MessageCircleMore,
+  Minus,
   Pencil,
   Plus,
   RefreshCw,
@@ -97,7 +98,7 @@ const COURSE_TARGET_CLASS_VALUES = Object.freeze(
 );
 const COURSE_DEFAULT_CLASS_NAME = COURSE_TARGET_CLASS_OPTIONS[0].value;
 const CLASSROOM_MANAGE_PANEL_KEYS = Object.freeze(
-  new Set(["classroom", "homework", "seat-fixed", "random-rollcall"]),
+  new Set(["classroom", "discipline", "homework", "seat-fixed", "random-rollcall"]),
 );
 const CLASSROOM_MANAGE_HIDDEN_ADMIN_USERNAME_KEYS = Object.freeze(
   new Set(["杨占山", "钟怡萱", "杨俊锋", "施高俊"].map((name) => name.replace(/\s+/g, "").toLowerCase())),
@@ -119,6 +120,12 @@ const RANDOM_ROLLCALL_COUNT_OPTIONS = Object.freeze(
     label: `抽 ${index + 1} 人`,
   })),
 );
+const DISCIPLINE_DEFAULT_BEHAVIOR_OPTIONS = Object.freeze([
+  { id: "gaming", label: "玩游戏" },
+  { id: "live-stream", label: "看直播" },
+  { id: "social-media", label: "刷社交平台" },
+]);
+const DISCIPLINE_MAX_CUSTOM_BEHAVIORS = 16;
 const USER_CREATE_BINDABLE_TEACHER_SCOPE_OPTIONS = (() => {
   const options = TEACHER_SCOPE_OPTIONS.filter(
     (item) => String(item?.key || "").trim() !== DEFAULT_TEACHER_SCOPE_KEY,
@@ -310,6 +317,136 @@ function normalizeSeatLayoutsByClass(input) {
     result[className] = normalizeSeatLayout(entry?.[1]);
     return result;
   }, {});
+}
+
+function normalizeDisciplineBehaviorId(value, fallback = "") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+}
+
+function normalizeDisciplineBehavior(input, index = 0) {
+  const source = input && typeof input === "object" ? input : {};
+  const label = String(source.label || source.name || source.title || "").trim();
+  if (!label) return null;
+  return {
+    id: normalizeDisciplineBehaviorId(
+      source.id || source.key,
+      `discipline-behavior-${index + 1}`,
+    ),
+    label,
+    createdAt: String(source.createdAt || ""),
+  };
+}
+
+function normalizeDisciplineStudentRecord(input) {
+  const source = input && typeof input === "object" ? input : {};
+  const rawCounts =
+    source.countsByBehavior && typeof source.countsByBehavior === "object"
+      ? source.countsByBehavior
+      : source.behaviors && typeof source.behaviors === "object"
+        ? source.behaviors
+        : {};
+  const countsByBehavior = Object.entries(rawCounts).reduce((result, [behaviorId, rawCount]) => {
+    const safeBehaviorId = normalizeDisciplineBehaviorId(behaviorId);
+    const count = Math.max(0, Number.parseInt(String(rawCount || "").trim(), 10) || 0);
+    if (!safeBehaviorId || count <= 0) return result;
+    result[safeBehaviorId] = count;
+    return result;
+  }, {});
+  return {
+    countsByBehavior,
+    updatedAt: String(source.updatedAt || ""),
+  };
+}
+
+function normalizeDisciplineConfig(input) {
+  const source = input && typeof input === "object" ? input : {};
+  const customBehaviors = Array.isArray(source.customBehaviors)
+    ? source.customBehaviors
+        .map((item, index) => normalizeDisciplineBehavior(item, index))
+        .filter(Boolean)
+    : [];
+  const recordsByLesson =
+    source.recordsByLesson && typeof source.recordsByLesson === "object"
+      ? Object.entries(source.recordsByLesson).reduce((result, [lessonId, rawLessonRecords]) => {
+          const safeLessonId = String(lessonId || "").trim();
+          if (!safeLessonId || !rawLessonRecords || typeof rawLessonRecords !== "object") {
+            return result;
+          }
+          const normalizedLessonRecords = Object.entries(rawLessonRecords).reduce(
+            (lessonResult, [studentUserId, rawStudentRecord]) => {
+              const safeStudentUserId = String(studentUserId || "").trim();
+              if (!safeStudentUserId) return lessonResult;
+              const normalizedStudentRecord = normalizeDisciplineStudentRecord(rawStudentRecord);
+              if (Object.keys(normalizedStudentRecord.countsByBehavior).length === 0) {
+                return lessonResult;
+              }
+              lessonResult[safeStudentUserId] = normalizedStudentRecord;
+              return lessonResult;
+            },
+            {},
+          );
+          if (Object.keys(normalizedLessonRecords).length === 0) return result;
+          result[safeLessonId] = normalizedLessonRecords;
+          return result;
+        }, {})
+      : {};
+  return {
+    customBehaviors,
+    recordsByLesson,
+  };
+}
+
+function getDisciplineRecordTotalCount(record) {
+  const countsByBehavior =
+    record?.countsByBehavior && typeof record.countsByBehavior === "object"
+      ? record.countsByBehavior
+      : {};
+  return Object.values(countsByBehavior).reduce(
+    (total, count) => total + (Number.parseInt(String(count || "").trim(), 10) || 0),
+    0,
+  );
+}
+
+function compareDirectoryStudentItems(a, b) {
+  const aStudentId = String(a?.profile?.studentId || "").trim();
+  const bStudentId = String(b?.profile?.studentId || "").trim();
+  if (aStudentId && bStudentId) {
+    const studentIdCompare = aStudentId.localeCompare(bStudentId, "zh-CN", {
+      numeric: true,
+      sensitivity: "base",
+    });
+    if (studentIdCompare !== 0) return studentIdCompare;
+  } else if (aStudentId || bStudentId) {
+    return aStudentId ? -1 : 1;
+  }
+  const aName = String(a?.profile?.name || a?.username || "").trim();
+  const bName = String(b?.profile?.name || b?.username || "").trim();
+  const nameCompare = aName.localeCompare(bName, "zh-CN", {
+    sensitivity: "base",
+  });
+  if (nameCompare !== 0) return nameCompare;
+  return String(a?.id || "").localeCompare(String(b?.id || ""), "zh-CN", {
+    sensitivity: "base",
+  });
+}
+
+function buildCustomDisciplineBehavior(label, index = 0) {
+  const safeLabel = String(label || "").trim();
+  if (!safeLabel) return null;
+  const timestamp = Date.now().toString(36);
+  return {
+    id: normalizeDisciplineBehaviorId(
+      `custom-${timestamp}-${index + 1}-${safeLabel}`,
+      `custom-discipline-${timestamp}-${index + 1}`,
+    ),
+    label: safeLabel,
+    createdAt: new Date().toISOString(),
+  };
 }
 
 function pickRandomItems(source, count) {
@@ -620,6 +757,7 @@ export default function TeacherHomePage() {
   const taskFileInputRef = useRef(null);
   const lessonListScrollRef = useRef(null);
   const deleteConfirmInputRef = useRef(null);
+  const disciplineStudentSearchInputRef = useRef(null);
 
   const [adminToken, setAdminToken] = useState(() => getAdminToken());
   const [loading, setLoading] = useState(true);
@@ -777,6 +915,12 @@ export default function TeacherHomePage() {
   const [exportCenterDeleteDialogOpen, setExportCenterDeleteDialogOpen] = useState(false);
   const [seatLayoutsByClass, setSeatLayoutsByClass] = useState(() => readSeatLayoutsFromStorage());
   const [seatLayoutsSyncReady, setSeatLayoutsSyncReady] = useState(false);
+  const [classroomDisciplineConfig, setClassroomDisciplineConfig] = useState(() =>
+    normalizeDisciplineConfig(null),
+  );
+  const [disciplineDraftBehavior, setDisciplineDraftBehavior] = useState("");
+  const [disciplineStudentKeyword, setDisciplineStudentKeyword] = useState("");
+  const [selectedDisciplineStudentId, setSelectedDisciplineStudentId] = useState("");
   const [seatManageClassName, setSeatManageClassName] = useState("");
   const [randomRollcallClassName, setRandomRollcallClassName] = useState("all");
   const [randomRollcallSource, setRandomRollcallSource] = useState("seat");
@@ -789,6 +933,14 @@ export default function TeacherHomePage() {
   const seatLayoutsSyncTimerRef = useRef(null);
   const seatLayoutsLastSavedSnapshotRef = useRef("");
   const exportCenterNoticeTimerRef = useRef(null);
+  const clearDisciplineStudentKeyword = useCallback(() => {
+    setDisciplineStudentKeyword("");
+    if (typeof window !== "undefined") {
+      window.requestAnimationFrame(() => {
+        disciplineStudentSearchInputRef.current?.focus();
+      });
+    }
+  }, []);
 
   const handleAuthError = useCallback(
     (rawError) => {
@@ -939,6 +1091,9 @@ export default function TeacherHomePage() {
       const plans = Array.isArray(plansData?.teacherCoursePlans) ? plansData.teacherCoursePlans : [];
       const normalizedPlans = forceHomeworkUploadEnabled(plans);
       setTeacherCoursePlans(normalizedPlans);
+      setClassroomDisciplineConfig(
+        normalizeDisciplineConfig(plansData?.classroomDisciplineConfig),
+      );
       const serverSeatLayouts = normalizeSeatLayoutsByClass(plansData?.seatLayoutsByClass);
       setSeatLayoutsByClass((current) => {
         const hasServerSeatLayouts = Object.keys(serverSeatLayouts).length > 0;
@@ -977,7 +1132,7 @@ export default function TeacherHomePage() {
   }, [activePanel, loadImageLibrary]);
 
   useEffect(() => {
-    if (activePanel !== "user-manage") return;
+    if (activePanel !== "user-manage" && activePanel !== "discipline") return;
     void loadUserDirectory();
   }, [activePanel, loadUserDirectory]);
 
@@ -1283,6 +1438,7 @@ export default function TeacherHomePage() {
           label: "课堂管理",
           items: [
             { key: "classroom", label: "课时管理", icon: ClipboardList },
+            { key: "discipline", label: "纪律管理", icon: CircleHelp },
             { key: "homework", label: "作业管理", icon: FileText },
             { key: "seat-fixed", label: "座位管理", icon: LayoutGrid },
             { key: "random-rollcall", label: "随机点名", icon: Dices },
@@ -2140,11 +2296,170 @@ export default function TeacherHomePage() {
         : [],
     [selectedHomeworkLesson],
   );
+  const disciplineBehaviorOptions = useMemo(() => {
+    const merged = [];
+    const seen = new Set();
+    [...DISCIPLINE_DEFAULT_BEHAVIOR_OPTIONS, ...classroomDisciplineConfig.customBehaviors].forEach(
+      (item, index) => {
+        const normalized = normalizeDisciplineBehavior(item, index);
+        const behaviorId = String(normalized?.id || "").trim();
+        if (!normalized || !behaviorId || seen.has(behaviorId)) return;
+        seen.add(behaviorId);
+        merged.push(normalized);
+      },
+    );
+    return merged;
+  }, [classroomDisciplineConfig.customBehaviors]);
+  const disciplineBehaviorLabelMap = useMemo(
+    () =>
+      disciplineBehaviorOptions.reduce((result, item) => {
+        result[item.id] = item.label;
+        return result;
+      }, {}),
+    [disciplineBehaviorOptions],
+  );
+  const disciplineLessonSummaryByLessonId = useMemo(
+    () =>
+      Object.entries(classroomDisciplineConfig.recordsByLesson || {}).reduce(
+        (result, [lessonId, lessonRecords]) => {
+          const studentRecords = lessonRecords && typeof lessonRecords === "object" ? lessonRecords : {};
+          const studentIds = Object.keys(studentRecords);
+          const totalCount = studentIds.reduce(
+            (total, studentId) => total + getDisciplineRecordTotalCount(studentRecords[studentId]),
+            0,
+          );
+          result[lessonId] = {
+            studentCount: studentIds.filter(
+              (studentId) => getDisciplineRecordTotalCount(studentRecords[studentId]) > 0,
+            ).length,
+            totalCount,
+          };
+          return result;
+        },
+        {},
+      ),
+    [classroomDisciplineConfig.recordsByLesson],
+  );
+  const selectedDisciplineLessonId = String(selectedCourse?.id || "").trim();
+  const selectedDisciplineLessonRecords = useMemo(
+    () =>
+      selectedDisciplineLessonId &&
+      classroomDisciplineConfig.recordsByLesson &&
+      typeof classroomDisciplineConfig.recordsByLesson === "object"
+        ? classroomDisciplineConfig.recordsByLesson[selectedDisciplineLessonId] || {}
+        : {},
+    [classroomDisciplineConfig.recordsByLesson, selectedDisciplineLessonId],
+  );
+  const selectedDisciplineClassName = useMemo(
+    () => {
+      const className = String(selectedCourse?.className || "").trim();
+      return COURSE_TARGET_CLASS_VALUES.includes(className) ? className : "";
+    },
+    [selectedCourse?.className],
+  );
+  const disciplineRosterStudents = useMemo(
+    () =>
+      userDirectoryItems
+        .filter((item) => String(item?.role || "").trim().toLowerCase() === "user")
+        .filter((item) => String(item?.profile?.className || "").trim() === selectedDisciplineClassName)
+        .sort(compareDirectoryStudentItems),
+    [selectedDisciplineClassName, userDirectoryItems],
+  );
+  const disciplineAllStudentCards = useMemo(
+    () =>
+      disciplineRosterStudents.map((student) => {
+        const studentId = String(student?.id || "").trim();
+        const record = normalizeDisciplineStudentRecord(selectedDisciplineLessonRecords[studentId]);
+        const totalCount = getDisciplineRecordTotalCount(record);
+        const behaviorCounts = Object.entries(record.countsByBehavior)
+          .map(([behaviorId, count]) => ({
+            behaviorId,
+            count,
+            label: disciplineBehaviorLabelMap[behaviorId] || behaviorId,
+          }))
+          .sort((a, b) => {
+            if (b.count !== a.count) return b.count - a.count;
+            return String(a.label || "").localeCompare(String(b.label || ""), "zh-CN", {
+              sensitivity: "base",
+            });
+          });
+        return {
+          user: student,
+          userId: studentId,
+          totalCount,
+          behaviorCounts,
+        };
+      }).sort((left, right) => {
+        if (right.totalCount !== left.totalCount) {
+          return right.totalCount - left.totalCount;
+        }
+        return compareDirectoryStudentItems(left.user, right.user);
+      }),
+    [disciplineBehaviorLabelMap, disciplineRosterStudents, selectedDisciplineLessonRecords],
+  );
+  const disciplineStudentCards = useMemo(() => {
+    const keyword = String(disciplineStudentKeyword || "")
+      .trim()
+      .toLowerCase();
+    if (!keyword) return disciplineAllStudentCards;
+    return disciplineAllStudentCards.filter((item) =>
+      [
+        item?.user?.profile?.name,
+        item?.user?.username,
+        item?.user?.profile?.studentId,
+        item?.user?.profile?.className,
+      ].some((token) => String(token || "").toLowerCase().includes(keyword)),
+    );
+  }, [disciplineAllStudentCards, disciplineStudentKeyword]);
+  const selectedDisciplineStudentCard = useMemo(
+    () =>
+      disciplineAllStudentCards.find(
+        (item) => String(item.userId || "").trim() === String(selectedDisciplineStudentId || "").trim(),
+      ) || null,
+    [disciplineAllStudentCards, selectedDisciplineStudentId],
+  );
+  const selectedDisciplineStudent = selectedDisciplineStudentCard?.user || null;
+  const selectedDisciplineStudentRecord = useMemo(
+    () =>
+      normalizeDisciplineStudentRecord(
+        selectedDisciplineLessonRecords[String(selectedDisciplineStudent?.id || "").trim()],
+      ),
+    [selectedDisciplineLessonRecords, selectedDisciplineStudent?.id],
+  );
+  const selectedDisciplineStudentTotalCount = useMemo(
+    () => getDisciplineRecordTotalCount(selectedDisciplineStudentRecord),
+    [selectedDisciplineStudentRecord],
+  );
+  const selectedDisciplineStudentBehaviorCounts = useMemo(
+    () =>
+      disciplineBehaviorOptions.map((behavior) => ({
+        ...behavior,
+        count:
+          Number(
+            selectedDisciplineStudentRecord?.countsByBehavior?.[
+              String(behavior?.id || "").trim()
+            ] || 0,
+          ) || 0,
+      })),
+    [disciplineBehaviorOptions, selectedDisciplineStudentRecord],
+  );
+  useEffect(() => {
+    if (disciplineAllStudentCards.length === 0) {
+      if (selectedDisciplineStudentId) setSelectedDisciplineStudentId("");
+      return;
+    }
+    const hasSelectedStudent = disciplineAllStudentCards.some(
+      (item) => String(item.userId || "").trim() === String(selectedDisciplineStudentId || "").trim(),
+    );
+    if (hasSelectedStudent) return;
+    setSelectedDisciplineStudentId(String(disciplineAllStudentCards[0]?.userId || ""));
+  }, [disciplineAllStudentCards, selectedDisciplineStudentId]);
   const classroomSeatClassOptions = useMemo(() => {
     const mapping = new Map();
     const appendClass = (className) => {
       const safeClassName = String(className || "").trim();
       if (!safeClassName) return;
+      if (!COURSE_TARGET_CLASS_VALUES.includes(safeClassName)) return;
       const key = toClassNameKey(safeClassName);
       if (!key || mapping.has(key)) return;
       mapping.set(key, safeClassName);
@@ -2805,11 +3120,15 @@ export default function TeacherHomePage() {
       const data = await saveAdminClassroomPlans(adminToken, {
         shangguanClassTaskProductImprovementEnabled: !!productTaskEnabled,
         teacherCoursePlans: plansToSave,
+        classroomDisciplineConfig,
       });
       const savedPlans = Array.isArray(data?.teacherCoursePlans) ? data.teacherCoursePlans : [];
       const normalizedPlans = forceHomeworkUploadEnabled(savedPlans);
       const nextProductEnabled = !!data?.shangguanClassTaskProductImprovementEnabled;
       setTeacherCoursePlans(normalizedPlans);
+      setClassroomDisciplineConfig(
+        normalizeDisciplineConfig(data?.classroomDisciplineConfig),
+      );
       if (
         normalizedPlans.length > 0 &&
         !normalizedPlans.some((item) => item?.id === selectedCourseId)
@@ -2834,6 +3153,7 @@ export default function TeacherHomePage() {
     productTaskEnabled,
     saving,
     selectedCourseId,
+    classroomDisciplineConfig,
     teacherCoursePlans,
   ]);
 
@@ -3765,6 +4085,105 @@ export default function TeacherHomePage() {
     }
   }
 
+  function updateDisciplineRecord(lessonId, studentUserId, behaviorId, delta = 1) {
+    const safeLessonId = String(lessonId || "").trim();
+    const safeStudentUserId = String(studentUserId || "").trim();
+    const safeBehaviorId = normalizeDisciplineBehaviorId(behaviorId);
+    const step = Number.parseInt(String(delta || "").trim(), 10) || 0;
+    if (!safeLessonId || !safeStudentUserId || !safeBehaviorId || !step) return;
+    setClassroomDisciplineConfig((current) => {
+      const currentConfig = normalizeDisciplineConfig(current);
+      const lessonRecords = {
+        ...(currentConfig.recordsByLesson[safeLessonId] || {}),
+      };
+      const currentRecord = normalizeDisciplineStudentRecord(lessonRecords[safeStudentUserId]);
+      const nextCount = Math.max(
+        0,
+        (Number(currentRecord.countsByBehavior[safeBehaviorId]) || 0) + step,
+      );
+      const nextCountsByBehavior = {
+        ...currentRecord.countsByBehavior,
+      };
+      if (nextCount > 0) {
+        nextCountsByBehavior[safeBehaviorId] = nextCount;
+      } else {
+        delete nextCountsByBehavior[safeBehaviorId];
+      }
+      if (Object.keys(nextCountsByBehavior).length === 0) {
+        delete lessonRecords[safeStudentUserId];
+      } else {
+        lessonRecords[safeStudentUserId] = {
+          countsByBehavior: nextCountsByBehavior,
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      const nextRecordsByLesson = {
+        ...currentConfig.recordsByLesson,
+      };
+      if (Object.keys(lessonRecords).length === 0) {
+        delete nextRecordsByLesson[safeLessonId];
+      } else {
+        nextRecordsByLesson[safeLessonId] = lessonRecords;
+      }
+      return {
+        ...currentConfig,
+        recordsByLesson: nextRecordsByLesson,
+      };
+    });
+    setError("");
+  }
+
+  function onAddCustomDisciplineBehavior(event) {
+    if (event) event.preventDefault();
+    const nextBehavior = buildCustomDisciplineBehavior(disciplineDraftBehavior);
+    if (!nextBehavior) {
+      setError("请输入要新增的违规行为名称。");
+      return;
+    }
+    const labelKey = String(nextBehavior.label || "").trim().toLowerCase();
+    const exists = disciplineBehaviorOptions.some(
+      (item) => String(item?.label || "").trim().toLowerCase() === labelKey,
+    );
+    if (exists) {
+      setError("该违规行为已存在，请勿重复添加。");
+      return;
+    }
+    if (classroomDisciplineConfig.customBehaviors.length >= DISCIPLINE_MAX_CUSTOM_BEHAVIORS) {
+      setError(`最多支持添加 ${DISCIPLINE_MAX_CUSTOM_BEHAVIORS} 个自定义违规行为。`);
+      return;
+    }
+    setClassroomDisciplineConfig((current) => ({
+      ...normalizeDisciplineConfig(current),
+      customBehaviors: [
+        ...normalizeDisciplineConfig(current).customBehaviors,
+        nextBehavior,
+      ],
+    }));
+    setDisciplineDraftBehavior("");
+    setError("");
+  }
+
+  function onRegisterDisciplineBehavior(behaviorId) {
+    const safeLessonId = String(selectedDisciplineLessonId || "").trim();
+    const safeStudentUserId = String(selectedDisciplineStudent?.id || "").trim();
+    if (!safeLessonId) {
+      setError("请先选择课时后再登记纪律表现。");
+      return;
+    }
+    if (!safeStudentUserId) {
+      setError("请先选择一位学生。");
+      return;
+    }
+    updateDisciplineRecord(safeLessonId, safeStudentUserId, behaviorId, 1);
+  }
+
+  function onDecreaseDisciplineBehavior(studentUserId, behaviorId) {
+    const safeLessonId = String(selectedDisciplineLessonId || "").trim();
+    const safeStudentUserId = String(studentUserId || "").trim();
+    if (!safeLessonId || !safeStudentUserId) return;
+    updateDisciplineRecord(safeLessonId, safeStudentUserId, behaviorId, -1);
+  }
+
   return (
     <div className="teacher-home-page">
       <div className="teacher-home-shell">
@@ -4344,6 +4763,314 @@ export default function TeacherHomePage() {
                         </div>
                       </section>
                     </div>
+                  )}
+                </div>
+              </section>
+            </div>
+          ) : null}
+
+          {activePanel === "discipline" ? (
+            <div className="teacher-panel-stack teacher-discipline-stack">
+              <header className="teacher-panel-head">
+                <div>
+                  <h2>纪律管理</h2>
+                  <p className="teacher-panel-save-time">
+                    {`按课时分别登记学生违规表现 · 最近保存：${formatDisplayTime(classroomUpdatedAt)}`}
+                  </p>
+                </div>
+                <div className="teacher-panel-actions">
+                  <button
+                    type="button"
+                    className="teacher-ghost-btn teacher-tooltip-btn teacher-action-icon-btn"
+                    onClick={() => setLessonListVisible((current) => !current)}
+                    data-tooltip={lessonListVisible ? "隐藏课时列表" : "显示课时列表"}
+                    title={lessonListVisible ? "隐藏课时列表" : "显示课时列表"}
+                    aria-label={lessonListVisible ? "隐藏课时列表" : "显示课时列表"}
+                  >
+                    {lessonListVisible ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="teacher-primary-btn teacher-tooltip-btn teacher-action-icon-btn"
+                    onClick={onSaveClassroomConfig}
+                    disabled={loading || saving}
+                    data-tooltip={saving ? "保存中..." : "保存纪律记录"}
+                    title={saving ? "保存中..." : "保存纪律记录"}
+                    aria-label={saving ? "保存中..." : "保存纪律记录"}
+                  >
+                    <Save size={15} />
+                  </button>
+                </div>
+              </header>
+
+              <section
+                className={`teacher-card teacher-lesson-workbench teacher-discipline-workbench${
+                  lessonListVisible ? "" : " list-collapsed"
+                }`}
+              >
+                <div
+                  className={`teacher-lesson-list-panel${lessonListVisible ? "" : " collapsed"}`}
+                >
+                  <div className="teacher-lesson-list-head">
+                    <h3>课时列表</h3>
+                    <div className="teacher-lesson-list-head-right">
+                      <span>{`${teacherCoursePlans.length} 节课`}</span>
+                    </div>
+                  </div>
+
+                  {teacherCoursePlans.length === 0 ? (
+                    <p className="teacher-empty-text">暂无课时，请先到“课时管理”中创建课时。</p>
+                  ) : (
+                    <div
+                      className="teacher-lesson-list"
+                      ref={lessonListScrollRef}
+                      onWheel={onLessonListWheel}
+                    >
+                      {sortedCoursePlans.map((course, index) => {
+                        const courseId = String(course?.id || "");
+                        const active = courseId === String(selectedCourseId || "");
+                        const lessonClassName = normalizeLessonClassName(course?.className);
+                        const summary = disciplineLessonSummaryByLessonId[courseId] || {
+                          studentCount: 0,
+                          totalCount: 0,
+                        };
+                        return (
+                          <article
+                            key={courseId || `discipline-lesson-${index + 1}`}
+                            className={`teacher-lesson-row${active ? " active" : ""}`}
+                          >
+                            <button
+                              type="button"
+                              className="teacher-lesson-row-main"
+                              onClick={() => setSelectedCourseId(courseId)}
+                            >
+                              <strong>{course?.courseName || `第${index + 1}节课`}</strong>
+                              <p>
+                                {buildLessonTimeLabel(
+                                  course?.courseStartAt,
+                                  course?.courseEndAt,
+                                  course?.courseTime,
+                                ) || "未设置课时时间"}
+                              </p>
+                              <span>{`${lessonClassName} · 违纪 ${summary.totalCount} 次 / ${summary.studentCount} 人`}</span>
+                            </button>
+                            <div className="teacher-lesson-row-actions">
+                              <span className={`teacher-lesson-status${summary.totalCount === 0 ? " closed" : ""}`}>
+                                {summary.totalCount > 0 ? "已登记" : "未登记"}
+                              </span>
+                              <span
+                                className="teacher-row-setting-btn teacher-row-setting-btn-placeholder"
+                                aria-hidden="true"
+                              />
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="teacher-homework-detail-panel teacher-discipline-detail-panel">
+                  {!selectedCourse ? (
+                    <p className="teacher-empty-text">请选择左侧课时后，再登记本节课的纪律表现。</p>
+                  ) : (
+                    <>
+                      <div className="teacher-discipline-focus-bar">
+                        <div className="teacher-discipline-focus-main">
+                          <span>当前登记对象</span>
+                          <strong>
+                            {selectedDisciplineStudent
+                              ? `${
+                                  selectedDisciplineStudent?.profile?.name ||
+                                  selectedDisciplineStudent?.username ||
+                                  "未命名学生"
+                                }${selectedDisciplineStudent?.profile?.studentId
+                                  ? `（${selectedDisciplineStudent.profile.studentId}）`
+                                  : ""}`
+                              : "请先选择一位学生"}
+                          </strong>
+                          <small>{`本节课累计 ${selectedDisciplineStudentTotalCount} 次`}</small>
+                        </div>
+                      </div>
+
+                      <section className="teacher-discipline-behavior-card">
+                        <div className="teacher-discipline-behavior-head">
+                          <div className="teacher-discipline-section-title">
+                            <h3>常见违规行为</h3>
+                            <button
+                              type="button"
+                              className="teacher-user-manage-head-info teacher-discipline-head-info"
+                              aria-label="常见违规行为说明"
+                            >
+                              <CircleHelp size={13} />
+                              <span className="teacher-user-manage-head-tooltip" role="tooltip">
+                                点一次记 1 次，可连续点，也可新增自定义行为。
+                              </span>
+                            </button>
+                          </div>
+                        </div>
+                        <div className="teacher-discipline-behavior-grid">
+                          {selectedDisciplineStudentBehaviorCounts.map((behavior) => (
+                            <button
+                              key={behavior.id}
+                              type="button"
+                              className="teacher-discipline-behavior-btn"
+                              onClick={() => onRegisterDisciplineBehavior(behavior.id)}
+                              disabled={!selectedDisciplineStudent}
+                            >
+                              <span>{behavior.label}</span>
+                              <strong>{behavior.count}</strong>
+                            </button>
+                          ))}
+                        </div>
+                        <form
+                          className="teacher-discipline-custom-form"
+                          onSubmit={onAddCustomDisciplineBehavior}
+                        >
+                          <input
+                            type="text"
+                            value={disciplineDraftBehavior}
+                            onChange={(event) => setDisciplineDraftBehavior(event.target.value)}
+                            placeholder="输入自定义违规行为，例如：看短视频"
+                            maxLength={40}
+                          />
+                          <button
+                            type="submit"
+                            className="teacher-ghost-btn"
+                            disabled={!disciplineDraftBehavior.trim()}
+                          >
+                            <Plus size={14} />
+                            <span>新增行为</span>
+                          </button>
+                        </form>
+                        {selectedDisciplineStudentBehaviorCounts.some((item) => item.count > 0) ? (
+                          <div className="teacher-discipline-record-chip-list">
+                            {selectedDisciplineStudentBehaviorCounts
+                              .filter((item) => item.count > 0)
+                              .map((item) => (
+                                <button
+                                  key={`discipline-record-${item.id}`}
+                                  type="button"
+                                  className="teacher-discipline-record-chip"
+                                  onClick={() =>
+                                    onDecreaseDisciplineBehavior(
+                                      selectedDisciplineStudent?.id,
+                                      item.id,
+                                    )
+                                  }
+                                >
+                                  <span>{item.label}</span>
+                                  <strong>{item.count}</strong>
+                                  <small>-1</small>
+                                </button>
+                              ))}
+                          </div>
+                        ) : (
+                          <p className="teacher-empty-text">当前选中学生在本节课还没有违规记录。</p>
+                        )}
+                      </section>
+
+                      {userDirectoryLoading && disciplineAllStudentCards.length === 0 ? (
+                        <p className="teacher-empty-text">正在读取本班学生名单…</p>
+                      ) : null}
+
+                      {disciplineAllStudentCards.length === 0 ? (
+                        <p className="teacher-empty-text">
+                          当前班级还没有可登记的学生账号。
+                        </p>
+                      ) : (
+                        <section className="teacher-discipline-student-card">
+                          <div className="teacher-discipline-student-head">
+                            <div className="teacher-discipline-section-title">
+                              <h3>学生列表</h3>
+                              <button
+                                type="button"
+                                className="teacher-user-manage-head-info teacher-discipline-head-info"
+                                aria-label="学生列表说明"
+                              >
+                                <CircleHelp size={13} />
+                                <span className="teacher-user-manage-head-tooltip" role="tooltip">
+                                  点击学生卡片可切换登记对象，并查看本节课违规明细。
+                                </span>
+                              </button>
+                            </div>
+                          </div>
+                          <div className="teacher-image-search-input-wrap teacher-discipline-search-input">
+                            <Search size={14} />
+                            <input
+                              ref={disciplineStudentSearchInputRef}
+                              type="text"
+                              aria-label="纪律学生搜索"
+                              value={disciplineStudentKeyword}
+                              onChange={(event) => setDisciplineStudentKeyword(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key !== "Escape") return;
+                                if (!String(disciplineStudentKeyword || "").trim()) return;
+                                event.preventDefault();
+                                clearDisciplineStudentKeyword();
+                              }}
+                              placeholder="按姓名 / 学号 / 账号搜索学生"
+                              maxLength={80}
+                            />
+                            {String(disciplineStudentKeyword || "").trim() ? (
+                              <button
+                                type="button"
+                                className="teacher-discipline-search-clear-btn"
+                                onClick={clearDisciplineStudentKeyword}
+                                aria-label="清除学生搜索"
+                              >
+                                <X size={12} />
+                              </button>
+                            ) : null}
+                          </div>
+                          <div className="teacher-discipline-student-grid">
+                            {disciplineStudentCards.length === 0 ? (
+                              <p className="teacher-empty-text">未找到匹配的学生，请换个关键词试试。</p>
+                            ) : (
+                              disciplineStudentCards.map((item) => {
+                                const studentName =
+                                  String(item?.user?.profile?.name || "").trim() ||
+                                  String(item?.user?.username || "").trim() ||
+                                  "未命名学生";
+                                const studentId = String(item?.user?.profile?.studentId || "").trim();
+                                const selected =
+                                  String(item.userId || "").trim() ===
+                                  String(selectedDisciplineStudentId || "").trim();
+                                return (
+                                  <button
+                                    key={item.userId}
+                                    type="button"
+                                    className={`teacher-discipline-student-item${
+                                      selected ? " active" : ""
+                                    }`}
+                                    onClick={() => setSelectedDisciplineStudentId(item.userId)}
+                                  >
+                                    <div className="teacher-discipline-student-item-head">
+                                      <strong>{studentId ? `${studentName}（${studentId}）` : studentName}</strong>
+                                      <span>{`共 ${item.totalCount} 次`}</span>
+                                    </div>
+                                    {item.behaviorCounts.length > 0 ? (
+                                      <div className="teacher-discipline-student-item-tags">
+                                        {item.behaviorCounts.map((behavior) => (
+                                          <span
+                                            key={`${item.userId}-${behavior.behaviorId}`}
+                                            className="teacher-discipline-student-tag"
+                                          >
+                                            {`${behavior.label} × ${behavior.count}`}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <small>本节课暂无违规登记</small>
+                                    )}
+                                  </button>
+                                );
+                              })
+                            )}
+                          </div>
+                        </section>
+                      )}
+                    </>
                   )}
                 </div>
               </section>

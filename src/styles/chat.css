@@ -1692,6 +1692,12 @@ select.group-modal-input{
   background: #eff6ff;
 }
 
+.msg-action-btn.is-error{
+  border-color: #dc2626;
+  color: #dc2626;
+  background: #fef2f2;
+}
+
 .msg-action-btn:disabled{
   opacity: .55;
   cursor: not-allowed;

@@ -22,6 +22,8 @@ import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { useSessionStreamDraft } from "../pages/chat/streamDraftStore.js";
 
+const MARKDOWN_REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }]];
+
 const MARKDOWN_COMPONENTS = {
   a: ({ node, ...props }) => {
     void node;
@@ -232,6 +234,7 @@ const MessageList = forwardRef(function MessageList({
       onAssistantFeedback,
       onAssistantRegenerate,
       onAssistantForward,
+      prepareForReasoningToggle,
       promptMap,
       showAssistantActions,
       disableAssistantCopy,
@@ -285,12 +288,13 @@ const MessageList = forwardRef(function MessageList({
   }, [displayedMessages]);
 
   useEffect(() => {
+    const nodeMap = messageNodeMapRef.current;
     return () => {
       if (reasoningToggleTimerRef.current) {
         window.clearTimeout(reasoningToggleTimerRef.current);
         reasoningToggleTimerRef.current = 0;
       }
-      messageNodeMapRef.current.clear();
+      nodeMap.clear();
     };
   }, []);
 
@@ -475,20 +479,51 @@ const MessageItem = memo(function MessageItem({
   showAssistantActions,
   disableAssistantCopy,
 }) {
-  const [copied, setCopied] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("idle");
   const reasoningMarkdown = normalizeRenderedMarkdown(m.reasoning);
   const contentMarkdown = normalizeRenderedMarkdown(m.content);
+
+  useEffect(() => {
+    if (copyStatus === "idle") return undefined;
+    const timer = window.setTimeout(() => {
+      setCopyStatus("idle");
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [copyStatus]);
 
   async function copyContent() {
     const text = m.content?.trim() || "";
     if (!text) return;
 
+    const fallbackCopy = () => {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "readonly");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      textarea.style.pointerEvents = "none";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      try {
+        const copied = document.execCommand("copy");
+        document.body.removeChild(textarea);
+        return copied;
+      } catch {
+        document.body.removeChild(textarea);
+        return false;
+      }
+    };
+
     try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        setCopyStatus("copied");
+        return;
+      }
+      setCopyStatus(fallbackCopy() ? "copied" : "failed");
     } catch {
-      setCopied(false);
+      setCopyStatus(fallbackCopy() ? "copied" : "failed");
     }
   }
 
@@ -547,7 +582,7 @@ const MessageItem = memo(function MessageItem({
             </summary>
             <div className="reasoning-content">
               <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
+                remarkPlugins={MARKDOWN_REMARK_PLUGINS}
                 rehypePlugins={[rehypeRaw]}
                 components={MARKDOWN_COMPONENTS}
               >
@@ -633,7 +668,7 @@ const MessageItem = memo(function MessageItem({
         {contentMarkdown.trim() ? (
           <div className="msg-text md-body">
             <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
+              remarkPlugins={MARKDOWN_REMARK_PLUGINS}
               rehypePlugins={[rehypeRaw]}
               components={MARKDOWN_COMPONENTS}
             >
@@ -681,8 +716,16 @@ const MessageItem = memo(function MessageItem({
 
             <button
               type="button"
-              className={`msg-action-btn ${copied ? "active" : ""}`}
-              title={disableAssistantCopy ? "复制已禁用" : copied ? "已复制" : "复制"}
+              className={`msg-action-btn ${copyStatus === "copied" ? "active" : ""} ${copyStatus === "failed" ? "is-error" : ""}`}
+              title={
+                disableAssistantCopy
+                  ? "复制已禁用"
+                  : copyStatus === "copied"
+                    ? "已复制"
+                    : copyStatus === "failed"
+                      ? "复制失败"
+                      : "复制"
+              }
               aria-label="复制"
               onClick={copyContent}
               disabled={isStreaming || disableAssistantCopy}

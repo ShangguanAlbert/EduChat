@@ -121,6 +121,10 @@ const ADMIN_CLASSROOM_SEAT_LAYOUT_MAX_COLUMNS = 10;
 const ADMIN_CLASSROOM_SEAT_LAYOUT_DEFAULT_ROWS = 6;
 const ADMIN_CLASSROOM_SEAT_LAYOUT_DEFAULT_COLUMNS = 8;
 const ADMIN_CLASSROOM_SEAT_LAYOUT_MAX_CLASS_COUNT = 120;
+const ADMIN_CLASSROOM_DISCIPLINE_MAX_CUSTOM_BEHAVIORS = 16;
+const ADMIN_CLASSROOM_DISCIPLINE_MAX_BEHAVIORS_PER_STUDENT = 24;
+const ADMIN_CLASSROOM_DISCIPLINE_MAX_STUDENTS_PER_LESSON = 120;
+const ADMIN_CLASSROOM_DISCIPLINE_MAX_COUNT_PER_BEHAVIOR = 99;
 const VOLCENGINE_IMAGE_GENERATION_MODEL_ID_45 = "doubao-seedream-4-5-251128";
 const VOLCENGINE_IMAGE_GENERATION_MODEL_ID_50 = "doubao-seedream-5-0-260128";
 const DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL =
@@ -1560,6 +1564,13 @@ const adminConfigSchema = new mongoose.Schema(
     teacherCoursePlans: {
       type: [adminClassroomCoursePlanSchema],
       default: () => [],
+    },
+    classroomDisciplineConfig: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({
+        customBehaviors: [],
+        recordsByLesson: {},
+      }),
     },
     seatLayoutsByClass: {
       type: mongoose.Schema.Types.Mixed,
@@ -6889,6 +6900,16 @@ function extractResponsesReasoningTextFromCompleted(responseObj) {
   return chunks.join("");
 }
 
+function outputTextAlreadyContainsReferences(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  return (
+    /\[\^[^\]]+\]:/u.test(normalized) ||
+    /\n#{0,3}\s*(?:参考链接|参考资料|参考来源|参考文献|sources?|references?)\s*[:：]/iu.test(normalized) ||
+    /\n#{0,3}\s*footnotes\s*$/imu.test(normalized)
+  );
+}
+
 function extractResponsesUrlCitations(responseObj) {
   const output = Array.isArray(responseObj?.output) ? responseObj.output : [];
   const citations = [];
@@ -6938,6 +6959,10 @@ function extractResponsesUrlCitations(responseObj) {
 }
 
 function formatResponsesCitationAppendix(responseObj) {
+  if (outputTextAlreadyContainsReferences(extractResponsesOutputTextFromCompleted(responseObj))) {
+    return "";
+  }
+
   const citations = extractResponsesUrlCitations(responseObj);
   if (citations.length === 0) return "";
 
@@ -7539,6 +7564,128 @@ function sanitizeAdminClassroomSeatLayoutsByClassPayload(input) {
   return result;
 }
 
+function sanitizeAdminClassroomDisciplineBehaviorPayload(input, index = 0) {
+  const source = input && typeof input === "object" ? input : {};
+  const label = sanitizeText(source.label || source.name || source.title, "", 40);
+  if (!label) return null;
+  return {
+    id: sanitizeId(source.id || source.key, `discipline-behavior-${index + 1}`),
+    label,
+    createdAt: sanitizeIsoDate(source.createdAt) || "",
+  };
+}
+
+function sanitizeAdminClassroomDisciplineCustomBehaviorsPayload(input) {
+  const source = Array.isArray(input) ? input : [];
+  const behaviors = [];
+  const seenIds = new Set();
+  const seenLabels = new Set();
+  for (
+    let index = 0;
+    index < source.length && behaviors.length < ADMIN_CLASSROOM_DISCIPLINE_MAX_CUSTOM_BEHAVIORS;
+    index += 1
+  ) {
+    const behavior = sanitizeAdminClassroomDisciplineBehaviorPayload(source[index], index);
+    if (!behavior) continue;
+    const behaviorId = sanitizeId(behavior.id, "");
+    const labelKey = String(behavior.label || "").trim().toLowerCase();
+    if (!behaviorId || seenIds.has(behaviorId) || !labelKey || seenLabels.has(labelKey)) continue;
+    seenIds.add(behaviorId);
+    seenLabels.add(labelKey);
+    behaviors.push(behavior);
+  }
+  return behaviors;
+}
+
+function sanitizeAdminClassroomDisciplineStudentRecordPayload(input) {
+  const source = input && typeof input === "object" ? input : {};
+  const rawCounts =
+    source.countsByBehavior && typeof source.countsByBehavior === "object"
+      ? source.countsByBehavior
+      : source.behaviors && typeof source.behaviors === "object"
+        ? source.behaviors
+        : {};
+  const countsByBehavior = {};
+  const entries = Object.entries(rawCounts);
+  for (
+    let index = 0;
+    index < entries.length && index < ADMIN_CLASSROOM_DISCIPLINE_MAX_BEHAVIORS_PER_STUDENT;
+    index += 1
+  ) {
+    const [behaviorId, rawCount] = entries[index];
+    const safeBehaviorId = sanitizeId(behaviorId, "");
+    if (!safeBehaviorId || Object.prototype.hasOwnProperty.call(countsByBehavior, safeBehaviorId)) {
+      continue;
+    }
+    const count = sanitizeRuntimeInteger(
+      rawCount,
+      0,
+      0,
+      ADMIN_CLASSROOM_DISCIPLINE_MAX_COUNT_PER_BEHAVIOR,
+    );
+    if (count <= 0) continue;
+    countsByBehavior[safeBehaviorId] = count;
+  }
+  if (Object.keys(countsByBehavior).length === 0) return null;
+  return {
+    countsByBehavior,
+    updatedAt: sanitizeIsoDate(source.updatedAt) || "",
+  };
+}
+
+function sanitizeAdminClassroomDisciplineRecordsByLessonPayload(input) {
+  const source = input && typeof input === "object" ? input : {};
+  const result = {};
+  const lessonEntries = Object.entries(source);
+  for (
+    let lessonIndex = 0;
+    lessonIndex < lessonEntries.length && lessonIndex < ADMIN_CLASSROOM_COURSE_PLAN_MAX_ITEMS;
+    lessonIndex += 1
+  ) {
+    const [lessonId, rawLessonRecords] = lessonEntries[lessonIndex];
+    const safeLessonId = sanitizeId(lessonId, "");
+    if (!safeLessonId || Object.prototype.hasOwnProperty.call(result, safeLessonId)) continue;
+    const lessonRecordsSource =
+      rawLessonRecords && typeof rawLessonRecords === "object" ? rawLessonRecords : {};
+    const normalizedLessonRecords = {};
+    const studentEntries = Object.entries(lessonRecordsSource);
+    for (
+      let studentIndex = 0;
+      studentIndex < studentEntries.length &&
+      studentIndex < ADMIN_CLASSROOM_DISCIPLINE_MAX_STUDENTS_PER_LESSON;
+      studentIndex += 1
+    ) {
+      const [studentUserId, rawStudentRecord] = studentEntries[studentIndex];
+      const safeStudentUserId = sanitizeId(studentUserId, "");
+      if (
+        !safeStudentUserId ||
+        Object.prototype.hasOwnProperty.call(normalizedLessonRecords, safeStudentUserId)
+      ) {
+        continue;
+      }
+      const normalizedStudentRecord =
+        sanitizeAdminClassroomDisciplineStudentRecordPayload(rawStudentRecord);
+      if (!normalizedStudentRecord) continue;
+      normalizedLessonRecords[safeStudentUserId] = normalizedStudentRecord;
+    }
+    if (Object.keys(normalizedLessonRecords).length === 0) continue;
+    result[safeLessonId] = normalizedLessonRecords;
+  }
+  return result;
+}
+
+function sanitizeAdminClassroomDisciplineConfigPayload(input) {
+  const source = input && typeof input === "object" ? input : {};
+  return {
+    customBehaviors: sanitizeAdminClassroomDisciplineCustomBehaviorsPayload(
+      source.customBehaviors,
+    ),
+    recordsByLesson: sanitizeAdminClassroomDisciplineRecordsByLessonPayload(
+      source.recordsByLesson,
+    ),
+  };
+}
+
 function sanitizeAdminClassroomCoursePlanPayload(input, index = 0) {
   const source = input && typeof input === "object" ? input : {};
   const taskSource = Array.isArray(source.tasks) ? source.tasks : [];
@@ -7766,6 +7913,9 @@ function normalizeAdminConfigDoc(doc) {
       false,
     ),
     teacherCoursePlans: sanitizeAdminClassroomCoursePlansPayload(doc?.teacherCoursePlans),
+    classroomDisciplineConfig: sanitizeAdminClassroomDisciplineConfigPayload(
+      doc?.classroomDisciplineConfig,
+    ),
     seatLayoutsByClass: sanitizeAdminClassroomSeatLayoutsByClassPayload(doc?.seatLayoutsByClass),
     updatedAt: sanitizeIsoDate(doc?.updatedAt),
   };
@@ -13586,6 +13736,7 @@ export {
   sortAdminClassroomCoursePlans,
   sanitizeAdminClassroomCoursePlanPayload,
   sanitizeAdminClassroomCoursePlansPayload,
+  sanitizeAdminClassroomDisciplineConfigPayload,
   sanitizeAdminClassroomSeatLayoutPayload,
   sanitizeAdminClassroomSeatLayoutsByClassPayload,
   createAdminClassroomLessonFileId,

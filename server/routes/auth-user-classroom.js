@@ -399,6 +399,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     sortAdminClassroomCoursePlans,
     sanitizeAdminClassroomCoursePlanPayload,
     sanitizeAdminClassroomCoursePlansPayload,
+    sanitizeAdminClassroomDisciplineConfigPayload,
     sanitizeAdminClassroomSeatLayoutPayload,
     sanitizeAdminClassroomSeatLayoutsByClassPayload,
     createAdminClassroomLessonFileId,
@@ -1765,6 +1766,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       shangguanClassTaskProductImprovementEnabled:
         !!config.shangguanClassTaskProductImprovementEnabled,
       teacherCoursePlans: config.teacherCoursePlans,
+      classroomDisciplineConfig: config.classroomDisciplineConfig,
       seatLayoutsByClass: normalizeSeatLayoutsByClassFromConfig(config),
       updatedAt: config.updatedAt,
     });
@@ -2374,6 +2376,13 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     const seatLayoutsByClass = hasSeatLayoutsPayload
       ? sanitizeAdminClassroomSeatLayoutsByClassPayload(req.body?.seatLayoutsByClass)
       : previousSeatLayoutsByClass;
+    const hasDisciplineConfigPayload = Object.prototype.hasOwnProperty.call(
+      req.body || {},
+      "classroomDisciplineConfig",
+    );
+    const classroomDisciplineConfig = hasDisciplineConfigPayload
+      ? sanitizeAdminClassroomDisciplineConfigPayload(req.body?.classroomDisciplineConfig)
+      : sanitizeAdminClassroomDisciplineConfigPayload(previous.classroomDisciplineConfig);
 
     const previousFileIds = new Set();
     previous.teacherCoursePlans.forEach((lesson) => {
@@ -2431,6 +2440,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
           key: ADMIN_CONFIG_KEY,
           teacherCoursePlans,
           shangguanClassTaskProductImprovementEnabled,
+          classroomDisciplineConfig,
           seatLayoutsByClass,
         },
       },
@@ -2449,6 +2459,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       shangguanClassTaskProductImprovementEnabled:
         !!config.shangguanClassTaskProductImprovementEnabled,
       teacherCoursePlans: config.teacherCoursePlans,
+      classroomDisciplineConfig: config.classroomDisciplineConfig,
       seatLayoutsByClass: normalizeSeatLayoutsByClassFromConfig(config),
       updatedAt: config.updatedAt,
     });

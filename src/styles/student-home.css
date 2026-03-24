@@ -119,6 +119,11 @@
   gap: 8px;
 }
 
+.student-seat-selection-card {
+  display: grid;
+  gap: 14px;
+}
+
 .student-seat-fill-head {
   display: flex;
   align-items: baseline;
@@ -155,6 +160,45 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.student-seat-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 220px));
+  gap: 10px;
+}
+
+.student-seat-picker-field {
+  display: grid;
+  gap: 6px;
+}
+
+.student-seat-picker-field > span {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.student-seat-picker-field select {
+  min-height: 40px;
+  border-radius: 10px;
+  border: 1px solid #cfd9e8;
+  background: #fff;
+  color: #0f172a;
+  font-size: 13px;
+  padding: 0 10px;
+}
+
+.student-seat-picker-field select:focus {
+  border-color: #517dd3;
+  box-shadow: 0 0 0 2px rgba(81, 125, 211, 0.16);
+  outline: none;
+}
+
+.student-seat-picker-field select:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  background: #f2f4f8;
 }
 
 .student-seat-fill-actions select {
@@ -208,6 +252,99 @@
   font-size: 12px;
   color: #64748b;
   line-height: 1.55;
+}
+
+.student-seat-selection-card > small {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.6;
+}
+
+.student-seat-preview-shell {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #d8e3f3;
+  border-radius: 18px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f5f9ff 100%);
+}
+
+.student-seat-stage {
+  justify-self: center;
+  min-width: min(360px, 100%);
+  padding: 12px 18px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #315bb4 0%, #26478f 100%);
+  color: #fff;
+  text-align: center;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  box-shadow: 0 10px 24px rgba(49, 91, 180, 0.2);
+}
+
+.student-seat-preview-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.student-seat-preview-item {
+  min-height: 74px;
+  border-radius: 14px;
+  border: 1px solid #d5e0f0;
+  background: #ffffff;
+  color: #334155;
+  padding: 10px 8px;
+  display: grid;
+  gap: 6px;
+  align-content: center;
+  justify-items: center;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.student-seat-preview-item strong {
+  font-size: 13px;
+  color: #173a79;
+}
+
+.student-seat-preview-item span {
+  font-size: 12px;
+  line-height: 1.35;
+  color: #5b6b81;
+  word-break: break-word;
+}
+
+.student-seat-preview-item.is-selectable:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: #86a7e6;
+  box-shadow: 0 10px 20px rgba(73, 108, 185, 0.12);
+}
+
+.student-seat-preview-item.is-selected {
+  border-color: #1f4a93;
+  background: #eaf2ff;
+  box-shadow: 0 0 0 2px rgba(31, 74, 147, 0.12);
+}
+
+.student-seat-preview-item.is-mine {
+  border-color: #3f7a2b;
+  background: #eef9ea;
+}
+
+.student-seat-preview-item.is-occupied {
+  background: #f7f8fb;
+  border-color: #d7dde7;
+  cursor: not-allowed;
+}
+
+.student-seat-preview-item:disabled {
+  opacity: 1;
 }
 
 .student-homework-modal-overlay {
@@ -496,6 +633,15 @@
   .student-seat-fill-actions select {
     width: 100%;
     min-width: 0;
+  }
+
+  .student-seat-picker-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .student-seat-stage {
+    min-width: 0;
+    width: 100%;
   }
 
   .student-task-item-head {

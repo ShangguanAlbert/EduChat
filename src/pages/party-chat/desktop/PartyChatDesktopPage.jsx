@@ -90,6 +90,8 @@ const DEFAULT_COUNTS = Object.freeze({
   joinedRooms: 0,
 });
 
+const PARTY_MESSAGE_MARKDOWN_REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }]];
+
 const PARTY_MESSAGE_MARKDOWN_COMPONENTS = {
   a: ({ node, ...props }) => {
     void node;
@@ -4853,7 +4855,10 @@ function renderPartyMessageText(content) {
     const normalizedMarkdown = normalizeRenderedMarkdown(markdownText);
     return (
       <div className="party-message-text md-body is-markdown">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={PARTY_MESSAGE_MARKDOWN_COMPONENTS}>
+        <ReactMarkdown
+          remarkPlugins={PARTY_MESSAGE_MARKDOWN_REMARK_PLUGINS}
+          components={PARTY_MESSAGE_MARKDOWN_COMPONENTS}
+        >
           {normalizedMarkdown}
         </ReactMarkdown>
       </div>
