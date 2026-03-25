@@ -703,6 +703,20 @@ function forceHomeworkUploadEnabled(plans) {
   }));
 }
 
+function buildClassroomConfigSnapshot({
+  productTaskEnabled = false,
+  teacherCoursePlans = [],
+  classroomDisciplineConfig = null,
+} = {}) {
+  return JSON.stringify({
+    productTaskEnabled: !!productTaskEnabled,
+    teacherCoursePlans: forceHomeworkUploadEnabled(
+      Array.isArray(teacherCoursePlans) ? teacherCoursePlans : [],
+    ),
+    classroomDisciplineConfig: normalizeDisciplineConfig(classroomDisciplineConfig),
+  });
+}
+
 function buildLessonDraft(lessonIndex = 1) {
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
@@ -758,6 +772,7 @@ export default function TeacherHomePage() {
   const lessonListScrollRef = useRef(null);
   const deleteConfirmInputRef = useRef(null);
   const disciplineStudentSearchInputRef = useRef(null);
+  const classroomConfigSavedSnapshotRef = useRef("");
 
   const [adminToken, setAdminToken] = useState(() => getAdminToken());
   const [loading, setLoading] = useState(true);
@@ -912,6 +927,7 @@ export default function TeacherHomePage() {
   const [exportCenterLoading, setExportCenterLoading] = useState("");
   const [exportCenterError, setExportCenterError] = useState("");
   const [exportCenterNotice, setExportCenterNotice] = useState("");
+  const [classroomSaveNotice, setClassroomSaveNotice] = useState("");
   const [exportCenterDeleteDialogOpen, setExportCenterDeleteDialogOpen] = useState(false);
   const [seatLayoutsByClass, setSeatLayoutsByClass] = useState(() => readSeatLayoutsFromStorage());
   const [seatLayoutsSyncReady, setSeatLayoutsSyncReady] = useState(false);
@@ -933,6 +949,7 @@ export default function TeacherHomePage() {
   const seatLayoutsSyncTimerRef = useRef(null);
   const seatLayoutsLastSavedSnapshotRef = useRef("");
   const exportCenterNoticeTimerRef = useRef(null);
+  const classroomSaveNoticeTimerRef = useRef(null);
   const clearDisciplineStudentKeyword = useCallback(() => {
     setDisciplineStudentKeyword("");
     if (typeof window !== "undefined") {
@@ -1090,10 +1107,16 @@ export default function TeacherHomePage() {
       setProductTaskEnabled(legacyProductEnabled);
       const plans = Array.isArray(plansData?.teacherCoursePlans) ? plansData.teacherCoursePlans : [];
       const normalizedPlans = forceHomeworkUploadEnabled(plans);
-      setTeacherCoursePlans(normalizedPlans);
-      setClassroomDisciplineConfig(
-        normalizeDisciplineConfig(plansData?.classroomDisciplineConfig),
+      const normalizedDisciplineConfig = normalizeDisciplineConfig(
+        plansData?.classroomDisciplineConfig,
       );
+      setTeacherCoursePlans(normalizedPlans);
+      setClassroomDisciplineConfig(normalizedDisciplineConfig);
+      classroomConfigSavedSnapshotRef.current = buildClassroomConfigSnapshot({
+        productTaskEnabled: legacyProductEnabled,
+        teacherCoursePlans: normalizedPlans,
+        classroomDisciplineConfig: normalizedDisciplineConfig,
+      });
       const serverSeatLayouts = normalizeSeatLayoutsByClass(plansData?.seatLayoutsByClass);
       setSeatLayoutsByClass((current) => {
         const hasServerSeatLayouts = Object.keys(serverSeatLayouts).length > 0;
@@ -1191,6 +1214,24 @@ export default function TeacherHomePage() {
       }
     };
   }, [exportCenterNotice]);
+
+  useEffect(() => {
+    if (classroomSaveNoticeTimerRef.current) {
+      window.clearTimeout(classroomSaveNoticeTimerRef.current);
+      classroomSaveNoticeTimerRef.current = null;
+    }
+    if (!classroomSaveNotice) return undefined;
+    classroomSaveNoticeTimerRef.current = window.setTimeout(() => {
+      setClassroomSaveNotice("");
+      classroomSaveNoticeTimerRef.current = null;
+    }, 2000);
+    return () => {
+      if (classroomSaveNoticeTimerRef.current) {
+        window.clearTimeout(classroomSaveNoticeTimerRef.current);
+        classroomSaveNoticeTimerRef.current = null;
+      }
+    };
+  }, [classroomSaveNotice]);
 
   useEffect(() => {
     if (activePanel === "export-center") return;
@@ -1528,27 +1569,35 @@ export default function TeacherHomePage() {
     }
   }
 
+  function confirmLeaveWithUnsavedClassroomConfig() {
+    if (!classroomConfigHasUnsavedChanges) return true;
+    return window.confirm("当前有未保存的课时/任务修改，切换栏目后这些修改将丢失。确定要放弃并离开吗？");
+  }
+
   function onSidebarItemClick(itemKey) {
+    const safeItemKey = String(itemKey || "").trim();
     if (hideClassroomManagePanels && CLASSROOM_MANAGE_PANEL_KEYS.has(String(itemKey || "").trim())) {
       return;
     }
-    if (itemKey === "agent") {
+    if (safeItemKey === String(activePanel || "").trim()) return;
+    if (!confirmLeaveWithUnsavedClassroomConfig()) return;
+    if (safeItemKey === "agent") {
       navigate(withAuthSlot("/admin/agent-settings", activeSlot));
       return;
     }
-    if (itemKey === "workshop") {
+    if (safeItemKey === "workshop") {
       void openTeacherFeature("/chat");
       return;
     }
-    if (itemKey === "image-generation") {
+    if (safeItemKey === "image-generation") {
       void openTeacherFeature("/image-generation");
       return;
     }
-    if (itemKey === "party") {
+    if (safeItemKey === "party") {
       void openTeacherFeature("/party");
       return;
     }
-    setActivePanel(itemKey);
+    setActivePanel(safeItemKey);
   }
 
   function onUpdateSeatManageClassName(nextClassName) {
@@ -2278,6 +2327,29 @@ export default function TeacherHomePage() {
     if (!selectedTask || selectedTask.type !== "link") return [];
     return parseTaskLinkContent(selectedTask.content);
   }, [selectedTask]);
+  const classroomConfigSnapshot = useMemo(
+    () =>
+      buildClassroomConfigSnapshot({
+        productTaskEnabled,
+        teacherCoursePlans,
+        classroomDisciplineConfig,
+      }),
+    [classroomDisciplineConfig, productTaskEnabled, teacherCoursePlans],
+  );
+  const classroomConfigHasUnsavedChanges =
+    classroomConfigSnapshot !== classroomConfigSavedSnapshotRef.current;
+  useEffect(() => {
+    if (!classroomConfigHasUnsavedChanges) return undefined;
+    const handleBeforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+      return "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [classroomConfigHasUnsavedChanges]);
   const selectedHomeworkLesson = useMemo(
     () =>
       homeworkLessons.find(
@@ -3114,6 +3186,7 @@ export default function TeacherHomePage() {
   const persistClassroomConfig = useCallback(async ({ silent = false } = {}) => {
     if (!adminToken || saving) return false;
     if (!silent) setError("");
+    if (!silent) setClassroomSaveNotice("");
     setSaving(true);
     const plansToSave = forceHomeworkUploadEnabled(teacherCoursePlans);
     try {
@@ -3125,10 +3198,11 @@ export default function TeacherHomePage() {
       const savedPlans = Array.isArray(data?.teacherCoursePlans) ? data.teacherCoursePlans : [];
       const normalizedPlans = forceHomeworkUploadEnabled(savedPlans);
       const nextProductEnabled = !!data?.shangguanClassTaskProductImprovementEnabled;
-      setTeacherCoursePlans(normalizedPlans);
-      setClassroomDisciplineConfig(
-        normalizeDisciplineConfig(data?.classroomDisciplineConfig),
+      const normalizedDisciplineConfig = normalizeDisciplineConfig(
+        data?.classroomDisciplineConfig,
       );
+      setTeacherCoursePlans(normalizedPlans);
+      setClassroomDisciplineConfig(normalizedDisciplineConfig);
       if (
         normalizedPlans.length > 0 &&
         !normalizedPlans.some((item) => item?.id === selectedCourseId)
@@ -3137,6 +3211,14 @@ export default function TeacherHomePage() {
       }
       setProductTaskEnabled(nextProductEnabled);
       setClassroomUpdatedAt(String(data?.updatedAt || new Date().toISOString()));
+      classroomConfigSavedSnapshotRef.current = buildClassroomConfigSnapshot({
+        productTaskEnabled: nextProductEnabled,
+        teacherCoursePlans: normalizedPlans,
+        classroomDisciplineConfig: normalizedDisciplineConfig,
+      });
+      if (!silent) {
+        setClassroomSaveNotice("课堂配置已保存。");
+      }
       void loadHomeworkOverview();
       return true;
     } catch (rawError) {
@@ -3182,6 +3264,11 @@ export default function TeacherHomePage() {
       const normalizedPlans = forceHomeworkUploadEnabled(plans);
       setTeacherCoursePlans(normalizedPlans);
       setClassroomUpdatedAt(String(data?.updatedAt || new Date().toISOString()));
+      classroomConfigSavedSnapshotRef.current = buildClassroomConfigSnapshot({
+        productTaskEnabled,
+        teacherCoursePlans: normalizedPlans,
+        classroomDisciplineConfig,
+      });
     } catch (rawError) {
       if (handleAuthError(rawError)) return;
       setError(readErrorMessage(rawError));
@@ -3207,6 +3294,11 @@ export default function TeacherHomePage() {
       const normalizedPlans = forceHomeworkUploadEnabled(plans);
       setTeacherCoursePlans(normalizedPlans);
       setClassroomUpdatedAt(String(data?.updatedAt || new Date().toISOString()));
+      classroomConfigSavedSnapshotRef.current = buildClassroomConfigSnapshot({
+        productTaskEnabled,
+        teacherCoursePlans: normalizedPlans,
+        classroomDisciplineConfig,
+      });
     } catch (rawError) {
       if (handleAuthError(rawError)) return;
       setError(readErrorMessage(rawError));
@@ -4266,6 +4358,9 @@ export default function TeacherHomePage() {
                   </p>
                 </div>
                 <div className="teacher-panel-actions">
+                  {classroomConfigHasUnsavedChanges ? (
+                    <span className="teacher-user-manage-dirty-tag">课时内容未保存</span>
+                  ) : null}
                   <button
                     type="button"
                     className="teacher-ghost-btn teacher-tooltip-btn teacher-action-icon-btn"
@@ -4491,7 +4586,12 @@ export default function TeacherHomePage() {
                   ) : (
                     <div className="teacher-lesson-detail-scroll">
                       <div className="teacher-task-draft-head">
-                        <strong>课程任务</strong>
+                        <div className="teacher-task-draft-title">
+                          <strong>课程任务</strong>
+                          {classroomConfigHasUnsavedChanges ? (
+                            <span className="teacher-task-dirty-tag">未保存</span>
+                          ) : null}
+                        </div>
                         <div className="teacher-task-draft-actions">
                           <PortalSelect
                             className="teacher-add-task-type-select"
@@ -7520,11 +7620,16 @@ export default function TeacherHomePage() {
             </div>
           ) : null}
         </main>
-        {error || exportCenterNotice ? (
+        {error || exportCenterNotice || classroomSaveNotice ? (
           <div className="teacher-home-toast-wrap" aria-live="polite">
             {error ? (
               <p className="teacher-home-alert error teacher-home-toast" role="alert">
                 {error}
+              </p>
+            ) : null}
+            {classroomSaveNotice ? (
+              <p className="teacher-home-alert success teacher-home-toast teacher-home-toast-fade" role="status">
+                {classroomSaveNotice}
               </p>
             ) : null}
             {exportCenterNotice ? (

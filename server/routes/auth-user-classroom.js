@@ -883,10 +883,11 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     const identity = buildStudentSeatIdentity(req.authUser, profile);
     const currentSeatIndex = findSeatIndexByIdentityTokens(currentLayout.seats, identity.tokenSet);
     const incomingSeatIndexRaw = req.body?.seatIndex;
+    const incomingSeatIndexText = String(incomingSeatIndexRaw ?? "").trim();
     const clearAssignment =
       incomingSeatIndexRaw === null ||
-      String(incomingSeatIndexRaw || "").trim() === "" ||
-      String(incomingSeatIndexRaw || "").trim().toLowerCase() === "clear";
+      incomingSeatIndexText === "" ||
+      incomingSeatIndexText.toLowerCase() === "clear";
     const nextSeats = [...currentLayout.seats];
     if (currentSeatIndex >= 0) {
       nextSeats[currentSeatIndex] = "";
