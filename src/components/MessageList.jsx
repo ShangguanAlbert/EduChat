@@ -7,11 +7,15 @@ import {
   ThumbsUp,
 } from "lucide-react";
 import {
+  Children,
+  cloneElement,
   forwardRef,
+  isValidElement,
   memo,
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -20,15 +24,92 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { useSessionStreamDraft } from "../pages/chat/streamDraftStore.js";
+import { normalizeRuntimeSnapshot } from "../pages/chat/chatHelpers.js";
 
 const MARKDOWN_REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }]];
 const REASONING_TOGGLE_ANIMATION_MS = 280;
+const SESSION_SWITCH_SETTLE_MAX_MS = 1200;
+const SESSION_SWITCH_SETTLE_QUIET_MS = 180;
+const CJK_PUNCTUATION_PATTERN = /([，。！？；：、“”‘’（）《》〈〉「」『』【】〔〕…—·]+)/g;
+const TYPOGRAPHY_SKIP_TAGS = new Set(["code", "pre", "kbd", "samp"]);
+
+function wrapCjkPunctuation(text, keyPrefix) {
+  const value = String(text || "");
+  if (!value) return value;
+
+  CJK_PUNCTUATION_PATTERN.lastIndex = 0;
+  if (!CJK_PUNCTUATION_PATTERN.test(value)) return value;
+  CJK_PUNCTUATION_PATTERN.lastIndex = 0;
+
+  return value.split(CJK_PUNCTUATION_PATTERN).map((part, index) => {
+    if (!part) return null;
+    CJK_PUNCTUATION_PATTERN.lastIndex = 0;
+    if (!CJK_PUNCTUATION_PATTERN.test(part)) return part;
+    return (
+      <span className="cjk-punctuation" key={`${keyPrefix}-${index}`}>
+        {part}
+      </span>
+    );
+  });
+}
+
+function renderTypographyNode(node, keyPrefix = "typography") {
+  if (typeof node === "string") {
+    return wrapCjkPunctuation(node, keyPrefix);
+  }
+
+  if (typeof node === "number" || typeof node === "bigint") {
+    return node;
+  }
+
+  if (Array.isArray(node)) {
+    return node.flatMap((child, index) => {
+      const rendered = renderTypographyNode(child, `${keyPrefix}-${index}`);
+      return Array.isArray(rendered) ? rendered : [rendered];
+    });
+  }
+
+  if (!isValidElement(node)) {
+    return node;
+  }
+
+  const tagName = typeof node.type === "string" ? node.type.toLowerCase() : "";
+  if (TYPOGRAPHY_SKIP_TAGS.has(tagName)) {
+    return node;
+  }
+
+  if (Children.count(node.props?.children) === 0) {
+    return node;
+  }
+
+  const nextChildren = Children.map(node.props.children, (child, index) =>
+    renderTypographyNode(child, `${keyPrefix}-${index}`),
+  );
+
+  return cloneElement(node, undefined, nextChildren);
+}
+
+function withTypography(TagName) {
+  return function TypographyTag({ node, children, ...props }) {
+    void node;
+    return <TagName {...props}>{renderTypographyNode(children, TagName)}</TagName>;
+  };
+}
 
 const MARKDOWN_COMPONENTS = {
   a: ({ node, ...props }) => {
     void node;
     return <a {...props} target="_blank" rel="noopener noreferrer" />;
   },
+  p: withTypography("p"),
+  h1: withTypography("h1"),
+  h2: withTypography("h2"),
+  h3: withTypography("h3"),
+  h4: withTypography("h4"),
+  li: withTypography("li"),
+  blockquote: withTypography("blockquote"),
+  td: withTypography("td"),
+  th: withTypography("th"),
 };
 
 function normalizeRenderedMarkdown(value) {
@@ -80,14 +161,23 @@ const MessageList = forwardRef(function MessageList({
 }, ref) {
   const streamDraft = useSessionStreamDraft(activeSessionId);
   const rootRef = useRef(null);
+  const messagesInnerRef = useRef(null);
   const messageNodeMapRef = useRef(new Map());
   const prevStreamingRef = useRef(isStreaming);
   const isAtLatestRef = useRef(true);
   const suppressLatestStateUntilRef = useRef(0);
+  const sessionSwitchSettlingUntilRef = useRef(0);
+  const sessionSwitchReleaseTimerRef = useRef(0);
+  const sessionSwitchMaxTimerRef = useRef(0);
   const reasoningToggleTimerRef = useRef(0);
+  const settleScrollTimerRef = useRef(0);
+  const resizeSettleFrameRef = useRef(0);
   const displayedMessages = useMemo(() => {
-    if (!streamDraft) return messages;
-    return [...messages, streamDraft];
+    const visibleMessages = (Array.isArray(messages) ? messages : []).filter(
+      (message) => !message?.hidden,
+    );
+    if (!streamDraft || streamDraft?.hidden) return visibleMessages;
+    return [...visibleMessages, streamDraft];
   }, [messages, streamDraft]);
   const promptMap = useMemo(
     () => buildNearestPromptMap(displayedMessages),
@@ -128,15 +218,62 @@ const MessageList = forwardRef(function MessageList({
     [onLatestChange],
   );
 
+  const clearSessionSwitchSettling = useCallback(
+    (forceLatestSync = true) => {
+      if (sessionSwitchReleaseTimerRef.current) {
+        window.clearTimeout(sessionSwitchReleaseTimerRef.current);
+        sessionSwitchReleaseTimerRef.current = 0;
+      }
+      if (sessionSwitchMaxTimerRef.current) {
+        window.clearTimeout(sessionSwitchMaxTimerRef.current);
+        sessionSwitchMaxTimerRef.current = 0;
+      }
+      sessionSwitchSettlingUntilRef.current = 0;
+      suppressLatestStateUntilRef.current = 0;
+
+      if (!forceLatestSync) return;
+
+      const root = rootRef.current;
+      if (!root) {
+        setLatestState(true, true);
+        return;
+      }
+
+      const remain = root.scrollHeight - (root.scrollTop + root.clientHeight);
+      setLatestState(remain <= 40, true);
+    },
+    [setLatestState],
+  );
+
+  const scheduleSessionSwitchRelease = useCallback(
+    (delay = SESSION_SWITCH_SETTLE_QUIET_MS) => {
+      if (Date.now() >= sessionSwitchSettlingUntilRef.current) return;
+      if (sessionSwitchReleaseTimerRef.current) {
+        window.clearTimeout(sessionSwitchReleaseTimerRef.current);
+      }
+      sessionSwitchReleaseTimerRef.current = window.setTimeout(() => {
+        sessionSwitchReleaseTimerRef.current = 0;
+        clearSessionSwitchSettling();
+      }, delay);
+    },
+    [clearSessionSwitchSettling],
+  );
+
   const checkIsAtLatest = useCallback(() => {
     const root = rootRef.current;
     if (!root) return true;
 
     const remain = root.scrollHeight - (root.scrollTop + root.clientHeight);
+    if (Date.now() < sessionSwitchSettlingUntilRef.current) {
+      if (remain <= 72) {
+        return true;
+      }
+      clearSessionSwitchSettling(false);
+    }
     const next = remain <= 40;
     setLatestState(next);
     return next;
-  }, [setLatestState]);
+  }, [clearSessionSwitchSettling, setLatestState]);
 
   const jumpToLatest = useCallback(() => {
     const root = rootRef.current;
@@ -185,6 +322,24 @@ const MessageList = forwardRef(function MessageList({
     },
     [displayedMessages.length],
   );
+
+  const settleToLatest = useCallback(() => {
+    if (settleScrollTimerRef.current) {
+      window.clearTimeout(settleScrollTimerRef.current);
+      settleScrollTimerRef.current = 0;
+    }
+
+    requestAnimationFrame(() => {
+      jumpToLatest();
+      requestAnimationFrame(() => {
+        jumpToLatest();
+        settleScrollTimerRef.current = window.setTimeout(() => {
+          settleScrollTimerRef.current = 0;
+          jumpToLatest();
+        }, 140);
+      });
+    });
+  }, [jumpToLatest]);
 
   const prepareForReasoningToggle = useCallback(() => {
     const root = rootRef.current;
@@ -294,30 +449,125 @@ const MessageList = forwardRef(function MessageList({
         window.clearTimeout(reasoningToggleTimerRef.current);
         reasoningToggleTimerRef.current = 0;
       }
+      if (settleScrollTimerRef.current) {
+        window.clearTimeout(settleScrollTimerRef.current);
+        settleScrollTimerRef.current = 0;
+      }
+      if (sessionSwitchReleaseTimerRef.current) {
+        window.clearTimeout(sessionSwitchReleaseTimerRef.current);
+        sessionSwitchReleaseTimerRef.current = 0;
+      }
+      if (sessionSwitchMaxTimerRef.current) {
+        window.clearTimeout(sessionSwitchMaxTimerRef.current);
+        sessionSwitchMaxTimerRef.current = 0;
+      }
+      if (resizeSettleFrameRef.current) {
+        window.cancelAnimationFrame(resizeSettleFrameRef.current);
+        resizeSettleFrameRef.current = 0;
+      }
       nodeMap.clear();
     };
   }, []);
 
+  useLayoutEffect(() => {
+    const settleUntil = Date.now() + SESSION_SWITCH_SETTLE_MAX_MS;
+    sessionSwitchSettlingUntilRef.current = settleUntil;
+    suppressLatestStateUntilRef.current = settleUntil;
+    setLatestState(true, true);
+    if (sessionSwitchReleaseTimerRef.current) {
+      window.clearTimeout(sessionSwitchReleaseTimerRef.current);
+      sessionSwitchReleaseTimerRef.current = 0;
+    }
+    if (sessionSwitchMaxTimerRef.current) {
+      window.clearTimeout(sessionSwitchMaxTimerRef.current);
+      sessionSwitchMaxTimerRef.current = 0;
+    }
+    sessionSwitchMaxTimerRef.current = window.setTimeout(() => {
+      sessionSwitchMaxTimerRef.current = 0;
+      clearSessionSwitchSettling();
+    }, SESSION_SWITCH_SETTLE_MAX_MS);
+    scheduleSessionSwitchRelease();
+  }, [activeSessionId, clearSessionSwitchSettling, scheduleSessionSwitchRelease, setLatestState]);
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const settling = Date.now() < sessionSwitchSettlingUntilRef.current;
+    if (!settling && !isAtLatestRef.current) return;
+    setLatestState(true, true);
+    root.scrollTop = root.scrollHeight;
+    if (settling) {
+      scheduleSessionSwitchRelease();
+    }
+  }, [activeSessionId, displayedMessages, bottomInset, scheduleSessionSwitchRelease, setLatestState]);
+
   useEffect(() => {
-    setLatestState(true);
-    requestAnimationFrame(() => {
-      jumpToLatest();
-    });
-  }, [activeSessionId, jumpToLatest, setLatestState]);
+    const root = rootRef.current;
+    const messagesInner = messagesInnerRef.current;
+    if (!root || !messagesInner || typeof ResizeObserver !== "function") {
+      return undefined;
+    }
+
+    const handleResize = () => {
+      if (resizeSettleFrameRef.current) {
+        window.cancelAnimationFrame(resizeSettleFrameRef.current);
+      }
+      resizeSettleFrameRef.current = window.requestAnimationFrame(() => {
+        resizeSettleFrameRef.current = 0;
+        const currentRoot = rootRef.current;
+        if (!currentRoot) return;
+
+        const settling = Date.now() < sessionSwitchSettlingUntilRef.current;
+        if (settling || isAtLatestRef.current) {
+          setLatestState(true, true);
+          currentRoot.scrollTop = currentRoot.scrollHeight;
+          if (settling) {
+            scheduleSessionSwitchRelease();
+            return;
+          }
+        }
+
+        checkIsAtLatest();
+      });
+    };
+
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(root);
+    resizeObserver.observe(messagesInner);
+
+    return () => {
+      resizeObserver.disconnect();
+      if (resizeSettleFrameRef.current) {
+        window.cancelAnimationFrame(resizeSettleFrameRef.current);
+        resizeSettleFrameRef.current = 0;
+      }
+    };
+  }, [checkIsAtLatest, scheduleSessionSwitchRelease, setLatestState]);
 
   useEffect(() => {
     if (!displayedMessages.length) {
       checkIsAtLatest();
       return;
     }
+    if (Date.now() < sessionSwitchSettlingUntilRef.current) {
+      jumpToLatest();
+      return;
+    }
     if (!isAtLatestRef.current) {
       checkIsAtLatest();
       return;
     }
-    requestAnimationFrame(() => {
+    settleToLatest();
+  }, [displayedMessages, settleToLatest, checkIsAtLatest]);
+
+  useEffect(() => {
+    if (!isAtLatestRef.current) return;
+    if (Date.now() < sessionSwitchSettlingUntilRef.current) {
       jumpToLatest();
-    });
-  }, [displayedMessages, jumpToLatest, checkIsAtLatest]);
+      return;
+    }
+    settleToLatest();
+  }, [bottomInset, jumpToLatest, settleToLatest]);
 
   const closeAskPopover = useCallback(() => {
     setAskPopover((prev) => {
@@ -431,7 +681,7 @@ const MessageList = forwardRef(function MessageList({
         onMouseUp={onMessageAreaMouseUp}
         onKeyUp={onMessageAreaMouseUp}
       >
-        <div className="messages-inner">
+        <div className="messages-inner" ref={messagesInnerRef}>
           {displayedMessages.map((message, index) => {
             const messageKey = message?.id || index;
             return (
@@ -547,6 +797,14 @@ const MessageItem = memo(function MessageItem({
   const [copyStatus, setCopyStatus] = useState("idle");
   const reasoningMarkdown = normalizeRenderedMarkdown(m.reasoning);
   const contentMarkdown = normalizeRenderedMarkdown(m.content);
+  const runtime = normalizeRuntimeSnapshot(m.runtime);
+  const showAssistantActionRow =
+    showAssistantActions && m.role === "assistant" && !m.streaming;
+  const showRuntimeDebug =
+    m.role === "assistant" &&
+    runtime?.usage &&
+    Number.isFinite(runtime.usage.total_tokens);
+  const showMessageFooter = showAssistantActionRow || showRuntimeDebug;
 
   useEffect(() => {
     if (copyStatus === "idle") return undefined;
@@ -720,72 +978,84 @@ const MessageItem = memo(function MessageItem({
           <div className="streaming-placeholder">正在回答中...</div>
         ) : null}
 
-        {showAssistantActions && m.role === "assistant" && !m.streaming && (
-          <div className="msg-actions">
-            <button
-              type="button"
-              className={`msg-action-btn ${m.feedback === "up" ? "active" : ""}`}
-              title="点赞"
-              aria-label="点赞"
-              onClick={() => onAssistantFeedback?.(m.id, "up")}
-              disabled={isStreaming}
-            >
-              <ThumbsUp size={16} />
-            </button>
+        {showMessageFooter && (
+          <div className="msg-footer">
+            {showAssistantActionRow && (
+              <div className="msg-actions">
+                <button
+                  type="button"
+                  className={`msg-action-btn ${m.feedback === "up" ? "active" : ""}`}
+                  title="点赞"
+                  aria-label="点赞"
+                  onClick={() => onAssistantFeedback?.(m.id, "up")}
+                  disabled={isStreaming}
+                >
+                  <ThumbsUp size={16} />
+                </button>
 
-            <button
-              type="button"
-              className={`msg-action-btn ${m.feedback === "down" ? "active" : ""}`}
-              title="答得不好"
-              aria-label="答得不好"
-              onClick={() => onAssistantFeedback?.(m.id, "down")}
-              disabled={isStreaming}
-            >
-              <ThumbsDown size={16} />
-            </button>
+                <button
+                  type="button"
+                  className={`msg-action-btn ${m.feedback === "down" ? "active" : ""}`}
+                  title="答得不好"
+                  aria-label="答得不好"
+                  onClick={() => onAssistantFeedback?.(m.id, "down")}
+                  disabled={isStreaming}
+                >
+                  <ThumbsDown size={16} />
+                </button>
 
-            <button
-              type="button"
-              className="msg-action-btn"
-              title="重新回答"
-              aria-label="重新回答"
-              onClick={() => onAssistantRegenerate?.(m.id, promptMessageId)}
-              disabled={isStreaming || !promptMessageId}
-            >
-              <RotateCcw size={16} />
-            </button>
+                <button
+                  type="button"
+                  className="msg-action-btn"
+                  title="重新回答"
+                  aria-label="重新回答"
+                  onClick={() => onAssistantRegenerate?.(m.id, promptMessageId)}
+                  disabled={isStreaming || !promptMessageId}
+                >
+                  <RotateCcw size={16} />
+                </button>
 
-            <button
-              type="button"
-              className={`msg-action-btn ${copyStatus === "copied" ? "active" : ""} ${copyStatus === "failed" ? "is-error" : ""}`}
-              title={
-                disableAssistantCopy
-                  ? "复制已禁用"
-                  : copyStatus === "copied"
-                    ? "已复制"
-                    : copyStatus === "failed"
-                      ? "复制失败"
-                      : "复制"
-              }
-              aria-label="复制"
-              onClick={copyContent}
-              disabled={isStreaming || disableAssistantCopy}
-            >
-              <Copy size={16} />
-            </button>
+                <button
+                  type="button"
+                  className={`msg-action-btn ${copyStatus === "copied" ? "active" : ""} ${copyStatus === "failed" ? "is-error" : ""}`}
+                  title={
+                    disableAssistantCopy
+                      ? "复制已禁用"
+                      : copyStatus === "copied"
+                        ? "已复制"
+                        : copyStatus === "failed"
+                          ? "复制失败"
+                          : "复制"
+                  }
+                  aria-label="复制"
+                  onClick={copyContent}
+                  disabled={isStreaming || disableAssistantCopy}
+                >
+                  <Copy size={16} />
+                </button>
 
-            {typeof onAssistantForward === "function" ? (
-              <button
-                type="button"
-                className="msg-action-btn"
-                title="转发到左侧对话"
-                aria-label="转发到左侧对话"
-                onClick={() => onAssistantForward?.(m.id)}
-                disabled={isStreaming}
-              >
-                <Forward size={16} />
-              </button>
-            ) : null}
+                {typeof onAssistantForward === "function" ? (
+                  <button
+                    type="button"
+                    className="msg-action-btn"
+                    title="转发到左侧对话"
+                    aria-label="转发到左侧对话"
+                    onClick={() => onAssistantForward?.(m.id)}
+                    disabled={isStreaming}
+                  >
+                    <Forward size={16} />
+                  </button>
+                ) : null}
+              </div>
+            )}
+
+            {showRuntimeDebug && (
+              <div className="msg-runtime-debug">
+                <span className="msg-runtime-text">
+                  {formatTokenCount(runtime.usage.total_tokens)} tokens
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -823,6 +1093,12 @@ function buildNearestPromptMap(messages) {
   });
 
   return map;
+}
+
+function formatTokenCount(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "-";
+  return Math.max(0, Math.round(numeric)).toLocaleString("zh-CN");
 }
 
 function getElementFromNode(node) {

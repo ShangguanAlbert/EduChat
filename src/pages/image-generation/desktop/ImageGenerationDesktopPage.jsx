@@ -644,6 +644,11 @@ export default function ImageGenerationDesktopPage({
     }
   }, [location.search]);
   const backButtonLabel = returnTarget === "teacher-home" ? "返回教师主页" : "返回";
+  const backButtonStatusLabel = useMemo(() => {
+    if (returnTarget === "teacher-home") return "教师端";
+    if (returnTarget === "mode-selection") return "课时页";
+    return "对话";
+  }, [returnTarget]);
   const termsContent = IMAGE_TERMS_CONTENT;
   const termsHash = IMAGE_TERMS_HASH;
   const termsLocked = !termsAgreed;
@@ -955,7 +960,11 @@ export default function ImageGenerationDesktopPage({
     }
     const storedContext = loadImageReturnContext();
     const context = returnContextFromState || storedContext || null;
-    navigate(withAuthSlot("/chat"), {
+    const safeSessionId = String(context?.sessionId || "").trim();
+    const chatPath = safeSessionId
+      ? `/c/${encodeURIComponent(safeSessionId)}`
+      : "/c";
+    navigate(withAuthSlot(chatPath), {
       state: {
         fromImageGeneration: true,
         restoreContext: context,
@@ -1538,39 +1547,54 @@ export default function ImageGenerationDesktopPage({
 
       <form className={`image-workspace image-ideogram-layout${termsLocked ? " is-locked" : ""}`} onSubmit={handleGenerate}>
         <aside className="image-ideogram-sidebar">
-          <div className="image-ideogram-brand">
-            <Sparkles size={18} />
-            <span>图片工坊</span>
+          <div className="image-ideogram-sidebar-top">
+            <div className="image-ideogram-brand-row">
+              <div className="image-ideogram-brand-mark" aria-hidden="true">
+                <Sparkles size={18} />
+              </div>
+              <div className="image-ideogram-brand-copy">
+                <strong className="image-ideogram-brand-title">图片工坊</strong>
+                <span className="image-ideogram-brand-subtitle">图像生成与灵感工作台</span>
+              </div>
+            </div>
           </div>
 
-          <nav className="image-ideogram-nav" aria-label="图片生成功能导航">
-            {LIBRARY_VIEWS.map((view) => {
-              const Icon = view.icon;
-              const active = libraryView === view.key;
-              return (
-                <button
-                  key={view.key}
-                  type="button"
-                  className={`image-ideogram-nav-btn${active ? " is-active" : ""}`}
-                  onClick={() => navigateLibraryView(view.key)}
-                >
-                  <Icon size={16} />
-                  <span>{view.label}</span>
-                </button>
-              );
-            })}
-          </nav>
+          <div className="image-ideogram-sidebar-list">
+            <div className="image-ideogram-workbench">
+              <div className="image-ideogram-section-label">工作台</div>
+              <nav className="image-ideogram-nav" aria-label="图片生成功能导航">
+                {LIBRARY_VIEWS.map((view) => {
+                  const Icon = view.icon;
+                  const active = libraryView === view.key;
+                  return (
+                    <button
+                      key={view.key}
+                      type="button"
+                      className={`image-ideogram-nav-btn${active ? " is-active" : ""}`}
+                      onClick={() => navigateLibraryView(view.key)}
+                    >
+                      <Icon size={18} />
+                      <span>{view.label}</span>
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+          </div>
 
-          <button
-            type="button"
-            className="image-side-back-btn"
-            onClick={handleBackToChat}
-            title={backButtonLabel}
-            aria-label={backButtonLabel}
-          >
-            <ArrowLeft size={18} />
-            <span>{backButtonLabel}</span>
-          </button>
+          <div className="image-ideogram-sidebar-bottom">
+            <button
+              type="button"
+              className="image-side-back-btn"
+              onClick={handleBackToChat}
+              title={backButtonLabel}
+              aria-label={backButtonLabel}
+            >
+              <ArrowLeft size={18} />
+              <span>{backButtonLabel}</span>
+              <span className="image-side-back-status">{backButtonStatusLabel}</span>
+            </button>
+          </div>
         </aside>
 
         <section className="image-ideogram-main">

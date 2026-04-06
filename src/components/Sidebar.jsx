@@ -1,9 +1,18 @@
 import {
+  CheckSquare,
+  ChevronDown,
+  ChevronRight,
+  Folder,
   FolderPlus,
+  FolderOpen,
   ImagePlus,
   MessageSquarePlus,
   MessagesSquare,
+  MoreHorizontal,
+  Pencil,
+  Pin,
   Settings,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -27,11 +36,14 @@ export default function Sidebar({
   onRenameSession,
   onToggleSessionPin,
   onCreateGroup,
+  onRenameGroup,
   onDeleteGroup,
   hasUserInfo = false,
   onOpenUserInfoModal,
+  sessionActionsDisabled = false,
 }) {
   const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [editingGroupId, setEditingGroupId] = useState("");
   const [groupName, setGroupName] = useState("");
   const [groupDesc, setGroupDesc] = useState("");
   const [nameError, setNameError] = useState("");
@@ -44,12 +56,17 @@ export default function Sidebar({
   const [moveMenuSessionId, setMoveMenuSessionId] = useState("");
   const [menuAnchor, setMenuAnchor] = useState(null);
   const [closingMenuState, setClosingMenuState] = useState(null);
+  const [projectMenuGroupId, setProjectMenuGroupId] = useState("");
+  const [projectsSectionCollapsed, setProjectsSectionCollapsed] =
+    useState(false);
+  const [recentSectionCollapsed, setRecentSectionCollapsed] = useState(false);
 
   const [batchMode, setBatchMode] = useState(false);
   const [selectedSessionIds, setSelectedSessionIds] = useState([]);
   const [showBatchMove, setShowBatchMove] = useState(false);
   const [enteringSessionIds, setEnteringSessionIds] = useState([]);
   const [exitingSessionIds, setExitingSessionIds] = useState([]);
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState({});
   const expectInsertAnimationRef = useRef(false);
   const previousSessionIdsRef = useRef(
     new Set(sessions.map((item) => item.id)),
@@ -128,6 +145,10 @@ export default function Sidebar({
     () => new Set(exitingSessionIds),
     [exitingSessionIds],
   );
+  const activeGroupId = useMemo(() => {
+    const activeSession = sessions.find((session) => session.id === activeId);
+    return String(activeSession?.groupId || "").trim();
+  }, [activeId, sessions]);
   const menuPosition = useMemo(() => {
     if (!renderedMenuSessionId || !renderedMenuAnchor) {
       return { top: 0, left: 0 };
@@ -135,8 +156,8 @@ export default function Sidebar({
 
     const padding = 8;
     const gap = 6;
-    const menuWidth = renderedMoveMenuSessionId === renderedMenuSessionId ? 220 : 190;
-    const menuHeight = renderedMoveMenuSessionId === renderedMenuSessionId ? 320 : 210;
+    const menuWidth = 184;
+    const menuHeight = 210;
 
     const left = Math.max(
       padding,
@@ -153,16 +174,40 @@ export default function Sidebar({
       : renderedMenuAnchor.bottom + gap;
 
     return { top, left };
-  }, [renderedMenuSessionId, renderedMenuAnchor, renderedMoveMenuSessionId]);
+  }, [renderedMenuSessionId, renderedMenuAnchor]);
+  const menuShouldOpenSubmenuLeft = useMemo(() => {
+    const padding = 8;
+    const gap = 4;
+    const menuWidth = 184;
+    const submenuWidth = 192;
+    return (
+      menuPosition.left + menuWidth + gap + submenuWidth >
+      window.innerWidth - padding
+    );
+  }, [menuPosition.left]);
 
   function resetCreateGroupForm() {
+    setEditingGroupId("");
     setGroupName("");
     setGroupDesc("");
     setNameError("");
   }
 
   function openCreateGroup() {
+    if (sessionActionsDisabled) return;
+    setProjectMenuGroupId("");
     resetCreateGroupForm();
+    setShowCreateGroup(true);
+  }
+
+  function openRenameGroup(group) {
+    const safeGroupId = String(group?.id || "").trim();
+    if (!safeGroupId || sessionActionsDisabled) return;
+    closeProjectMenu();
+    setEditingGroupId(safeGroupId);
+    setGroupName(String(group?.name || "").trim());
+    setGroupDesc(String(group?.description || "").trim());
+    setNameError("");
     setShowCreateGroup(true);
   }
 
@@ -195,6 +240,10 @@ export default function Sidebar({
     setMenuAnchor(null);
   }
 
+  function closeProjectMenu() {
+    setProjectMenuGroupId("");
+  }
+
   function markSessionsExiting(sessionIds) {
     const valid = new Set(sessions.map((item) => item.id));
     const target = Array.from(
@@ -221,6 +270,7 @@ export default function Sidebar({
   }
 
   function triggerDeleteSession(sessionId) {
+    if (sessionActionsDisabled) return;
     const sid = String(sessionId || "").trim();
     if (!sid || exitingSessionIdSet.has(sid)) return;
     const target = markSessionsExiting([sid]);
@@ -235,11 +285,13 @@ export default function Sidebar({
   }
 
   function handleNewChatClick() {
+    if (sessionActionsDisabled) return;
     expectInsertAnimationRef.current = true;
     onNewChat?.();
   }
 
   function toggleChatMenu(sessionId, triggerEl) {
+    closeProjectMenu();
     if (menuSessionId === sessionId) {
       closeChatMenu();
       return;
@@ -255,6 +307,15 @@ export default function Sidebar({
     });
     setMenuSessionId(sessionId);
     setMoveMenuSessionId("");
+  }
+
+  function toggleProjectMenu(groupId) {
+    const safeGroupId = String(groupId || "").trim();
+    if (!safeGroupId) return;
+    closeChatMenu();
+    setProjectMenuGroupId((current) =>
+      current === safeGroupId ? "" : safeGroupId,
+    );
   }
 
   function startRename(session) {
@@ -286,11 +347,13 @@ export default function Sidebar({
   }
 
   function moveToGroup(sessionId, groupId) {
+    if (sessionActionsDisabled) return;
     onMoveSessionToGroup?.(sessionId, groupId || null);
     closeChatMenu();
   }
 
   function toggleBatchSelect(sessionId) {
+    if (sessionActionsDisabled) return;
     setSelectedSessionIds((prev) => {
       if (prev.includes(sessionId))
         return prev.filter((id) => id !== sessionId);
@@ -299,6 +362,7 @@ export default function Sidebar({
   }
 
   function enterBatchMode(startSessionId) {
+    if (sessionActionsDisabled) return;
     setBatchMode(true);
     setSelectedSessionIds([startSessionId]);
     setShowBatchMove(false);
@@ -312,6 +376,7 @@ export default function Sidebar({
   }
 
   function handleBatchDelete() {
+    if (sessionActionsDisabled) return;
     if (!selectedSessionIdList.length) return;
     const targetIds = markSessionsExiting(selectedSessionIdList);
     if (targetIds.length === 0) {
@@ -329,30 +394,38 @@ export default function Sidebar({
   }
 
   function handleBatchMove(groupId) {
+    if (sessionActionsDisabled) return;
     if (!selectedSessionIdList.length) return;
     onBatchMoveSessionsToGroup?.(selectedSessionIdList, groupId || null);
     exitBatchMode();
   }
 
   useEffect(() => {
-    if (!menuSessionId) return;
+    if (!menuSessionId && !projectMenuGroupId) return;
 
     function onDocMouseDown(e) {
       const t = e.target;
       if (
         t.closest(".sidebar-row-menu") ||
-        t.closest(".sidebar-item-menu-trigger")
+        t.closest(".sidebar-item-menu-trigger") ||
+        t.closest(".sidebar-project-menu") ||
+        t.closest(".sidebar-project-menu-trigger")
       )
         return;
       closeChatMenu();
+      closeProjectMenu();
     }
 
     function onDocKeyDown(e) {
-      if (e.key === "Escape") closeChatMenu();
+      if (e.key === "Escape") {
+        closeChatMenu();
+        closeProjectMenu();
+      }
     }
 
     function onWindowChanged() {
       closeChatMenu();
+      closeProjectMenu();
     }
 
     document.addEventListener("mousedown", onDocMouseDown);
@@ -366,7 +439,32 @@ export default function Sidebar({
       window.removeEventListener("resize", onWindowChanged);
       window.removeEventListener("scroll", onWindowChanged, true);
     };
-  }, [menuSessionId]);
+  }, [menuSessionId, projectMenuGroupId]);
+
+  useEffect(() => {
+    setCollapsedProjectIds((prev) => {
+      const next = {};
+      let changed = false;
+
+      groups.forEach((group) => {
+        const groupId = String(group?.id || "").trim();
+        if (!groupId) return;
+        const shouldExpand = groupId === activeGroupId;
+        const previousValue = Object.prototype.hasOwnProperty.call(prev, groupId)
+          ? !!prev[groupId]
+          : !shouldExpand;
+        const nextValue = shouldExpand ? false : previousValue;
+        next[groupId] = nextValue;
+        if (previousValue !== nextValue) changed = true;
+      });
+
+      if (Object.keys(prev).length !== Object.keys(next).length) {
+        changed = true;
+      }
+
+      return changed ? next : prev;
+    });
+  }, [activeGroupId, groups]);
 
   useEffect(() => {
     const previousIds = previousSessionIdsRef.current;
@@ -430,7 +528,7 @@ export default function Sidebar({
             className={`sidebar-check ${isChecked ? "checked" : ""}`}
             type="button"
             aria-label={`${isChecked ? "取消" : "选择"}聊天 ${session.title}`}
-            disabled={isExiting}
+            disabled={isExiting || sessionActionsDisabled}
             onClick={() => toggleBatchSelect(session.id)}
           >
             {isChecked ? "✓" : ""}
@@ -440,7 +538,7 @@ export default function Sidebar({
         <button
           className={`sidebar-item ${session.id === activeId ? "active" : ""}`}
           onClick={() => {
-            if (isExiting) return;
+            if (isExiting || sessionActionsDisabled) return;
             if (batchMode) {
               toggleBatchSelect(session.id);
               return;
@@ -448,7 +546,7 @@ export default function Sidebar({
             onSelect(session.id);
           }}
           title={session.title}
-          disabled={isExiting}
+          disabled={isExiting || sessionActionsDisabled}
         >
           <span className="sidebar-item-title">{session.title}</span>
           {session.pinned && <span className="sidebar-item-pin">置顶</span>}
@@ -461,7 +559,7 @@ export default function Sidebar({
               type="button"
               aria-label={`聊天菜单 ${session.title}`}
               title="更多操作"
-              disabled={isExiting}
+              disabled={isExiting || sessionActionsDisabled}
               onClick={(e) => toggleChatMenu(session.id, e.currentTarget)}
             >
               ⋯
@@ -476,54 +574,80 @@ export default function Sidebar({
                   style={{ top: menuPosition.top, left: menuPosition.left }}
                 >
                   <button
-                    className="sidebar-row-menu-item danger"
-                    type="button"
-                    onClick={() => {
-                      triggerDeleteSession(renderedMenuSession.id);
-                    }}
-                  >
-                    删除
-                  </button>
-
-                  <button
-                    className="sidebar-row-menu-item"
-                    type="button"
-                    onClick={() =>
-                      setMoveMenuSessionId((id) =>
-                        id === renderedMenuSession.id
-                          ? ""
-                          : renderedMenuSession.id,
-                      )
-                    }
-                  >
-                    把聊天移动到某个组
-                  </button>
-
-                  {renderedMoveMenuSessionId === renderedMenuSession.id && (
-                    <div className="sidebar-row-submenu">
-                      {groupMoveOptions.map((g) => (
-                        <button
-                          key={g.id || "ungrouped"}
-                          className="sidebar-row-submenu-item"
-                          type="button"
-                          disabled={(renderedMenuSession.groupId || "") === g.id}
-                          onClick={() =>
-                            moveToGroup(renderedMenuSession.id, g.id)
-                          }
-                        >
-                          {g.name}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-
-                  <button
                     className="sidebar-row-menu-item"
                     type="button"
                     onClick={() => startRename(renderedMenuSession)}
                   >
-                    重命名
+                    <span className="sidebar-row-menu-icon" aria-hidden="true">
+                      <Pencil size={18} />
+                    </span>
+                    <span>重命名</span>
                   </button>
+
+                  <div
+                    className="sidebar-row-menu-item-wrap"
+                    onMouseEnter={() =>
+                      setMoveMenuSessionId(renderedMenuSession.id)
+                    }
+                    onMouseLeave={() => setMoveMenuSessionId("")}
+                    onFocusCapture={() =>
+                      setMoveMenuSessionId(renderedMenuSession.id)
+                    }
+                    onBlurCapture={(e) => {
+                      const nextFocused = e.relatedTarget;
+                      if (
+                        nextFocused instanceof Node &&
+                        e.currentTarget.contains(nextFocused)
+                      ) {
+                        return;
+                      }
+                      setMoveMenuSessionId("");
+                    }}
+                  >
+                    <button
+                      className={`sidebar-row-menu-item${renderedMoveMenuSessionId === renderedMenuSession.id ? " is-open" : ""}`}
+                      type="button"
+                    >
+                      <span className="sidebar-row-menu-icon" aria-hidden="true">
+                        <Folder size={18} />
+                      </span>
+                      <span>移至项目</span>
+                      <span
+                        className="sidebar-row-menu-caret"
+                        aria-hidden="true"
+                      >
+                        <ChevronRight size={18} />
+                      </span>
+                    </button>
+
+                    {renderedMoveMenuSessionId === renderedMenuSession.id && (
+                      <div
+                        className={`sidebar-row-submenu${
+                          menuShouldOpenSubmenuLeft ? " is-left" : ""
+                        }`}
+                      >
+                        {groupMoveOptions.map((g) => (
+                          <button
+                            key={g.id || "ungrouped"}
+                            className="sidebar-row-submenu-item"
+                            type="button"
+                            disabled={(renderedMenuSession.groupId || "") === g.id}
+                            onClick={() =>
+                              moveToGroup(renderedMenuSession.id, g.id)
+                            }
+                          >
+                            <span
+                              className="sidebar-row-submenu-icon"
+                              aria-hidden="true"
+                            >
+                              <Folder size={18} />
+                            </span>
+                            <span>{g.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
 
                   <button
                     className="sidebar-row-menu-item"
@@ -533,7 +657,12 @@ export default function Sidebar({
                       closeChatMenu();
                     }}
                   >
-                    {renderedMenuSession.pinned ? "取消置顶" : "置顶"}
+                    <span className="sidebar-row-menu-icon" aria-hidden="true">
+                      <Pin size={18} />
+                    </span>
+                    <span>
+                      {renderedMenuSession.pinned ? "取消置顶" : "置顶聊天"}
+                    </span>
                   </button>
 
                   <button
@@ -541,7 +670,25 @@ export default function Sidebar({
                     type="button"
                     onClick={() => enterBatchMode(renderedMenuSession.id)}
                   >
-                    批量选择
+                    <span className="sidebar-row-menu-icon" aria-hidden="true">
+                      <CheckSquare size={18} />
+                    </span>
+                    <span>批量选择</span>
+                  </button>
+
+                  <div className="sidebar-row-menu-divider" />
+
+                  <button
+                    className="sidebar-row-menu-item danger"
+                    type="button"
+                    onClick={() => {
+                      triggerDeleteSession(renderedMenuSession.id);
+                    }}
+                  >
+                    <span className="sidebar-row-menu-icon" aria-hidden="true">
+                      <Trash2 size={18} />
+                    </span>
+                    <span>删除</span>
                   </button>
                 </div>,
                 document.body,
@@ -552,19 +699,33 @@ export default function Sidebar({
     );
   }
 
+  function toggleProjectCollapse(groupId) {
+    const safeGroupId = String(groupId || "").trim();
+    if (!safeGroupId) return;
+    setCollapsedProjectIds((prev) => ({
+      ...prev,
+      [safeGroupId]: !prev[safeGroupId],
+    }));
+  }
+
   function handleCreateGroupSubmit(e) {
     e.preventDefault();
     const name = groupName.trim();
 
     if (!name) {
-      setNameError("请输入分组名称");
+      setNameError("请输入项目名称");
       return;
     }
 
-    onCreateGroup?.({
+    const payload = {
       name,
       description: groupDesc.trim(),
-    });
+    };
+    if (editingGroupId) {
+      onRenameGroup?.(editingGroupId, payload);
+    } else {
+      onCreateGroup?.(payload);
+    }
 
     closeCreateGroup();
   }
@@ -580,7 +741,11 @@ export default function Sidebar({
           </div>
         </div>
         <div className="sidebar-actions sidebar-actions-primary">
-          <button className="sidebar-new" onClick={handleNewChatClick}>
+          <button
+            className="sidebar-new"
+            onClick={handleNewChatClick}
+            disabled={sessionActionsDisabled}
+          >
             <MessageSquarePlus size={17} />
             <span>新聊天</span>
           </button>
@@ -614,7 +779,7 @@ export default function Sidebar({
               <button
                 className="sidebar-batch-btn danger"
                 type="button"
-                disabled={!selectedSessionIdList.length}
+                disabled={!selectedSessionIdList.length || sessionActionsDisabled}
                 onClick={handleBatchDelete}
               >
                 删除所选
@@ -623,10 +788,10 @@ export default function Sidebar({
               <button
                 className="sidebar-batch-btn"
                 type="button"
-                disabled={!selectedSessionIdList.length}
+                disabled={!selectedSessionIdList.length || sessionActionsDisabled}
                 onClick={() => setShowBatchMove((v) => !v)}
               >
-                移动到组
+                移动到项目
               </button>
 
               <button
@@ -660,80 +825,157 @@ export default function Sidebar({
         className="sidebar-list"
         onScroll={() => {
           closeChatMenu();
+          closeProjectMenu();
           setShowBatchMove(false);
         }}
       >
         <section className="sidebar-list-section">
-          <div className="sidebar-section-label">对话</div>
-          <section className="sidebar-group">
-            <div className="sidebar-group-head">
-              <div className="sidebar-group-title-wrap">
-                <p className="sidebar-group-name">未分组</p>
-              </div>
-            </div>
+          <div className="sidebar-section-head">
+            <button
+              className="sidebar-section-toggle"
+              type="button"
+              aria-expanded={!projectsSectionCollapsed}
+              onClick={() =>
+                setProjectsSectionCollapsed((current) => !current)
+              }
+            >
+              <span className="sidebar-section-label">项目</span>
+              <span className="sidebar-section-toggle-icon" aria-hidden="true">
+                {projectsSectionCollapsed ? (
+                  <ChevronRight size={15} />
+                ) : (
+                  <ChevronDown size={15} />
+                )}
+              </span>
+            </button>
+          </div>
+          {!projectsSectionCollapsed && !batchMode && (
+            <button
+              className="sidebar-project-create"
+              type="button"
+              onClick={openCreateGroup}
+              disabled={sessionActionsDisabled}
+            >
+              <FolderPlus size={17} />
+              <span>新项目</span>
+            </button>
+          )}
 
-            <div className="sidebar-group-list">
-              {grouped.ungrouped.length > 0 ? (
-                grouped.ungrouped.map((s) => renderSessionRow(s))
-              ) : (
-                <p className="sidebar-empty-group">暂无未分组聊天</p>
-              )}
-            </div>
-          </section>
+          {!projectsSectionCollapsed &&
+            grouped.groups.map((g) => {
+              const isCollapsed = !!collapsedProjectIds[g.id];
+              const isProjectActive = g.sessions.some(
+                (session) => session.id === activeId,
+              );
+
+              return (
+                <section key={g.id} className="sidebar-project">
+                  <div className="sidebar-project-row">
+                    <button
+                      className={`sidebar-project-toggle ${isProjectActive ? "active" : ""}`}
+                      type="button"
+                      onClick={() => toggleProjectCollapse(g.id)}
+                    >
+                      <span className="sidebar-project-chevron" aria-hidden="true">
+                        {isCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                      </span>
+                      <span className="sidebar-project-icon" aria-hidden="true">
+                        {isCollapsed ? <Folder size={17} /> : <FolderOpen size={17} />}
+                      </span>
+                      <span className="sidebar-project-name">{g.name}</span>
+                      {g.sessions.length > 0 ? (
+                        <span className="sidebar-project-count">{g.sessions.length}</span>
+                      ) : null}
+                    </button>
+
+                    {!batchMode && (
+                      <div className="sidebar-project-menu-wrap">
+                        <button
+                          className="sidebar-project-menu-trigger"
+                          type="button"
+                          aria-label={`项目菜单 ${g.name}`}
+                          aria-expanded={projectMenuGroupId === g.id}
+                          title="更多操作"
+                          disabled={sessionActionsDisabled}
+                          onClick={() => toggleProjectMenu(g.id)}
+                        >
+                          <MoreHorizontal size={16} />
+                        </button>
+
+                        {projectMenuGroupId === g.id ? (
+                          <div className="sidebar-project-menu" role="menu">
+                            <button
+                              className="sidebar-row-menu-item"
+                              type="button"
+                              onClick={() => openRenameGroup(g)}
+                            >
+                              重命名项目
+                            </button>
+                            <button
+                              className="sidebar-row-menu-item danger"
+                              type="button"
+                              onClick={() => {
+                                closeProjectMenu();
+                                onDeleteGroup?.(g.id);
+                              }}
+                            >
+                              删除项目
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+
+                  {!isCollapsed ? (
+                    <div className="sidebar-project-session-list">
+                      {g.description ? (
+                        <p className="sidebar-group-desc" title={g.description}>
+                          {g.description}
+                        </p>
+                      ) : null}
+                      {g.sessions.length === 0 ? (
+                        <p className="sidebar-empty-group">此项目暂无聊天</p>
+                      ) : (
+                        g.sessions.map((s) => renderSessionRow(s))
+                      )}
+                    </div>
+                  ) : null}
+                </section>
+              );
+            })}
         </section>
 
         <section className="sidebar-list-section">
           <div className="sidebar-section-head">
-            <div className="sidebar-section-label">分组</div>
-            {!batchMode && (
-              <button
-                className="sidebar-section-action"
-                type="button"
-                onClick={openCreateGroup}
-              >
-                <FolderPlus size={14} />
-                <span>新建</span>
-              </button>
-            )}
+            <button
+              className="sidebar-section-toggle"
+              type="button"
+              aria-expanded={!recentSectionCollapsed}
+              onClick={() =>
+                setRecentSectionCollapsed((current) => !current)
+              }
+            >
+              <span className="sidebar-section-label">最近</span>
+              <span className="sidebar-section-toggle-icon" aria-hidden="true">
+                {recentSectionCollapsed ? (
+                  <ChevronRight size={15} />
+                ) : (
+                  <ChevronDown size={15} />
+                )}
+              </span>
+            </button>
           </div>
-
-          {grouped.groups.length > 0 ? (
-            grouped.groups.map((g) => (
-              <section key={g.id} className="sidebar-group">
-                <div className="sidebar-group-head">
-                  <div className="sidebar-group-title-wrap">
-                    <p className="sidebar-group-name">{g.name}</p>
-                    {g.description && (
-                      <p className="sidebar-group-desc" title={g.description}>
-                        {g.description}
-                      </p>
-                    )}
-                  </div>
-
-                  {!batchMode && (
-                    <button
-                      className="sidebar-group-delete"
-                      type="button"
-                      onClick={() => onDeleteGroup?.(g.id)}
-                    >
-                      删除组
-                    </button>
-                  )}
-                </div>
-
-                <div className="sidebar-group-list">
-                  {g.sessions.length === 0 && (
-                    <p className="sidebar-empty-group">此分组暂无聊天</p>
-                  )}
-
-                  {g.sessions.map((s) => renderSessionRow(s))}
-                </div>
-              </section>
-            ))
-          ) : (
-            <p className="sidebar-empty-group sidebar-empty-groups">
-              还没有分组，先开始聊天，之后再整理也不迟。
-            </p>
+          {!recentSectionCollapsed && (
+            <section className="sidebar-group">
+              <div className="sidebar-group-list">
+                {grouped.ungrouped.length > 0 ? (
+                  grouped.ungrouped.map((s) => renderSessionRow(s))
+                ) : (
+                  <p className="sidebar-empty-group">暂无最近对话</p>
+                )}
+              </div>
+            </section>
           )}
         </section>
       </div>
@@ -764,16 +1006,18 @@ export default function Sidebar({
             className="group-modal"
             role="dialog"
             aria-modal="true"
-            aria-label="创建分组"
+            aria-label={editingGroupId ? "重命名项目" : "新建项目"}
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="group-modal-title">创建分组</h3>
+            <h3 className="group-modal-title">
+              {editingGroupId ? "重命名项目" : "新建项目"}
+            </h3>
             <form
               onSubmit={handleCreateGroupSubmit}
               className="group-modal-form"
             >
               <label className="group-modal-label" htmlFor="group-name-input">
-                分组名称
+                项目名称
               </label>
               <input
                 id="group-name-input"
@@ -789,7 +1033,7 @@ export default function Sidebar({
               {nameError && <p className="group-modal-error">{nameError}</p>}
 
               <label className="group-modal-label" htmlFor="group-desc-input">
-                分组介绍
+                项目介绍
               </label>
               <textarea
                 id="group-desc-input"
@@ -798,7 +1042,7 @@ export default function Sidebar({
                 onChange={(e) => setGroupDesc(e.target.value)}
                 maxLength={120}
                 rows={3}
-                placeholder="可选：输入这个分组的用途说明"
+                placeholder="可选：输入这个项目的用途说明"
               />
 
               <div className="group-modal-actions">
@@ -813,7 +1057,7 @@ export default function Sidebar({
                   type="submit"
                   className="group-modal-btn group-modal-btn-primary"
                 >
-                  创建
+                  {editingGroupId ? "保存" : "创建"}
                 </button>
               </div>
             </form>

@@ -10,7 +10,12 @@
     "preview": "vite preview",
     "server": "node server/index.js",
     "dev:web": "vite",
-    "backfill:image-thumbnails": "node scripts/backfill-generated-image-thumbnails.mjs"
+    "backfill:image-thumbnails": "node scripts/backfill-generated-image-thumbnails.mjs",
+    "test:chat-state-preservation": "node scripts/test-chat-state-preservation.mjs",
+    "audit:chat-state": "node scripts/audit-chat-state.mjs",
+    "test:packy-thinking": "node scripts/test-packy-thinking.mjs",
+    "test:packy-attachments": "node scripts/test-packy-attachments.mjs",
+    "test:packy-params": "node scripts/test-packy-params.mjs"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.80",
@@ -18,6 +23,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
+    "gpt-tokenizer": "^3.4.0",
     "lucide-react": "^0.563.0",
     "mammoth": "^1.11.0",
     "mongoose": "^9.1.6",

@@ -20,6 +20,8 @@ export async function readSseStream(response, handlers) {
         handlers.onToken?.(evt.data?.text || "");
       } else if (evt.event === "reasoning_token") {
         handlers.onReasoningToken?.(evt.data?.text || "");
+      } else if (evt.event === "usage") {
+        handlers.onUsage?.(evt.data?.usage || evt.data || {});
       } else if (evt.event === "search_usage") {
         handlers.onSearchUsage?.(evt.data || {});
       } else if (evt.event === "meta") {
@@ -95,6 +97,9 @@ export function normalizeReasoningEffort(value) {
   if (v === "none" || v === "off" || v === "no" || v === "false" || v === "0") {
     return "none";
   }
+  if (v === "low" || v === "medium" || v === "high") {
+    return v;
+  }
   return "high";
 }
 
@@ -107,7 +112,10 @@ export function normalizeReasoningLabel(value, fallback = "none") {
   if (v === "none" || v === "off" || v === "no" || v === "false" || v === "0") {
     return "none";
   }
-  return v ? "high" : fallback;
+  if (v === "low" || v === "medium" || v === "high") {
+    return v;
+  }
+  return fallback;
 }
 
 export function formatTimestamp(iso) {
@@ -126,6 +134,10 @@ export function normalizeRuntimeSnapshot(runtime) {
   const applied = normalizeReasoningLabel(runtime.reasoningApplied, "pending");
   const temperature = Number(runtime.temperature);
   const topP = Number(runtime.topP);
+  const usage = normalizeRuntimeUsage(runtime.usage);
+  const contextCompression = normalizeRuntimeContextCompression(
+    runtime.contextCompression,
+  );
 
   return {
     agentId,
@@ -136,6 +148,8 @@ export function normalizeRuntimeSnapshot(runtime) {
     topP: Number.isFinite(topP) ? normalizeTopP(topP) : "-",
     reasoningRequested: requested,
     reasoningApplied: applied,
+    usage,
+    contextCompression,
   };
 }
 
@@ -156,10 +170,15 @@ export function createRuntimeSnapshot({
     reasoningApplied: "pending",
     provider: "pending",
     model: "pending",
+    usage: null,
+    contextCompression: null,
   };
 }
 
 export function mergeRuntimeWithMeta(runtime, meta) {
+  const nextContextCompression = normalizeRuntimeContextCompression(
+    meta?.contextCompression,
+  );
   return {
     ...(runtime || {}),
     provider: String(meta?.provider || runtime?.provider || "pending"),
@@ -172,5 +191,83 @@ export function mergeRuntimeWithMeta(runtime, meta) {
       meta?.reasoningApplied || runtime?.reasoningApplied,
       "pending",
     ),
+    contextCompression:
+      nextContextCompression ||
+      normalizeRuntimeContextCompression(runtime?.contextCompression),
   };
+}
+
+export function mergeRuntimeWithUsage(runtime, usage) {
+  return {
+    ...(runtime || {}),
+    usage:
+      normalizeRuntimeUsage(usage) || normalizeRuntimeUsage(runtime?.usage),
+  };
+}
+
+function normalizeRuntimeUsage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const promptTokens = normalizeUsageInteger(
+    raw.prompt_tokens ?? raw.promptTokens ?? raw.input_tokens ?? raw.inputTokens,
+  );
+  const completionTokens = normalizeUsageInteger(
+    raw.completion_tokens ??
+      raw.completionTokens ??
+      raw.output_tokens ??
+      raw.outputTokens,
+  );
+  const totalTokens = normalizeUsageInteger(
+    raw.total_tokens ?? raw.totalTokens,
+  );
+  if (
+    promptTokens == null &&
+    completionTokens == null &&
+    totalTokens == null
+  ) {
+    return null;
+  }
+  return {
+    prompt_tokens: promptTokens ?? 0,
+    completion_tokens: completionTokens ?? 0,
+    total_tokens:
+      totalTokens ?? (promptTokens || 0) + (completionTokens || 0),
+  };
+}
+
+function normalizeRuntimeContextCompression(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const estimatedInputTokensBefore = normalizeUsageInteger(
+    raw.estimatedInputTokensBefore,
+  );
+  const estimatedInputTokensAfter = normalizeUsageInteger(
+    raw.estimatedInputTokensAfter,
+  );
+  const sourceMessageCount = normalizeUsageInteger(raw.sourceMessageCount);
+  const applied = !!raw.applied;
+  const updatedAt = String(raw.updatedAt || "").trim();
+  const summaryUpToMessageId = String(raw.summaryUpToMessageId || "").trim();
+  if (
+    !applied &&
+    estimatedInputTokensBefore == null &&
+    estimatedInputTokensAfter == null &&
+    sourceMessageCount == null &&
+    !updatedAt &&
+    !summaryUpToMessageId
+  ) {
+    return null;
+  }
+  return {
+    applied,
+    estimatedInputTokensBefore: estimatedInputTokensBefore ?? 0,
+    estimatedInputTokensAfter: estimatedInputTokensAfter ?? 0,
+    sourceMessageCount: sourceMessageCount ?? 0,
+    updatedAt,
+    summaryUpToMessageId,
+  };
+}
+
+function normalizeUsageInteger(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return Math.max(0, Math.round(numeric));
 }

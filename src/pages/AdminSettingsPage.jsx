@@ -40,12 +40,14 @@ import {
   ALIYUN_MINIMAX_FIXED_TOP_P,
   ALIYUN_MINIMAX_FIXED_TEMPERATURE,
   DEFAULT_AGENT_RUNTIME_CONFIG,
+  PACKYCODE_DEFAULT_THINKING_EFFORT,
   VOLCENGINE_FIXED_SAMPLING_MODEL_ID,
   VOLCENGINE_FIXED_TOP_P,
   VOLCENGINE_FIXED_TEMPERATURE,
   createDefaultAgentRuntimeConfigMap,
   isVolcengineFixedSamplingModel,
   resolveAliyunModelPolicyForRuntime,
+  resolveProviderDefaultModel,
   resolveRuntimeTokenProfileByModel,
   sanitizeRuntimeConfigMap,
   sanitizeSingleRuntimeConfig,
@@ -57,10 +59,16 @@ import "../styles/admin-settings.css";
 const AUTO_SAVE_MS = 5 * 60 * 1000;
 const PROVIDER_OPTIONS = [
   { value: "openrouter", label: "OpenRouter" },
+  { value: "packycode", label: "PackyCode" },
   { value: "volcengine", label: "火山引擎 Ark" },
   { value: "aliyun", label: "阿里云 DashScope" },
 ];
-const KNOWN_PROVIDERS = new Set(["openrouter", "volcengine", "aliyun"]);
+const KNOWN_PROVIDERS = new Set([
+  "openrouter",
+  "packycode",
+  "volcengine",
+  "aliyun",
+]);
 const AGENT_E_FIXED_MAX_OUTPUT_TOKENS = 131072;
 const AGENT_C_FIXED_MODEL = "doubao-seed-2-0-pro-260215";
 const AGENT_E_LOCKED_RUNTIME_FIELDS = new Set([
@@ -719,14 +727,19 @@ export default function AdminSettingsPage() {
   const selectedProviderName =
     selectedProvider === "volcengine"
       ? "火山引擎 Ark"
+      : selectedProvider === "packycode"
+        ? "PackyCode"
       : selectedProvider === "aliyun"
         ? "阿里云 DashScope"
         : "OpenRouter";
   const showVolcenginePanel = selectedProvider === "volcengine";
   const showOpenRouterPanel = selectedProvider === "openrouter";
   const showAliyunPanel = selectedProvider === "aliyun";
+  const showPackyCodePanel = selectedProvider === "packycode";
   const providerSupportsReasoning = true;
-  const providerReasoningHint = "当前服务商支持深度思考开关：关闭=none，开启=high。";
+  const providerReasoningHint = showPackyCodePanel
+    ? `当前服务商默认推理强度为 ${PACKYCODE_DEFAULT_THINKING_EFFORT}；关闭后会按 none 下发。`
+    : "当前服务商支持深度思考开关：关闭=none，开启=high。";
   const aliyunProtocol = useMemo(() => {
     const key = String(selectedRuntime.protocol || "")
       .trim()
@@ -735,7 +748,13 @@ export default function AdminSettingsPage() {
     if (key === "dashscope") return "dashscope";
     return "chat";
   }, [selectedRuntime.protocol]);
-  const selectedModelDefault = agentModelDefaults[selectedAgent] || "";
+  const selectedModelDefault = useMemo(() => {
+    const configuredDefault = String(agentModelDefaults[selectedAgent] || "").trim();
+    if (configuredDefault && selectedProvider !== "packycode") {
+      return configuredDefault;
+    }
+    return resolveProviderDefaultModel(selectedProvider, selectedAgent);
+  }, [agentModelDefaults, selectedAgent, selectedProvider]);
   const selectedModelForMatching = String(
     selectedRuntime.model || selectedModelDefault || "",
   ).trim();
@@ -1168,7 +1187,7 @@ export default function AdminSettingsPage() {
     setRuntimeConfigs((prev) => {
       const current = prev[selectedAgent] || DEFAULT_AGENT_RUNTIME_CONFIG;
       const modelForMatching = String(
-        current.model || agentModelDefaults[selectedAgent] || "",
+        current.model || selectedModelDefault || "",
       ).trim();
       if (
         isVolcengineFixedSamplingModel(modelForMatching) &&
@@ -1183,10 +1202,27 @@ export default function AdminSettingsPage() {
         [field]: value,
       };
 
+      if (field === "provider") {
+        const nextProvider = String(value || "")
+          .trim()
+          .toLowerCase();
+        if (nextProvider === "packycode") {
+          draft.protocol = "chat";
+          draft.enableWebSearch = false;
+          if (
+            !String(current.thinkingEffort || "").trim() ||
+            String(current.thinkingEffort || "").trim().toLowerCase() ===
+              DEFAULT_AGENT_RUNTIME_CONFIG.thinkingEffort
+          ) {
+            draft.thinkingEffort = PACKYCODE_DEFAULT_THINKING_EFFORT;
+          }
+        }
+      }
+
       if (field === "model") {
         const explicitModel = String(value || "").trim();
         const fallbackModel = String(
-          explicitModel || agentModelDefaults[selectedAgent] || "",
+          explicitModel || selectedModelDefault || "",
         ).trim();
         const profile = resolveRuntimeTokenProfileByModel(fallbackModel);
         if (profile) {
@@ -2446,10 +2482,6 @@ export default function AdminSettingsPage() {
                         }。`
                       : "阿里云支持聊天接口、回应接口、DashScope 原生接口三种调用方式，最大输出固定使用模型默认值。"}
                 </p>
-              ) : !showVolcenginePanel ? (
-                <p className="admin-field-note">
-                  说明：Chat 协议下，上下文窗口、最大输入长度、最大输出长度可独立编辑；最大输出会映射到上游接口参数。
-                </p>
               ) : null}
 
               {showVolcenginePanel ? (
@@ -2665,7 +2697,7 @@ export default function AdminSettingsPage() {
                 </>
               ) : (
                 <>
-                  {!aliyunSamplingFixed ? (
+                  {!showPackyCodePanel && !aliyunSamplingFixed ? (
                     <>
                       <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
                         <span>生成随机性</span>
@@ -2693,6 +2725,11 @@ export default function AdminSettingsPage() {
                         />
                       </label>
                     </>
+                  ) : showPackyCodePanel ? (
+                    <p className="admin-field-note">
+                      当前 PackyCode / `gpt-5.4` 接入已隐藏未验证或已确认不兼容的采样参数，
+                      默认按 256k token 预算运行；上下文轮数对 Packy 不生效。
+                    </p>
                   ) : (
                     <p className="admin-field-note">
                       当前模型采样参数固定：temperature = {ALIYUN_MINIMAX_FIXED_TEMPERATURE}、
@@ -2700,18 +2737,25 @@ export default function AdminSettingsPage() {
                     </p>
                   )}
 
-                  <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
-                    <span>上下文轮数</span>
-                    <NumberRuntimeInput
-                      id="admin-runtime-context-rounds"
-                      value={selectedRuntime.contextRounds}
-                      min={1}
-                      max={20}
-                      step={1}
-                      onChange={(next) => updateRuntimeField("contextRounds", next)}
-                      disabled={loading}
-                    />
-                  </label>
+                  {!showPackyCodePanel ? (
+                    <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
+                      <span>上下文轮数</span>
+                      <NumberRuntimeInput
+                        id="admin-runtime-context-rounds"
+                        value={selectedRuntime.contextRounds}
+                        min={1}
+                        max={20}
+                        step={1}
+                        onChange={(next) => updateRuntimeField("contextRounds", next)}
+                        disabled={loading}
+                      />
+                    </label>
+                  ) : null}
+                  {showPackyCodePanel ? (
+                    <p className="admin-field-note">
+                      PackyCode 会尽量带全量历史，并在接近 256k 上下文预算时自动做本地摘要压缩。
+                    </p>
+                  ) : null}
 
                   {showAliyunPanel ? (
                     <div className="admin-field-row split">
@@ -2803,7 +2847,7 @@ export default function AdminSettingsPage() {
                     </label>
                   </div>
 
-                  {!showOpenRouterPanel && !showAliyunPanel ? (
+                  {!showOpenRouterPanel && !showAliyunPanel && !showPackyCodePanel ? (
                     <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens-chat">
                       <span className="admin-label-with-hint">
                         上下文窗口
@@ -2821,7 +2865,7 @@ export default function AdminSettingsPage() {
                     </label>
                   ) : null}
 
-                  {!showOpenRouterPanel && !showAliyunPanel ? (
+                  {!showOpenRouterPanel && !showAliyunPanel && !showPackyCodePanel ? (
                     <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens-chat">
                       <span className="admin-label-with-hint">
                         最大输入长度
@@ -2859,9 +2903,19 @@ export default function AdminSettingsPage() {
                       max={1048576}
                       step={64}
                       onChange={(next) => updateRuntimeField("maxOutputTokens", next)}
-                      disabled={loading || showAliyunPanel || isAgentCSelected}
+                      disabled={
+                        loading ||
+                        showAliyunPanel ||
+                        showPackyCodePanel ||
+                        isAgentCSelected
+                      }
                     />
                   </label>
+                  {showPackyCodePanel ? (
+                    <p className="admin-field-note">
+                      PackyCode / `gpt-5.4` 的最大输出已固定为 256000。
+                    </p>
+                  ) : null}
                   {showAliyunPanel && aliyunWebSearchAllowed ? (
                     <>
                       <div className="admin-field-row split">
@@ -3144,11 +3198,16 @@ export default function AdminSettingsPage() {
                     </>
                   ) : null}
 
-                  {!showOpenRouterPanel && !showAliyunPanel ? (
+                  {showPackyCodePanel ? (
+                    <p className="admin-field-note warning">
+                      当前 PackyCode 接入仅启用标准 Chat Completions；联网搜索、OpenRouter 插件和
+                      Responses 协议暂不支持。
+                    </p>
+                  ) : null}
+                  {showPackyCodePanel ? (
                     <p className="admin-field-note">
-                      当前服务商：{selectedProviderName}
-                      {selectedRuntime.provider === "inherit" ? "（来自 .env 默认）" : ""}。
-                      该服务商当前仅使用 Chat 协议，Responses 参数已自动隐藏。
+                      当前项目对 Packy 实际下发的上游字段为 `model`、`messages`、`stream`、
+                      `max_tokens` 与 `reasoning.effort`；`temperature`、`top_p` 等字段不会发送。
                     </p>
                   ) : null}
                   {!showOpenRouterPanel && !showAliyunPanel ? (

@@ -368,6 +368,11 @@ export default function PartyChatDesktopPage({
       return { id: userId, name: "用户" };
     });
   }, [activeRoom, usersById]);
+  const mentionableMembers = useMemo(() => {
+    const myUserId = String(me.id || "").trim();
+    if (!myUserId) return activeMembers;
+    return activeMembers.filter((member) => String(member?.id || "").trim() !== myUserId);
+  }, [activeMembers, me.id]);
   const activeOnlineUserIdSet = useMemo(() => {
     return new Set(
       (Array.isArray(activeRoom?.onlineMemberUserIds) ? activeRoom.onlineMemberUserIds : [])
@@ -1309,7 +1314,7 @@ export default function PartyChatDesktopPage({
             }
             return params.toString() ? `/admin/settings?${params.toString()}` : "/admin/settings";
           })()
-        : "/chat";
+        : "/c";
     navigate(withAuthSlot(backPath), {
       replace: true,
     });
@@ -2751,8 +2756,15 @@ export default function PartyChatDesktopPage({
     replaceComposeSelection(`@${memberName}`);
   }
 
-  function pickMention(name) {
-    insertMention(name);
+  function pickMention(target) {
+    if (target && typeof target === "object") {
+      const targetUserId = String(target.id || "").trim();
+      const myUserId = String(me.id || "").trim();
+      if (targetUserId && myUserId && targetUserId === myUserId) return;
+      insertMention(target.name);
+    } else {
+      insertMention(target);
+    }
     setShowMentionPicker(false);
     focusComposeTextarea("preserve");
   }
@@ -3400,29 +3412,6 @@ export default function PartyChatDesktopPage({
                       解散派
                     </button>
                   ) : null}
-                  <button
-                    type="button"
-                    className="party-room-side-toggle-btn"
-                    aria-controls="party-side-panel"
-                    aria-expanded={showSidebar}
-                    onClick={toggleSidebarPanel}
-                    title={showSidebar ? "隐藏侧栏" : "显示侧栏"}
-                    aria-label={showSidebar ? "隐藏侧栏" : "显示侧栏"}
-                  >
-                    <svg viewBox="0 0 20 20" aria-hidden="true">
-                      <rect
-                        x="2.5"
-                        y="3"
-                        width="15"
-                        height="14"
-                        rx="2.5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.4"
-                      />
-                      <path d="M7.4 3v14" stroke="currentColor" strokeWidth="1.4" />
-                    </svg>
-                  </button>
                 </div>
               </header>
 
@@ -3883,15 +3872,17 @@ export default function PartyChatDesktopPage({
                                 <span className="party-mention-picker-at" aria-hidden="true">
                                   <AtSign size={16} strokeWidth={2.5} />
                                 </span>
-                                <span className="party-mention-picker-name">所有人 ({activeMembers.length})</span>
+                                <span className="party-mention-picker-name">
+                                  所有人 ({mentionableMembers.length})
+                                </span>
                               </button>
-                              {activeMembers.map((member) => (
+                              {mentionableMembers.map((member) => (
                                 <button
                                   key={`mention-${member.id}`}
                                   type="button"
                                   className="party-mention-picker-item"
                                   onMouseDown={keepComposeFocusOnMouseDown}
-                                  onClick={() => pickMention(member.name)}
+                                  onClick={() => pickMention(member)}
                                 >
                                   <NameAvatar name={member.name} small />
                                   <span className="party-mention-picker-name">{member.name}</span>
@@ -5173,9 +5164,18 @@ function sanitizePartyProvider(value, fallback = "openrouter") {
   const key = String(value || "")
     .trim()
     .toLowerCase();
-  if (key === "openrouter" || key === "volcengine" || key === "aliyun") {
-    return key;
+  if (
+    key === "openrouter" ||
+    key === "packycode" ||
+    key === "packy" ||
+    key === "volcengine" ||
+    key === "aliyun"
+  ) {
+    return key === "packy" ? "packycode" : key;
   }
+  if (key === "packyapi") return "packycode";
+  if (key === "volc" || key === "ark") return "volcengine";
+  if (key === "dashscope" || key === "alibaba") return "aliyun";
   return fallback;
 }
 

@@ -480,6 +480,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     readTeacherScopedSessionContextRefs,
     sanitizeChatStatePayload,
     sanitizeChatStateMetaPayload,
+    mergeChatStateSessionMessagesPreservingCompleteness,
     sanitizeSessionMessageUpsertsPayload,
     sanitizeSmartContextMapAgentId,
     buildSmartContextEnabledMapKey,
@@ -817,6 +818,30 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       agentRuntimeConfigs: resolveAgentRuntimeConfigs(adminConfig.runtimeConfigs),
       agentProviderDefaults: buildAgentProviderDefaults(),
     });
+  });
+
+  app.post("/api/chat/debug-log", requireChatAuth, async (req, res) => {
+    const event = String(req.body?.event || "").trim().slice(0, 120);
+    if (event !== "route_status") {
+      res.json({ ok: true });
+      return;
+    }
+
+    const payload =
+      req.body?.payload && typeof req.body.payload === "object"
+        ? req.body.payload
+        : {};
+    const username = String(req.authUser?.username || "").trim() || "-";
+    const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
+    const timestamp = new Date().toISOString();
+    const pathname = String(payload.pathname || "").trim() || "-";
+    const ok = !!payload.ok;
+
+    console.log(
+      `[chat-route] ${timestamp} user=${username} teacherScope=${teacherScopeKey} pathname=${pathname} ok=${ok}`
+    );
+
+    res.json({ ok: true });
   });
 
   app.get("/api/classroom/tasks/settings", requireChatAuth, async (req, res) => {
@@ -1253,12 +1278,23 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   app.put("/api/chat/state", requireChatAuth, async (req, res) => {
     const nextState = sanitizeChatStatePayload(req.body || {});
     const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
+    const stateDoc = await ChatState.findOne(
+      { userId: req.authUser._id },
+      { sessionMessages: 1, teacherStates: 1 },
+    ).lean();
+    const currentState = normalizeChatStateDoc(stateDoc, teacherScopeKey);
+    const { sessionMessages, preservedSessionIds } =
+      mergeChatStateSessionMessagesPreservingCompleteness(
+        currentState.sessionMessages,
+        nextState.sessionMessages,
+        nextState.sessions,
+      );
     const setPayload = { userId: req.authUser._id };
     setPayload[getTeacherScopedChatStatePath("activeId", teacherScopeKey)] = nextState.activeId;
     setPayload[getTeacherScopedChatStatePath("groups", teacherScopeKey)] = nextState.groups;
     setPayload[getTeacherScopedChatStatePath("sessions", teacherScopeKey)] = nextState.sessions;
     setPayload[getTeacherScopedChatStatePath("sessionMessages", teacherScopeKey)] =
-      nextState.sessionMessages;
+      sessionMessages;
     setPayload[getTeacherScopedChatStatePath("settings", teacherScopeKey)] = nextState.settings;
 
     await ChatState.findOneAndUpdate(
@@ -1271,7 +1307,10 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       },
     );
 
-    res.json({ ok: true });
+    res.json({
+      ok: true,
+      preservedSessionIds,
+    });
   });
 
   app.put("/api/chat/state/meta", requireChatAuth, async (req, res) => {

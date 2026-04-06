@@ -53,8 +53,11 @@ export function buildExportMeta({
   lastAppliedReasoning,
 }) {
   const now = new Date();
+  const visibleMessages = (Array.isArray(messages) ? messages : []).filter(
+    (message) => !message?.hidden,
+  );
   const group = groups.find((g) => g.id === activeSession?.groupId) || null;
-  const latestRuntime = [...messages]
+  const latestRuntime = [...visibleMessages]
     .reverse()
     .find((m) => m.role === "assistant" && m.runtime)?.runtime;
 
@@ -75,11 +78,14 @@ export function buildExportMeta({
     topP: normalizeTopP(apiTopP),
     reasoningRequested: apiReasoningEffort,
     reasoningApplied: lastAppliedReasoning,
-    messageCount: messages.length,
+    messageCount: visibleMessages.length,
   };
 }
 
 export function formatMarkdownExport(messages, meta) {
+  const visibleMessages = (Array.isArray(messages) ? messages : []).filter(
+    (message) => !message?.hidden,
+  );
   const lines = [
     `# ${meta.sessionTitle}`,
     "",
@@ -107,7 +113,7 @@ export function formatMarkdownExport(messages, meta) {
     "",
   ];
 
-  messages.forEach((m) => {
+  visibleMessages.forEach((m) => {
     const block = formatMessageBlock(m);
     lines.push(`## ${block.role}`);
     lines.push("");
@@ -133,6 +139,9 @@ export function formatMarkdownExport(messages, meta) {
 }
 
 export function formatTxtExport(messages, meta) {
+  const visibleMessages = (Array.isArray(messages) ? messages : []).filter(
+    (message) => !message?.hidden,
+  );
   const lines = [
     `${meta.sessionTitle}`,
     "====================",
@@ -159,7 +168,7 @@ export function formatTxtExport(messages, meta) {
     "",
   ];
 
-  messages.forEach((m) => {
+  visibleMessages.forEach((m) => {
     const block = formatMessageBlock(m);
     lines.push(`${block.role}:`);
     if (block.askedAt) lines.push(`提问时间: ${block.askedAt}`);

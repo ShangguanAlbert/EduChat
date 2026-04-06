@@ -30,6 +30,14 @@ export function useSessionStreamDraft(sessionId) {
   );
 }
 
+export function useAllStreamDrafts() {
+  return useSyncExternalStore(
+    subscribeStreamDraft,
+    () => getState().bySession,
+    () => ({}),
+  );
+}
+
 export function startStreamDraft(sessionId, draft) {
   if (!sessionId || !draft) return;
   state = {
@@ -62,6 +70,35 @@ export function updateStreamDraft(sessionId, updater) {
 export function getStreamDraft(sessionId) {
   if (!sessionId) return null;
   return state.bySession[sessionId] || null;
+}
+
+export function getAllStreamDrafts() {
+  return state.bySession;
+}
+
+export function replaceAllStreamDrafts(nextBySession) {
+  const safeNext =
+    nextBySession && typeof nextBySession === "object" && !Array.isArray(nextBySession)
+      ? nextBySession
+      : {};
+
+  state = {
+    ...state,
+    bySession: { ...safeNext },
+  };
+  emitChange();
+}
+
+export function primeAllStreamDrafts(nextBySession) {
+  const safeNext =
+    nextBySession && typeof nextBySession === "object" && !Array.isArray(nextBySession)
+      ? nextBySession
+      : {};
+
+  state = {
+    ...state,
+    bySession: { ...safeNext },
+  };
 }
 
 export function clearStreamDraft(sessionId) {

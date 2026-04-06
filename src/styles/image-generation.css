@@ -10,6 +10,7 @@
 }
 
 .image-page {
+  position: relative;
   --bg-page: #faf9f5;
   --bg-surface: #fffdfa;
   --bg-soft: #f6f1e8;
@@ -25,19 +26,38 @@
   --accent-soft-hover: rgba(218, 119, 86, 0.18);
   --accent-text: #8b4f39;
   --danger: #ef4444;
+  --image-reading-font-family:
+    "Iowan Old Style", "Palatino Linotype", "Book Antiqua", "Noto Serif SC",
+    "Source Han Serif SC", "Songti SC", "STSong", ui-serif, Georgia, Cambria,
+    "Times New Roman", Times, serif;
   --radius-card: 20px;
   --radius-control: 14px;
   --shadow-card: 0 10px 28px rgba(95, 74, 56, 0.1);
   --shadow-pop: 0 16px 36px rgba(95, 74, 56, 0.14);
+  --image-sidebar-width: 288px;
+  --image-page-padding: 0px;
+  --hover: #eee7dc;
   min-height: 100vh;
   height: 100vh;
   width: 100%;
-  padding: 14px;
-  padding-bottom: 14px;
-  overflow: hidden;
+  padding: var(--image-page-padding);
+  padding-bottom: var(--image-page-padding);
+  overflow-x: hidden;
+  overflow-y: hidden;
   background: radial-gradient(circle at top right, #fff9f2, #f8f7f2 44%);
   color: var(--text-primary);
   font-family: var(--app-font-family);
+}
+
+.image-page::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--image-page-padding) + var(--image-sidebar-width));
+  width: 1px;
+  background: var(--line-soft);
+  pointer-events: none;
 }
 
 .image-corner-actions {
@@ -48,26 +68,29 @@
 }
 
 .image-side-back-btn {
-  margin-top: auto;
   width: 100%;
   border: 0;
-  border-radius: 16px;
-  min-height: 44px;
-  padding: 0 18px;
-  background: #f7e5de;
-  color: #b04f3d;
-  box-shadow: 0 8px 18px rgba(185, 28, 28, 0.12);
-  display: inline-flex;
+  border-radius: 10px;
+  min-height: 0;
+  padding: 9px 10px;
+  background: transparent;
+  color: var(--text-soft);
+  display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  font-size: 16px;
-  font-weight: 700;
+  gap: 9px;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
+  transition:
+    background-color 180ms ease,
+    color 180ms ease,
+    transform 180ms ease;
 }
 
 .image-side-back-btn:hover {
-  background: #f3dbd3;
+  background: var(--hover);
+  color: var(--text-primary);
 }
 
 .image-terms-lock-tip {
@@ -103,14 +126,19 @@
 
 .image-workspace {
   margin-top: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .image-ideogram-layout {
   min-height: 0;
   height: 100%;
+  width: 100%;
+  min-width: 0;
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: var(--image-sidebar-width) minmax(0, 1fr);
+  gap: 0;
   align-items: stretch;
 }
 
@@ -182,61 +210,141 @@
 }
 
 .image-ideogram-sidebar {
-  border-radius: 20px;
-  background: var(--bg-surface);
-  box-shadow: var(--shadow-card);
-  padding: 16px 14px;
+  width: var(--image-sidebar-width);
+  background: var(--bg-soft);
   position: sticky;
-  top: 14px;
+  top: 0;
   height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 14px;
   overflow: hidden;
 }
 
-.image-ideogram-brand {
-  display: inline-flex;
-  align-items: center;
+.image-ideogram-sidebar-top {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  padding: 4px 8px;
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  padding: 10px;
 }
 
-.image-ideogram-brand svg {
-  color: var(--accent);
+.image-ideogram-sidebar-list {
+  padding: 6px 8px 8px;
+  overflow: auto;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.image-ideogram-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 2px 8px;
+}
+
+.image-ideogram-brand-mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 11px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #efe3d6, #f8f3ec);
+  color: var(--accent-text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.image-ideogram-brand-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.image-ideogram-brand-title {
+  color: var(--text-primary);
+  font-size: 23px;
+  line-height: 1;
+  font-family: var(--image-reading-font-family);
+  font-weight: 600;
+}
+
+.image-ideogram-brand-subtitle {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.image-ideogram-workbench {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.image-ideogram-section-label {
+  padding: 0 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .image-ideogram-nav {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   overflow: auto;
 }
 
 .image-ideogram-nav-btn {
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 12px;
-  height: 40px;
+  min-height: 40px;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--text-soft);
   display: inline-flex;
   align-items: center;
   gap: 9px;
-  font-size: 15px;
-  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 9px 10px;
   cursor: pointer;
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    transform 180ms ease;
 }
 
 .image-ideogram-nav-btn:hover {
-  background: var(--bg-soft);
+  background: rgba(255, 255, 255, 0.52);
+  border-color: rgba(135, 134, 127, 0.14);
+  color: var(--text-primary);
 }
 
 .image-ideogram-nav-btn.is-active {
-  background: var(--accent-soft);
-  color: var(--accent-text);
+  background: rgba(255, 255, 255, 0.62);
+  border-color: rgba(135, 134, 127, 0.14);
+  color: var(--text-primary);
+  box-shadow: 0 6px 18px rgba(95, 74, 56, 0.05);
+}
+
+.image-ideogram-sidebar-bottom {
+  margin-top: auto;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.image-ideogram-sidebar-bottom .image-side-back-btn {
+  margin-top: 0;
+}
+
+.image-side-back-status {
+  margin-left: auto;
+  padding: 0;
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: transparent;
 }
 
 .image-ideogram-side-card {
@@ -336,6 +444,7 @@
 
 .image-ideogram-main {
   min-width: 0;
+  max-width: 100%;
   min-height: 0;
   height: 100%;
   overflow-y: auto;
@@ -345,6 +454,7 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
+  padding-left: 18px;
   padding-right: 4px;
 }
 
@@ -1042,6 +1152,8 @@
 .image-ideogram-board {
   flex: 1;
   min-height: 220px;
+  min-width: 0;
+  max-width: 100%;
   overflow: visible;
   overscroll-behavior: auto;
   padding-right: 2px;
@@ -1769,6 +1881,10 @@
 }
 
 @media (max-width: 1100px) {
+  .image-page::before {
+    display: none;
+  }
+
   .image-ideogram-layout {
     height: auto;
     grid-template-columns: 1fr;
@@ -1776,20 +1892,44 @@
   }
 
   .image-ideogram-sidebar {
+    width: auto;
     position: static;
     top: auto;
     height: auto;
     flex-direction: row;
     align-items: flex-start;
     overflow: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line-soft);
   }
 
-  .image-ideogram-brand {
+  .image-ideogram-sidebar-top {
+    flex: 0 0 auto;
+    min-width: auto;
+    padding: 10px 0;
+  }
+
+  .image-ideogram-brand-row {
     display: none;
+  }
+
+  .image-ideogram-sidebar-list {
+    flex: 0 0 auto;
+    min-width: 204px;
+    padding: 10px 0;
   }
 
   .image-ideogram-nav {
     min-width: 188px;
+  }
+
+  .image-ideogram-sidebar-bottom {
+    flex: 0 0 188px;
+    min-width: 188px;
+    border-top: 0;
+    border-left: 1px solid var(--line-soft);
+    padding-top: 0;
+    padding-left: 10px;
   }
 
   .image-ideogram-side-card {
@@ -1807,7 +1947,8 @@
 
 @media (max-width: 760px) {
   .image-page {
-    padding: 10px;
+    --image-page-padding: 10px;
+    padding: var(--image-page-padding);
     padding-bottom: 128px;
   }
 

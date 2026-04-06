@@ -23,6 +23,7 @@ import mongoose from "mongoose";
 import OSS from "ali-oss";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { WebSocketServer } from "ws";
+import { countTokens, encodeChat } from "gpt-tokenizer";
 import { SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT } from "../prompts/leakProtectionPrompt.js";
 import { PROMPT_LEAK_PROBE_KEYWORDS } from "../prompts/leakProtectionKeywords.js";
 import {
@@ -151,6 +152,14 @@ const RUNTIME_MAX_REASONING_TOKENS = 128000;
 const VOLCENGINE_FIXED_SAMPLING_MODEL_ID = "doubao-seed-2-0-pro-260215";
 const VOLCENGINE_FIXED_TEMPERATURE = 1;
 const VOLCENGINE_FIXED_TOP_P = 0.95;
+const PACKYCODE_DEFAULT_MODEL = "gpt-5.4";
+const PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS = 256000;
+const PACKYCODE_GPT54_MAX_INPUT_TOKENS = 256000;
+const PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS = 256000;
+const PACKYCODE_GPT54_COMPRESSION_TRIGGER_TOKENS = 204800;
+const PACKYCODE_GPT54_COMPRESSION_TARGET_TOKENS = 179200;
+const PACKYCODE_GPT54_DEFAULT_KEEP_USER_ROUNDS = 6;
+const PACKYCODE_GPT54_MIN_KEEP_USER_ROUNDS = 2;
 const UPLOADED_FILE_CONTEXT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const GENERATED_IMAGE_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -412,6 +421,14 @@ const AGENT_RUNTIME_DEFAULTS = Object.freeze({
   }),
 });
 const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
+  {
+    id: "gpt-5.4",
+    aliases: ["gpt-5.4"],
+    contextWindowTokens: PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
+    maxInputTokens: PACKYCODE_GPT54_MAX_INPUT_TOKENS,
+    maxOutputTokens: PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
+    maxReasoningTokens: RUNTIME_MAX_REASONING_TOKENS,
+  },
   {
     id: "doubao-seed-2-0-pro-260215",
     aliases: [
@@ -1698,11 +1715,61 @@ function normalizeMessages(messages) {
       id: sanitizeId(m.id, ""),
       role: m.role,
       content: normalizeMessageContent(m.content),
+      hidden: sanitizeRuntimeBoolean(m.hidden, false),
+      internalType: sanitizeRuntimeInternalType(m.internalType),
+      summaryUpToMessageId: sanitizeId(m.summaryUpToMessageId, ""),
+      compressionMeta: sanitizeRuntimeCompressionMeta(m.compressionMeta),
     }))
     .filter(
       (m) =>
         hasUsableMessageContent(m.content) || (m.role === "user" && !!m.id),
     );
+}
+
+function sanitizeRuntimeInternalType(value) {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  return key === "context_summary" ? "context_summary" : "";
+}
+
+function sanitizeRuntimeCompressionMeta(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const estimatedInputTokensBefore = sanitizeRuntimeInteger(
+    source.estimatedInputTokensBefore,
+    0,
+    0,
+    RUNTIME_MAX_CONTEXT_WINDOW_TOKENS * 4,
+  );
+  const estimatedInputTokensAfter = sanitizeRuntimeInteger(
+    source.estimatedInputTokensAfter,
+    0,
+    0,
+    RUNTIME_MAX_CONTEXT_WINDOW_TOKENS * 4,
+  );
+  const sourceMessageCount = sanitizeRuntimeInteger(
+    source.sourceMessageCount,
+    0,
+    0,
+    400,
+  );
+  const updatedAt = sanitizeIsoDate(source.updatedAt);
+
+  if (
+    !estimatedInputTokensBefore &&
+    !estimatedInputTokensAfter &&
+    !sourceMessageCount &&
+    !updatedAt
+  ) {
+    return undefined;
+  }
+
+  return {
+    estimatedInputTokensBefore,
+    estimatedInputTokensAfter,
+    sourceMessageCount,
+    updatedAt,
+  };
 }
 
 function normalizeMessageContent(content) {
@@ -2358,6 +2425,153 @@ async function rehydrateUploadedFileContexts(
   });
 }
 
+function isPackyAttachmentMemoryTextPart(part) {
+  const type = String(part?.type || "")
+    .trim()
+    .toLowerCase();
+  if (type !== "text" && type !== "input_text" && type !== "output_text") {
+    return false;
+  }
+  const text = String(part?.text || "");
+  if (!text.trim()) return false;
+  const normalizedText = text.trimStart();
+  return (
+    normalizedText.startsWith("[附件:") ||
+    normalizedText.includes("\nMIME:") ||
+    normalizedText.includes("\n内容预览:\n") ||
+    normalizedText.includes("将 PDF 按页转换为图片后输入模型")
+  );
+}
+
+function extractPackyAttachmentMemoryParts(content) {
+  const normalized = normalizeMessageContent(content);
+  if (!Array.isArray(normalized) || normalized.length === 0) return [];
+
+  const picked = normalized.filter((part) => {
+    const type = String(part?.type || "")
+      .trim()
+      .toLowerCase();
+    if (
+      type === "image_url" ||
+      type === "input_image" ||
+      type === "file" ||
+      type === "file_url" ||
+      type === "input_file_url" ||
+      type === "input_file"
+    ) {
+      return true;
+    }
+    return isPackyAttachmentMemoryTextPart(part);
+  });
+  if (picked.length === 0) return [];
+  return cloneNormalizedMessageContent(picked);
+}
+
+function buildPackyAttachmentMemoryPartKey(part) {
+  try {
+    return JSON.stringify(part || {});
+  } catch {
+    return "";
+  }
+}
+
+async function attachLatestSessionFileContextToLatestUserMessage(
+  messages,
+  {
+    userId,
+    sessionId,
+    provider = "",
+    protocol = "",
+  } = {},
+) {
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  if (!safeUserId || !safeSessionId) return null;
+  const safeProvider = normalizeProvider(provider);
+  const safeProtocol = sanitizeRuntimeProtocol(protocol);
+  if (safeProvider !== "packycode" || safeProtocol !== "chat") return null;
+
+  const latestUserMessage = resolveLatestUserMessage(messages);
+  if (!latestUserMessage) return null;
+  const latestMessageId = sanitizeId(latestUserMessage.id, "");
+  const requestUserMessageIds = Array.from(
+    new Set(
+      messages
+        .filter((msg) => msg?.role === "user")
+        .map((msg) => sanitizeId(msg?.id, ""))
+        .filter(Boolean),
+    ),
+  );
+
+  let docs = [];
+  try {
+    docs = await UploadedFileContext.find(
+      {
+        userId: safeUserId,
+        sessionId: safeSessionId,
+        expiresAt: { $gt: new Date() },
+        ...(requestUserMessageIds.length > 0
+          ? { messageId: { $nin: requestUserMessageIds } }
+          : latestMessageId
+            ? { messageId: { $ne: latestMessageId } }
+            : {}),
+      },
+      { messageId: 1, content: 1, createdAt: 1, updatedAt: 1 },
+    )
+      .sort({ createdAt: 1, updatedAt: 1 })
+      .lean();
+  } catch (error) {
+    console.warn(
+      `Failed to read Packy file contexts (${safeUserId}/${safeSessionId}):`,
+      error?.message || error,
+    );
+    return null;
+  }
+  if (!Array.isArray(docs) || docs.length === 0) return null;
+
+  const current = normalizeMessageContent(latestUserMessage.content);
+  const currentParts = Array.isArray(current)
+    ? cloneNormalizedMessageContent(current)
+    : current
+      ? [{ type: "text", text: String(current || "") }]
+      : [];
+  const seenPartKeys = new Set(
+    currentParts
+      .map((part) => buildPackyAttachmentMemoryPartKey(part))
+      .filter(Boolean),
+  );
+  const attachmentParts = [];
+  const sourceMessageIds = [];
+
+  docs.forEach((doc) => {
+    const messageId = sanitizeId(doc?.messageId, "");
+    const docParts = extractPackyAttachmentMemoryParts(doc?.content);
+    if (!Array.isArray(docParts) || docParts.length === 0) return;
+
+    let addedForDoc = 0;
+    docParts.forEach((part) => {
+      const partKey = buildPackyAttachmentMemoryPartKey(part);
+      if (!partKey || seenPartKeys.has(partKey)) return;
+      seenPartKeys.add(partKey);
+      attachmentParts.push(part);
+      addedForDoc += 1;
+    });
+    if (addedForDoc > 0 && messageId) {
+      sourceMessageIds.push(messageId);
+    }
+  });
+  if (attachmentParts.length === 0) return null;
+
+  latestUserMessage.content = [...currentParts, ...attachmentParts];
+  return {
+    sourceMessageId: sourceMessageIds[sourceMessageIds.length - 1] || "",
+    sourceMessageIds,
+    sourceMessageCount: sourceMessageIds.length,
+    attachmentPartCount: attachmentParts.length,
+  };
+}
+
 function sanitizeVolcengineFileRefsPayload(input) {
   const source = Array.isArray(input) ? input : [];
   return source
@@ -2727,6 +2941,11 @@ async function attachFilesToLatestUserMessage(
 
   if (provider === "openrouter" && protocol === "chat") {
     return attachFilesToLatestUserMessageForOpenRouter(messages, files, {
+      ossFiles,
+    });
+  }
+  if (provider === "packycode" && protocol === "chat") {
+    return attachFilesToLatestUserMessageForPacky(messages, files, {
       ossFiles,
     });
   }
@@ -3381,6 +3600,88 @@ async function attachFilesToLatestUserMessageForOpenRouter(
   };
 }
 
+async function buildPackyFileInputPart(file, { ossFile = null } = {}) {
+  const safeBuffer = Buffer.isBuffer(file?.buffer)
+    ? file.buffer
+    : Buffer.from([]);
+  if (safeBuffer.length === 0) return null;
+
+  const mime = String(file?.mimetype || "")
+    .trim()
+    .toLowerCase();
+  const ext = getFileExtension(file?.originalname);
+  const safeName = sanitizeText(file?.originalname, "upload.bin", 180);
+
+  if (mime.startsWith("image/")) {
+    const imageUrlFromOss = await resolveAliyunDashScopeAttachmentUrl({
+      ossFile,
+      fallbackFileName: safeName,
+    });
+    if (!imageUrlFromOss) return null;
+    return { type: "image_url", image_url: { url: imageUrlFromOss } };
+  }
+
+  const audioFormat = resolveOpenRouterAudioFormat({ mime, ext });
+  if (audioFormat) return null;
+
+  const videoMime = resolveOpenRouterVideoMime({ mime, ext });
+  if (videoMime) return null;
+
+  const fileData = buildDataUrlForBuffer(
+    safeBuffer,
+    mime || "application/octet-stream",
+  );
+  if (fileData) {
+    return {
+      type: "file",
+      file: {
+        filename: safeName || "document.bin",
+        file_data: fileData,
+      },
+    };
+  }
+
+  return null;
+}
+
+async function attachFilesToLatestUserMessageForPacky(
+  messages,
+  files,
+  { ossFiles = [] } = {},
+) {
+  const msg = resolveLatestUserMessage(messages);
+  if (!msg) return null;
+
+  const parts = buildInitialAttachmentParts(msg.content);
+  const safeOssFiles = Array.isArray(ossFiles) ? ossFiles : [];
+  for (const file of files) {
+    const packyPart = await buildPackyFileInputPart(file, {
+      ossFile: resolveUploadedContextOssFileForInputFile(file, safeOssFiles),
+    });
+    if (packyPart) {
+      parts.push(packyPart);
+      continue;
+    }
+
+    const mime = String(file?.mimetype || "")
+      .trim()
+      .toLowerCase();
+    if (mime.startsWith("image/")) {
+      throw new Error("图片附件上传到 OSS 失败，请重试。");
+    }
+
+    const fallback = await buildParsedFilePreviewTextPart(file);
+    if (fallback) parts.push(fallback);
+  }
+
+  if (parts.length === 0) return null;
+  msg.content = parts;
+  return {
+    messageId: sanitizeId(msg.id, ""),
+    content: cloneNormalizedMessageContent(parts),
+  };
+}
+
 async function attachFilesToLatestUserMessageForAliyunDashScope(
   messages,
   files,
@@ -3603,6 +3904,7 @@ async function streamAgentResponse({
   const shouldUsePersistentFileContext =
     (provider === "volcengine" && protocol === "responses") ||
     (provider === "openrouter" && protocol === "chat") ||
+    (provider === "packycode" && protocol === "chat") ||
     provider === "aliyun";
   const shouldKeepOnlyLatestAliyunFileContext =
     provider === "aliyun" && protocol === "dashscope";
@@ -3755,16 +4057,23 @@ async function streamAgentResponse({
       aliyunFileProcessMode,
     });
   }
+  let packySessionFileContextReuse = null;
+  const shouldReusePackySessionFileContext =
+    provider === "packycode" &&
+    protocol === "chat" &&
+    attachUploadedFiles;
 
-  const narrowedMessages = pickRecentUserRounds(
-    safeMessages,
-    sanitizeRuntimeInteger(
-      config.contextRounds,
-      DEFAULT_AGENT_RUNTIME_CONFIG.contextRounds,
-      1,
-      RUNTIME_CONTEXT_ROUNDS_MAX,
-    ),
-  );
+  const narrowedMessages = isPackyTokenBudgetRuntime(provider, model)
+    ? [...safeMessages]
+    : pickRecentUserRounds(
+        safeMessages,
+        sanitizeRuntimeInteger(
+          config.contextRounds,
+          DEFAULT_AGENT_RUNTIME_CONFIG.contextRounds,
+          1,
+          RUNTIME_CONTEXT_ROUNDS_MAX,
+        ),
+      );
 
   let composedSystemPrompt = systemPrompt || "";
   if (
@@ -4001,6 +4310,46 @@ async function streamAgentResponse({
   if (smartContextRuntime.usePreviousResponseId) {
     requestMessages = extractSmartContextIncrementalMessages(requestMessages);
   }
+  if (shouldReusePackySessionFileContext) {
+    packySessionFileContextReuse =
+      await attachLatestSessionFileContextToLatestUserMessage(
+        requestMessages,
+        {
+          userId: storageUserId,
+          sessionId,
+          provider,
+          protocol,
+        },
+      );
+  }
+
+  let packyContextCompressionMeta = null;
+  let packyContextSummaryMessage = null;
+  if (isPackyTokenBudgetRuntime(provider, model)) {
+    try {
+      const compressionResult = await maybeApplyPackyContextCompression({
+        sessionId,
+        provider,
+        model,
+        config,
+        systemPrompt: composedSystemPrompt,
+        requestMessages,
+        providerConfig,
+      });
+      requestMessages = Array.isArray(compressionResult?.requestMessages)
+        ? compressionResult.requestMessages
+        : requestMessages;
+      packyContextCompressionMeta =
+        compressionResult?.compressionMetaForClient || null;
+      packyContextSummaryMessage = compressionResult?.summaryMessage || null;
+    } catch (error) {
+      console.warn(
+        `[packycode/chat] context compression skipped: ${
+          error?.message || error
+        }`,
+      );
+    }
+  }
 
   let providerMessages = requestMessages.map((msg) => ({
     role: msg.role,
@@ -4153,6 +4502,20 @@ async function streamAgentResponse({
     aliyunDashscopeMultimodalEndpointUsed: useAliyunDashScopeMultimodalEndpoint,
     aliyunFileProcessModeApplied:
       provider === "aliyun" ? aliyunFileProcessMode : "",
+    packySessionFileContextReused: !!packySessionFileContextReuse,
+    packySessionFileContextSourceMessageId:
+      packySessionFileContextReuse?.sourceMessageId || "",
+    packySessionFileContextSourceMessageIds: Array.isArray(
+      packySessionFileContextReuse?.sourceMessageIds,
+    )
+      ? packySessionFileContextReuse.sourceMessageIds
+      : [],
+    packySessionFileContextSourceMessageCount:
+      packySessionFileContextReuse?.sourceMessageCount || 0,
+    packySessionFileContextAttachmentPartCount:
+      packySessionFileContextReuse?.attachmentPartCount || 0,
+    contextCompression: packyContextCompressionMeta,
+    contextSummaryMessage: packyContextSummaryMessage,
     smartContextRequested: smartContextRuntime.requested,
     smartContextEnabled: smartContextRuntime.enabled,
     smartContextUsePreviousResponseId:
@@ -5692,40 +6055,21 @@ function buildChatRequestPayload({
   if (systemPrompt) {
     finalMessages.push({ role: "system", content: systemPrompt });
   }
-  finalMessages.push(...messages);
+  if (provider === "packycode") {
+    finalMessages.push(
+      ...messages.map((message) => ({
+        ...message,
+        content: normalizePackyChatMessageContent(message?.content),
+      })),
+    );
+  } else {
+    finalMessages.push(...messages);
+  }
 
   const payload = {
     model,
     stream: true,
     messages: finalMessages,
-    temperature: fixedSampling
-      ? VOLCENGINE_FIXED_TEMPERATURE
-      : sanitizeRuntimeNumber(
-          config.temperature,
-          DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
-          0,
-          2,
-        ),
-    top_p: fixedSampling
-      ? VOLCENGINE_FIXED_TOP_P
-      : sanitizeRuntimeNumber(
-          config.topP,
-          DEFAULT_AGENT_RUNTIME_CONFIG.topP,
-          0,
-          1,
-        ),
-    frequency_penalty: sanitizeRuntimeNumber(
-      config.frequencyPenalty,
-      DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty,
-      -2,
-      2,
-    ),
-    presence_penalty: sanitizeRuntimeNumber(
-      config.presencePenalty,
-      DEFAULT_AGENT_RUNTIME_CONFIG.presencePenalty,
-      -2,
-      2,
-    ),
     max_tokens: sanitizeRuntimeInteger(
       config.maxOutputTokens,
       DEFAULT_AGENT_RUNTIME_CONFIG.maxOutputTokens,
@@ -5733,8 +6077,44 @@ function buildChatRequestPayload({
       RUNTIME_MAX_OUTPUT_TOKENS,
     ),
   };
+
+  if (provider !== "packycode") {
+    payload.temperature = fixedSampling
+      ? VOLCENGINE_FIXED_TEMPERATURE
+      : sanitizeRuntimeNumber(
+          config.temperature,
+          DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
+          0,
+          2,
+        );
+    payload.top_p = fixedSampling
+      ? VOLCENGINE_FIXED_TOP_P
+      : sanitizeRuntimeNumber(
+          config.topP,
+          DEFAULT_AGENT_RUNTIME_CONFIG.topP,
+          0,
+          1,
+        );
+    payload.frequency_penalty = sanitizeRuntimeNumber(
+      config.frequencyPenalty,
+      DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty,
+      -2,
+      2,
+    );
+    payload.presence_penalty = sanitizeRuntimeNumber(
+      config.presencePenalty,
+      DEFAULT_AGENT_RUNTIME_CONFIG.presencePenalty,
+      -2,
+      2,
+    );
+  }
+
   if (reasoning.enabled) {
     payload.reasoning = { effort: reasoning.effort };
+  }
+
+  if (provider === "packycode") {
+    payload.stream_options = { include_usage: true };
   }
 
   if (provider === "openrouter") {
@@ -5747,6 +6127,53 @@ function buildChatRequestPayload({
   }
 
   return payload;
+}
+
+function normalizePackyChatMessageContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  const parts = [];
+  content.forEach((part) => {
+    if (!part || typeof part !== "object") return;
+    const type = String(part.type || "")
+      .trim()
+      .toLowerCase();
+
+    if (type === "text" || type === "input_text" || type === "output_text") {
+      const text = String(part.text || "");
+      if (text.trim()) {
+        parts.push({ type: "input_text", text });
+      }
+      return;
+    }
+
+    if (type === "image_url" || type === "input_image") {
+      const imageUrl = extractInputImageUrl(part);
+      if (imageUrl) {
+        parts.push({ type: "input_image", image_url: imageUrl });
+      }
+      return;
+    }
+
+    if (type === "file") {
+      const filePayload = normalizeOpenRouterFilePart(part);
+      if (filePayload?.filename && filePayload?.file_data) {
+        parts.push({
+          type: "input_file",
+          filename: filePayload.filename,
+          file_data: filePayload.file_data,
+        });
+      }
+      return;
+    }
+  });
+
+  if (parts.length === 0) return "";
+  if (parts.length === 1 && parts[0].type === "input_text") {
+    return parts[0].text;
+  }
+  return parts;
 }
 
 function buildOpenRouterPlugins({ config }) {
@@ -6391,6 +6818,10 @@ function resolveRequestProtocol(requestedProtocol, provider, model = "") {
   }
 
   if (provider === "openrouter") {
+    return { supported: true, value: "chat", forced: protocol !== "chat" };
+  }
+
+  if (provider === "packycode") {
     return { supported: true, value: "chat", forced: protocol !== "chat" };
   }
 
@@ -7097,11 +7528,16 @@ async function pipeOpenRouterSse(upstream, res, reasoningEnabled) {
   let buffer = "";
   let sawContent = false;
   let sawReasoning = false;
+  let latestUsage = null;
+  let sawDone = false;
 
   const processSseBlock = (block) => {
     const data = extractSseDataPayload(block);
     if (!data) return false;
-    if (data === "[DONE]") return true;
+    if (data === "[DONE]") {
+      sawDone = true;
+      return true;
+    }
 
     let json;
     try {
@@ -7114,6 +7550,8 @@ async function pipeOpenRouterSse(upstream, res, reasoningEnabled) {
     if (streamError) {
       throw new Error(streamError);
     }
+
+    latestUsage = sanitizeRuntimeTokenUsage(json?.usage) || latestUsage;
 
     const choice = json?.choices?.[0] || {};
     const delta =
@@ -7162,14 +7600,21 @@ async function pipeOpenRouterSse(upstream, res, reasoningEnabled) {
       const block = buffer.slice(0, boundary.index);
       buffer = buffer.slice(boundary.index + boundary.separatorLength);
       const gotDone = processSseBlock(block);
-      if (gotDone) return;
+      if (gotDone) break;
       boundary = findSseEventBoundary(buffer);
     }
+    if (sawDone) break;
   }
 
   const tail = buffer.trim();
-  if (tail) {
+  if (tail && !sawDone) {
     processSseBlock(tail);
+  }
+
+  if (latestUsage) {
+    writeEvent(res, "usage", {
+      usage: latestUsage,
+    });
   }
 
   if (!sawContent && sawReasoning) {
@@ -7775,6 +8220,7 @@ function getModelByAgent(agentId, runtimeConfig = null) {
   }
   const runtimeModel = sanitizeRuntimeModel(runtimeConfig?.model);
   if (runtimeModel) return runtimeModel;
+  const provider = getProviderByAgent(targetAgent, runtimeConfig);
 
   const defaults = {
     A: "doubao-seed-1-6-251015",
@@ -7783,14 +8229,17 @@ function getModelByAgent(agentId, runtimeConfig = null) {
     D: AGENT_D_FIXED_MODEL,
   };
 
-  const map = {
-    A: process.env.AGENT_MODEL_A || defaults.A,
-    B: process.env.AGENT_MODEL_B || defaults.B,
-    C: process.env.AGENT_MODEL_C || defaults.C,
-    D: defaults.D,
+  const envMap = {
+    A: process.env.AGENT_MODEL_A,
+    B: process.env.AGENT_MODEL_B,
+    C: process.env.AGENT_MODEL_C,
+    D: "",
   };
-
-  return sanitizeRuntimeModel(map[targetAgent] || map.A) || map.A;
+  const envModel = sanitizeRuntimeModel(envMap[targetAgent]);
+  if (envModel) return envModel;
+  const providerDefaultModel = getProviderDefaultModel(provider);
+  if (providerDefaultModel) return providerDefaultModel;
+  return sanitizeRuntimeModel(defaults[targetAgent] || defaults.A) || defaults.A;
 }
 
 async function getSystemPromptByAgent(agentId) {
@@ -8526,10 +8975,17 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     normalizedAgentId === "C"
       ? AGENT_C_FIXED_PROVIDER
       : sanitizeRuntimeProvider(source.provider);
-  const protocol = sanitizeRuntimeProtocol(source.protocol);
+  const protocol =
+    provider === "packycode" ? "chat" : sanitizeRuntimeProtocol(source.protocol);
   const model = sanitizeRuntimeModel(source.model);
   const modelForMatching =
-    model || getModelByAgent(normalizedAgentId, { model: "" });
+    model ||
+    getModelByAgent(normalizedAgentId, {
+      ...source,
+      provider,
+      protocol,
+      model: "",
+    });
   const tokenProfile = resolveRuntimeTokenProfileByModel(modelForMatching);
   const tokenDefaults = tokenProfile || defaults;
   const lockTokenFields = protocol === "responses" && provider === "volcengine";
@@ -8596,7 +9052,7 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
   );
   const thinkingEffort = sanitizeReasoningEffort(
     source.thinkingEffort,
-    defaults.thinkingEffort,
+    getProviderDefaultThinkingEffort(provider, defaults.thinkingEffort),
   );
   const includeCurrentTime = sanitizeRuntimeBoolean(
     source.includeCurrentTime,
@@ -8811,6 +9267,16 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     }
   }
 
+  if (provider === "packycode") {
+    next.protocol = "chat";
+    next.enableWebSearch = false;
+    if (isPackyGpt54Model(modelForMatching)) {
+      next.contextWindowTokens = PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS;
+      next.maxInputTokens = PACKYCODE_GPT54_MAX_INPUT_TOKENS;
+      next.maxOutputTokens = PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS;
+    }
+  }
+
   if (normalizedAgentId === "D") {
     const sourceProvider = sanitizeRuntimeProvider(source.provider);
     const sourceModel = sanitizeRuntimeModel(source.model).toLowerCase();
@@ -8975,6 +9441,8 @@ function sanitizeRuntimeProvider(value) {
   if (key === "inherit" || key === "default" || key === "auto")
     return "inherit";
   if (key === "openrouter") return "openrouter";
+  if (key === "packycode" || key === "packy" || key === "packyapi")
+    return "packycode";
   if (key === "aliyun" || key === "alibaba" || key === "dashscope")
     return "aliyun";
   if (key === "volcengine" || key === "volc" || key === "ark")
@@ -9150,6 +9618,559 @@ function sanitizeReasoningEffort(value, fallback = "high") {
   return "high";
 }
 
+function getProviderDefaultModel(provider) {
+  return normalizeProvider(provider) === "packycode"
+    ? PACKYCODE_DEFAULT_MODEL
+    : "";
+}
+
+function getProviderDefaultThinkingEffort(provider, fallback = "high") {
+  return normalizeProvider(provider) === "packycode"
+    ? "medium"
+    : sanitizeReasoningEffort(fallback, "high");
+}
+
+function isPackyGpt54Model(model = "") {
+  return getNormalizedModelCandidates(model).some(
+    (candidate) => candidate === PACKYCODE_DEFAULT_MODEL,
+  );
+}
+
+function isPackyTokenBudgetRuntime(provider = "", model = "") {
+  return normalizeProvider(provider) === "packycode" && isPackyGpt54Model(model);
+}
+
+function resolvePackyTokenizerModel(model = "") {
+  return isPackyGpt54Model(model) ? "gpt-5" : undefined;
+}
+
+function sanitizeRuntimeTokenUsage(raw) {
+  const usage = raw && typeof raw === "object" ? raw : {};
+  const prompt_tokens = sanitizeRuntimeInteger(
+    usage.prompt_tokens ?? usage.input_tokens,
+    0,
+    0,
+    10_000_000,
+  );
+  const completion_tokens = sanitizeRuntimeInteger(
+    usage.completion_tokens ?? usage.output_tokens,
+    0,
+    0,
+    10_000_000,
+  );
+  const total_tokens = sanitizeRuntimeInteger(
+    usage.total_tokens,
+    prompt_tokens + completion_tokens,
+    0,
+    10_000_000,
+  );
+  if (!prompt_tokens && !completion_tokens && !total_tokens) return undefined;
+  return {
+    prompt_tokens,
+    completion_tokens,
+    total_tokens,
+  };
+}
+
+function findLatestPackyContextSummary(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const message = list[index];
+    if (
+      message?.role === "system" &&
+      message?.hidden &&
+      message?.internalType === "context_summary" &&
+      hasUsableMessageContent(message?.content)
+    ) {
+      return { index, message };
+    }
+  }
+  return { index: -1, message: null };
+}
+
+function findUserRoundStartIndex(messages, keepUserRounds) {
+  const list = Array.isArray(messages) ? messages : [];
+  const safeKeep = sanitizeRuntimeInteger(keepUserRounds, 0, 0, 400);
+  if (list.length === 0 || safeKeep <= 0) return list.length;
+
+  let seenUserRounds = 0;
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    if (list[index]?.role !== "user") continue;
+    seenUserRounds += 1;
+    if (seenUserRounds === safeKeep) {
+      return index;
+    }
+  }
+
+  return 0;
+}
+
+function buildPackySummaryMessageId(sessionId = "", existingId = "") {
+  const safeExistingId = sanitizeId(existingId, "");
+  if (safeExistingId) return safeExistingId;
+  const safeSessionId = sanitizeId(sessionId, "");
+  if (safeSessionId) return `packy-summary-${safeSessionId}`;
+  return `packy-summary-${Date.now()}`;
+}
+
+function parseDataUrlMime(value = "") {
+  const raw = String(value || "").trim();
+  const match = /^data:([^;,]+)[;,]/i.exec(raw);
+  return sanitizeGroupChatFileMimeType(match?.[1] || "");
+}
+
+function buildPackyEstimatorTextContent(content) {
+  if (typeof content === "string") return content;
+  const normalized = normalizeMessageContent(content);
+  if (!Array.isArray(normalized) || normalized.length === 0) return "";
+
+  return normalized
+    .map((part) => {
+      const type = String(part?.type || "")
+        .trim()
+        .toLowerCase();
+      if (type === "text" || type === "input_text" || type === "output_text") {
+        return String(part?.text || "");
+      }
+      if (type === "image_url" || type === "input_image") {
+        return "[图片附件]";
+      }
+      if (type === "input_file") {
+        return "[文件引用]";
+      }
+      if (type === "input_video") {
+        return "[视频引用]";
+      }
+      if (type === "file") {
+        const filePayload = normalizeOpenRouterFilePart(part);
+        const filename = sanitizeText(
+          filePayload?.filename || part?.filename || "",
+          "附件",
+          180,
+        );
+        return `[文件附件: ${filename}]`;
+      }
+      if (type === "file_url" || type === "input_file_url") {
+        const name = sanitizeText(
+          part?.file_url?.name ||
+            part?.file_url?.filename ||
+            part?.name ||
+            part?.filename ||
+            "",
+          "附件",
+          180,
+        );
+        return `[文件链接: ${name}]`;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function estimatePackyNonTextPartTokens(content) {
+  const normalized = normalizeMessageContent(content);
+  if (!Array.isArray(normalized) || normalized.length === 0) return 0;
+
+  return normalized.reduce((total, part) => {
+    const type = String(part?.type || "")
+      .trim()
+      .toLowerCase();
+    if (type === "image_url" || type === "input_image") {
+      return total + 1200;
+    }
+    if (type === "input_file" || type === "file_url" || type === "input_file_url") {
+      return total + 2400;
+    }
+    if (type === "input_video") {
+      return total + 3600;
+    }
+    if (type !== "file") {
+      return total;
+    }
+
+    const filePayload = normalizeOpenRouterFilePart(part);
+    const mime = parseDataUrlMime(filePayload?.file_data);
+    if (mime.includes("pdf")) return total + 8000;
+    if (
+      mime.includes("word") ||
+      mime.includes("sheet") ||
+      mime.includes("excel") ||
+      mime.includes("text/")
+    ) {
+      return total + 6000;
+    }
+    return total + 3000;
+  }, 0);
+}
+
+function estimatePackyChatInputTokens({ messages = [], systemPrompt = "" } = {}) {
+  const chat = [];
+  const safeSystemPrompt = String(systemPrompt || "").trim();
+  if (safeSystemPrompt) {
+    chat.push({ role: "system", content: safeSystemPrompt });
+  }
+
+  let extraTokens = 0;
+  (Array.isArray(messages) ? messages : []).forEach((message) => {
+    const role = ["system", "user", "assistant"].includes(message?.role)
+      ? message.role
+      : "user";
+    const text = buildPackyEstimatorTextContent(message?.content) || " ";
+    chat.push({ role, content: text });
+    extraTokens += estimatePackyNonTextPartTokens(message?.content);
+  });
+
+  try {
+    return encodeChat(chat, resolvePackyTokenizerModel(PACKYCODE_DEFAULT_MODEL))
+      .length + extraTokens;
+  } catch {
+    return (
+      chat.reduce(
+        (total, item) => total + countTokens(String(item?.content || "")),
+        0,
+      ) + extraTokens
+    );
+  }
+}
+
+function clipPackySummaryText(value, maxChars = 6000) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars).trim()}\n…（已截断）`;
+}
+
+function renderPackySummarySourceMessages(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  return list
+    .map((message, index) => {
+      const role = String(message?.role || "assistant").toUpperCase();
+      const messageId = sanitizeId(message?.id, `m${index + 1}`);
+      const content = normalizeMessageContent(message?.content);
+      const lines = [`[${role} ${messageId}]`];
+
+      if (typeof content === "string") {
+        const text = clipPackySummaryText(content);
+        if (text) lines.push(text);
+        return lines.join("\n");
+      }
+
+      const safeParts = Array.isArray(content) ? content : [];
+      safeParts.forEach((part) => {
+        const type = String(part?.type || "")
+          .trim()
+          .toLowerCase();
+        if (type === "text" || type === "input_text" || type === "output_text") {
+          const text = clipPackySummaryText(part?.text, 5000);
+          if (text) lines.push(text);
+          return;
+        }
+        if (type === "image_url" || type === "input_image") {
+          lines.push("[图片附件]");
+          return;
+        }
+        if (type === "input_video") {
+          lines.push("[视频附件]");
+          return;
+        }
+        if (type === "input_file") {
+          lines.push("[文件引用]");
+          return;
+        }
+        if (type === "file_url" || type === "input_file_url") {
+          const name = sanitizeText(
+            part?.file_url?.name ||
+              part?.file_url?.filename ||
+              part?.name ||
+              part?.filename ||
+              "",
+            "附件",
+            180,
+          );
+          lines.push(`[文件链接: ${name}]`);
+          return;
+        }
+        if (type === "file") {
+          const filePayload = normalizeOpenRouterFilePart(part);
+          const filename = sanitizeText(
+            filePayload?.filename || part?.filename || "",
+            "附件",
+            180,
+          );
+          lines.push(`[文件附件: ${filename}]`);
+        }
+      });
+
+      return lines.join("\n");
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function extractChatCompletionOutputText(responseJson) {
+  const choice = responseJson?.choices?.[0] || {};
+  const message = choice?.message && typeof choice.message === "object"
+    ? choice.message
+    : {};
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => extractDeltaText(part?.text || part?.content || part))
+      .join("");
+  }
+  return extractDeltaText(choice?.text || responseJson?.output_text || "");
+}
+
+async function summarizePackyContextBlock({
+  chatEndpoint = "",
+  apiKey = "",
+  model = PACKYCODE_DEFAULT_MODEL,
+  thinkingEffort = "medium",
+  existingSummary = "",
+  sourceMessages = [],
+}) {
+  const transcript = renderPackySummarySourceMessages(sourceMessages);
+  if (!transcript) {
+    throw new Error("没有可压缩的历史消息。");
+  }
+
+  const payload = {
+    model,
+    stream: false,
+    response_format: { type: "json_object" },
+    max_tokens: 8192,
+    messages: [
+      {
+        role: "system",
+        content:
+          "你负责把聊天历史压缩成供后续轮次继续使用的上下文摘要。请输出 JSON 对象，且仅包含 summary 字段。summary 必须保留：任务目标、关键结论、用户偏好、待办项、已确认事实、失败尝试、附件或图片讨论得出的结论与引用对象。不要复写整份附件/PDF/图片正文，不要输出 base64，不要丢失尚未完成的任务。",
+      },
+      {
+        role: "user",
+        content: [
+          existingSummary
+            ? `现有摘要：\n${clipPackySummaryText(existingSummary, 12000)}`
+            : "现有摘要：无",
+          "新增待压缩历史：",
+          transcript,
+          '请返回 JSON，例如：{"summary":"..."}',
+        ].join("\n\n"),
+      },
+    ],
+    reasoning: {
+      effort: sanitizeReasoningEffort(thinkingEffort, "medium"),
+    },
+  };
+
+  const response = await fetch(chatEndpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  const detail = await safeReadText(response);
+  if (!response.ok) {
+    throw new Error(
+      formatProviderUpstreamError("packycode", "chat", response.status, detail),
+    );
+  }
+
+  let json;
+  try {
+    json = JSON.parse(detail);
+  } catch {
+    throw new Error("PackyCode 摘要响应不是合法 JSON。");
+  }
+  const text = extractChatCompletionOutputText(json);
+  if (!text.trim()) {
+    throw new Error("PackyCode 摘要响应为空。");
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    const summary = sanitizeText(parsed?.summary, "", 24000);
+    if (summary) return summary;
+  } catch {
+    // Ignore JSON parse failure and fall back to raw text.
+  }
+
+  return sanitizeText(text, "", 24000);
+}
+
+function buildPackyCompressedRequestMessages(messages, summaryMessage) {
+  const safeMessages = Array.isArray(messages) ? messages.filter(Boolean) : [];
+  if (!summaryMessage?.summaryUpToMessageId) {
+    return [
+      summaryMessage,
+      ...safeMessages.filter(
+        (message) =>
+          !(message?.hidden && message?.internalType === "context_summary"),
+      ),
+    ];
+  }
+
+  const cutoffId = sanitizeId(summaryMessage.summaryUpToMessageId, "");
+  let skipping = !!cutoffId;
+  let foundCutoff = false;
+  const next = [summaryMessage];
+
+  safeMessages.forEach((message) => {
+    if (message?.hidden && message?.internalType === "context_summary") {
+      return;
+    }
+    if (!skipping) {
+      next.push(message);
+      return;
+    }
+    if (sanitizeId(message?.id, "") === cutoffId) {
+      foundCutoff = true;
+      skipping = false;
+    }
+  });
+
+  if (!cutoffId || foundCutoff) return next;
+  return [
+    summaryMessage,
+    ...safeMessages.filter(
+      (message) =>
+        !(message?.hidden && message?.internalType === "context_summary"),
+    ),
+  ];
+}
+
+async function maybeApplyPackyContextCompression({
+  sessionId = "",
+  provider = "",
+  model = "",
+  config = {},
+  systemPrompt = "",
+  requestMessages = [],
+  providerConfig = {},
+}) {
+  if (!isPackyTokenBudgetRuntime(provider, model)) {
+    return {
+      requestMessages,
+      compressionMetaForClient: null,
+      summaryMessage: null,
+    };
+  }
+
+  let workingMessages = Array.isArray(requestMessages)
+    ? requestMessages.map((message) => ({ ...message }))
+    : [];
+  if (workingMessages.length === 0) {
+    return {
+      requestMessages,
+      compressionMetaForClient: null,
+      summaryMessage: null,
+    };
+  }
+
+  let estimatedInputTokens = estimatePackyChatInputTokens({
+    messages: workingMessages,
+    systemPrompt,
+  });
+  if (estimatedInputTokens < PACKYCODE_GPT54_COMPRESSION_TRIGGER_TOKENS) {
+    return {
+      requestMessages: workingMessages,
+      compressionMetaForClient: null,
+      summaryMessage: null,
+    };
+  }
+
+  const existingSummaryMatch = findLatestPackyContextSummary(workingMessages);
+  let currentSummaryMessage = existingSummaryMatch.message;
+  let currentSummaryText = buildPackyEstimatorTextContent(
+    existingSummaryMatch.message?.content,
+  );
+  let lastCompressionMeta = null;
+
+  for (
+    let keepUserRounds = PACKYCODE_GPT54_DEFAULT_KEEP_USER_ROUNDS;
+    keepUserRounds >= PACKYCODE_GPT54_MIN_KEEP_USER_ROUNDS;
+    keepUserRounds -= 1
+  ) {
+    const summaryIndex = findLatestPackyContextSummary(workingMessages).index;
+    const keepStartIndex = findUserRoundStartIndex(workingMessages, keepUserRounds);
+    const sourceStartIndex = summaryIndex >= 0 ? summaryIndex + 1 : 0;
+    const sourceMessages = workingMessages.slice(sourceStartIndex, keepStartIndex);
+    const visibleSourceMessages = sourceMessages.filter(
+      (message) => !message?.hidden,
+    );
+    const summaryUpToMessageId = sanitizeId(
+      visibleSourceMessages[visibleSourceMessages.length - 1]?.id,
+      "",
+    );
+    if (!summaryUpToMessageId || visibleSourceMessages.length === 0) {
+      continue;
+    }
+
+    const beforeEstimate = estimatedInputTokens;
+    const summaryText = await summarizePackyContextBlock({
+      chatEndpoint: providerConfig.chatEndpoint,
+      apiKey: providerConfig.apiKey,
+      model,
+      thinkingEffort: config?.thinkingEffort,
+      existingSummary: currentSummaryText,
+      sourceMessages: visibleSourceMessages,
+    });
+    const updatedAt = new Date().toISOString();
+    currentSummaryText = summaryText;
+    currentSummaryMessage = {
+      id: buildPackySummaryMessageId(sessionId, currentSummaryMessage?.id),
+      role: "system",
+      content: summaryText,
+      hidden: true,
+      internalType: "context_summary",
+      summaryUpToMessageId,
+      compressionMeta: {
+        estimatedInputTokensBefore: beforeEstimate,
+        estimatedInputTokensAfter: 0,
+        sourceMessageCount: visibleSourceMessages.length,
+        updatedAt,
+      },
+    };
+    workingMessages = buildPackyCompressedRequestMessages(
+      workingMessages,
+      currentSummaryMessage,
+    );
+    estimatedInputTokens = estimatePackyChatInputTokens({
+      messages: workingMessages,
+      systemPrompt,
+    });
+    currentSummaryMessage = {
+      ...currentSummaryMessage,
+      compressionMeta: {
+        ...currentSummaryMessage.compressionMeta,
+        estimatedInputTokensAfter: estimatedInputTokens,
+      },
+    };
+    lastCompressionMeta = {
+      applied: true,
+      estimatedInputTokensBefore: beforeEstimate,
+      estimatedInputTokensAfter: estimatedInputTokens,
+      sourceMessageCount: visibleSourceMessages.length,
+      updatedAt,
+      summaryUpToMessageId,
+    };
+
+    if (estimatedInputTokens <= PACKYCODE_GPT54_COMPRESSION_TARGET_TOKENS) {
+      break;
+    }
+  }
+
+  return {
+    requestMessages: workingMessages,
+    compressionMetaForClient: lastCompressionMeta,
+    summaryMessage: currentSummaryMessage,
+  };
+}
+
 function sanitizeSmartContextMode(value) {
   const key = String(value || "")
     .trim()
@@ -9282,6 +10303,8 @@ function normalizeProvider(value) {
     .trim()
     .toLowerCase();
   if (key === "openrouter") return "openrouter";
+  if (key === "packycode" || key === "packy" || key === "packyapi")
+    return "packycode";
   if (key === "aliyun" || key === "alibaba" || key === "dashscope")
     return "aliyun";
   if (key === "volcengine" || key === "volc" || key === "ark")
@@ -9290,6 +10313,18 @@ function normalizeProvider(value) {
 }
 
 function getProviderConfig(provider) {
+  if (provider === "packycode") {
+    return {
+      chatEndpoint:
+        process.env.PACKYCODE_CHAT_ENDPOINT ||
+        "https://www.packyapi.com/v1/chat/completions",
+      responsesEndpoint: "",
+      apiKey: readEnvApiKey("PACKYCODE_API_KEY"),
+      missingKeyMessage:
+        "未检测到 PackyCode API Key。请在 .env 中配置 PACKYCODE_API_KEY。",
+    };
+  }
+
   if (provider === "aliyun") {
     return buildAliyunProviderConfig({
       env: process.env,
@@ -9498,6 +10533,14 @@ function formatProviderUpstreamError(provider, protocol, status, detail) {
     /not available in your region/i.test(`${errorMessage} ${raw}`)
   ) {
     return "OpenRouter 拒绝了当前模型：该模型在你所在地区不可用，请更换模型后重试。";
+  }
+
+  if (provider === "packycode" && status === 401) {
+    return "PackyCode 认证失败：请检查 PACKYCODE_API_KEY 是否正确且仍有效。";
+  }
+
+  if (provider === "packycode" && status === 403) {
+    return "PackyCode 拒绝了当前请求：请检查账号权限、模型可用性或上游策略限制。";
   }
 
   if (provider === "volcengine") {
@@ -9852,7 +10895,7 @@ function readRequestPreparedAttachmentRefs(raw) {
 function defaultChatState() {
   return {
     activeId: "s1",
-    groups: [{ id: "g1", name: "新组", description: "" }],
+    groups: [],
     sessions: [{ id: "s1", title: "新对话 1", groupId: null, pinned: false }],
     sessionMessages: {
       s1: [
@@ -10110,8 +11153,7 @@ function sanitizeStateSettings(raw) {
 }
 
 function sanitizeGroups(input) {
-  if (!Array.isArray(input))
-    return [{ id: "g1", name: "新组", description: "" }];
+  if (!Array.isArray(input)) return [];
 
   const used = new Set();
   const normalized = [];
@@ -10121,14 +11163,11 @@ function sanitizeGroups(input) {
     used.add(id);
     normalized.push({
       id,
-      name: sanitizeText(item?.name, "新组", 30),
+      name: sanitizeText(item?.name, "新项目", 30),
       description: sanitizeText(item?.description, "", 120),
     });
   });
 
-  if (normalized.length === 0) {
-    return [{ id: "g1", name: "新组", description: "" }];
-  }
   return normalized;
 }
 
@@ -10154,7 +11193,7 @@ function sanitizeSessions(input, groups) {
     });
   });
 
-  if (normalized.length === 0) {
+  if (input.length > 0 && normalized.length === 0) {
     return [{ id: "s1", title: "新对话 1", groupId: null, pinned: false }];
   }
 
@@ -10175,7 +11214,7 @@ function sanitizeSessionMessages(input, sessions) {
       .map((m, idx) => sanitizeMessage(m, idx));
   });
 
-  if (Object.keys(normalized).length === 0) {
+  if (sessions.length > 0 && Object.keys(normalized).length === 0) {
     normalized.s1 = defaultChatState().sessionMessages.s1;
   }
 
@@ -10185,6 +11224,147 @@ function sanitizeSessionMessages(input, sessions) {
   });
 
   return normalized;
+}
+
+function scoreSanitizedChatMessage(message) {
+  if (!message || typeof message !== "object") return 0;
+  const contentLength = String(message.content || "").trim().length;
+  const reasoningLength = String(message.reasoning || "").trim().length;
+  const attachmentCount = Array.isArray(message.attachments)
+    ? message.attachments.filter(Boolean).length
+    : 0;
+  return contentLength + reasoningLength + attachmentCount * 64;
+}
+
+function scoreSanitizedChatMessageList(list) {
+  const safeList = Array.isArray(list) ? list : [];
+  return safeList.reduce(
+    (total, message) => total + scoreSanitizedChatMessage(message),
+    0,
+  );
+}
+
+function mergeSanitizedChatMessageLists(primaryList, secondaryList, limit = 400) {
+  const safePrimary = Array.isArray(primaryList) ? primaryList.filter(Boolean) : [];
+  const safeSecondary = Array.isArray(secondaryList) ? secondaryList.filter(Boolean) : [];
+  const next = [...safePrimary].slice(0, limit);
+  const indexById = new Map();
+
+  next.forEach((message, index) => {
+    const messageId = sanitizeId(message?.id, "");
+    if (!messageId) return;
+    indexById.set(messageId, index);
+  });
+
+  safeSecondary.forEach((message) => {
+    if (next.length >= limit && !indexById.has(sanitizeId(message?.id, ""))) {
+      return;
+    }
+    const messageId = sanitizeId(message?.id, "");
+    if (!messageId) {
+      if (next.length < limit) next.push(message);
+      return;
+    }
+    const existingIndex = indexById.get(messageId);
+    if (!Number.isInteger(existingIndex)) {
+      if (next.length >= limit) return;
+      indexById.set(messageId, next.length);
+      next.push(message);
+      return;
+    }
+    if (
+      scoreSanitizedChatMessage(message) >
+      scoreSanitizedChatMessage(next[existingIndex])
+    ) {
+      next[existingIndex] = message;
+    }
+  });
+
+  return next;
+}
+
+function chooseMoreCompleteSanitizedChatMessageList(existingList, incomingList) {
+  const safeExisting = Array.isArray(existingList) ? existingList.filter(Boolean) : [];
+  const safeIncoming = Array.isArray(incomingList) ? incomingList.filter(Boolean) : [];
+
+  if (safeExisting.length === 0) {
+    return { list: safeIncoming, preservedExisting: false };
+  }
+  if (safeIncoming.length === 0) {
+    return { list: safeExisting, preservedExisting: true };
+  }
+
+  const existingIds = new Set(
+    safeExisting.map((message) => sanitizeId(message?.id, "")).filter(Boolean),
+  );
+  const incomingIds = new Set(
+    safeIncoming.map((message) => sanitizeId(message?.id, "")).filter(Boolean),
+  );
+  const incomingContainsExisting = Array.from(existingIds).every((id) =>
+    incomingIds.has(id),
+  );
+  const existingContainsIncoming = Array.from(incomingIds).every((id) =>
+    existingIds.has(id),
+  );
+  const existingScore = scoreSanitizedChatMessageList(safeExisting);
+  const incomingScore = scoreSanitizedChatMessageList(safeIncoming);
+
+  if (
+    incomingContainsExisting &&
+    safeIncoming.length >= safeExisting.length &&
+    incomingScore >= existingScore
+  ) {
+    return { list: safeIncoming, preservedExisting: false };
+  }
+
+  if (
+    existingContainsIncoming &&
+    safeExisting.length >= safeIncoming.length &&
+    existingScore >= incomingScore
+  ) {
+    return { list: safeExisting, preservedExisting: true };
+  }
+
+  if (safeExisting.length > safeIncoming.length || existingScore > incomingScore) {
+    return {
+      list: mergeSanitizedChatMessageLists(safeExisting, safeIncoming),
+      preservedExisting: true,
+    };
+  }
+
+  return {
+    list: mergeSanitizedChatMessageLists(safeIncoming, safeExisting),
+    preservedExisting: false,
+  };
+}
+
+function mergeChatStateSessionMessagesPreservingCompleteness(
+  existingMessages,
+  incomingMessages,
+  sessions,
+) {
+  const sourceExisting =
+    existingMessages && typeof existingMessages === "object" ? existingMessages : {};
+  const sourceIncoming =
+    incomingMessages && typeof incomingMessages === "object" ? incomingMessages : {};
+  const safeSessions = Array.isArray(sessions) ? sessions : [];
+  const merged = {};
+  const preservedSessionIds = [];
+
+  safeSessions.forEach((session) => {
+    const sessionId = sanitizeId(session?.id, "");
+    if (!sessionId) return;
+    const { list, preservedExisting } = chooseMoreCompleteSanitizedChatMessageList(
+      sourceExisting[sessionId],
+      sourceIncoming[sessionId],
+    );
+    merged[sessionId] = Array.isArray(list) ? list.slice(0, 400) : [];
+    if (preservedExisting) {
+      preservedSessionIds.push(sessionId);
+    }
+  });
+
+  return { sessionMessages: merged, preservedSessionIds };
 }
 
 function sanitizeMessage(msg, idx) {
@@ -10227,6 +11407,10 @@ function sanitizeMessage(msg, idx) {
     role,
     content: sanitizeText(msg?.content, "", 24000),
     reasoning: sanitizeText(msg?.reasoning, "", 24000),
+    hidden: sanitizeRuntimeBoolean(msg?.hidden, false),
+    internalType: sanitizeRuntimeInternalType(msg?.internalType) || undefined,
+    summaryUpToMessageId: sanitizeId(msg?.summaryUpToMessageId, "") || undefined,
+    compressionMeta: sanitizeRuntimeCompressionMeta(msg?.compressionMeta),
     feedback:
       msg?.feedback === "up" || msg?.feedback === "down" ? msg.feedback : null,
     attachments,
@@ -10257,12 +11441,30 @@ function sanitizeMessage(msg, idx) {
               "",
               16,
             ),
+            usage: sanitizeRuntimeTokenUsage(msg.runtime.usage),
+            contextCompression: (() => {
+              const source =
+                msg.runtime.contextCompression &&
+                typeof msg.runtime.contextCompression === "object"
+                  ? msg.runtime.contextCompression
+                  : {};
+              const applied = sanitizeRuntimeBoolean(source.applied, false);
+              const compressionMeta = sanitizeRuntimeCompressionMeta(source);
+              if (!applied && !compressionMeta) return undefined;
+              return {
+                ...(compressionMeta || {}),
+                applied,
+                summaryUpToMessageId:
+                  sanitizeId(source.summaryUpToMessageId, "") || undefined,
+              };
+            })(),
           }
         : undefined,
   };
 }
 
 function resolveActiveId(activeId, sessions, fallback) {
+  if (!Array.isArray(sessions) || sessions.length === 0) return "";
   const id = sanitizeId(activeId, fallback);
   if (sessions.some((s) => s.id === id)) return id;
   return sessions[0]?.id || fallback;
@@ -14816,6 +16018,7 @@ export {
   readTeacherScopedSessionContextRefs,
   sanitizeChatStatePayload,
   sanitizeChatStateMetaPayload,
+  mergeChatStateSessionMessagesPreservingCompleteness,
   sanitizeSessionMessageUpsertsPayload,
   sanitizeSmartContextMapAgentId,
   buildSmartContextEnabledMapKey,

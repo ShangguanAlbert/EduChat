@@ -44,6 +44,14 @@ const DEFAULT_AGENT_MODEL_BY_AGENT = Object.freeze({
 });
 const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
   {
+    id: "gpt-5.4",
+    aliases: ["gpt-5.4"],
+    contextWindowTokens: 256000,
+    maxInputTokens: 256000,
+    maxOutputTokens: 256000,
+    maxReasoningTokens: RUNTIME_MAX_REASONING_TOKENS,
+  },
+  {
     id: "doubao-seed-2-0-pro-260215",
     aliases: [
       "doubao-seed-2-0-pro-260215",
@@ -380,6 +388,12 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   openrouterUseResponseHealing: false,
   openrouterPdfEngine: "auto",
 });
+export const PACKYCODE_PROVIDER = "packycode";
+export const PACKYCODE_DEFAULT_MODEL = "gpt-5.4";
+export const PACKYCODE_DEFAULT_THINKING_EFFORT = "medium";
+export const PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS = 256000;
+export const PACKYCODE_GPT54_MAX_INPUT_TOKENS = 256000;
+export const PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS = 256000;
 const AGENT_C_ALWAYS_ON_WEB_SEARCH_MODEL_ALIASES = new Set([
   "doubao-seed-2-0-pro-260215",
   "doubao-seed-2-0-pro",
@@ -456,6 +470,28 @@ function getDefaultRuntimeConfigByAgent(agentId = "A") {
 function getDefaultModelByAgent(agentId = "A") {
   const key = AGENT_IDS.includes(agentId) ? agentId : "A";
   return DEFAULT_AGENT_MODEL_BY_AGENT[key] || DEFAULT_AGENT_MODEL_BY_AGENT.A;
+}
+
+export function resolveProviderDefaultModel(provider, agentId = "A") {
+  const normalizedProvider = sanitizeProvider(provider);
+  if (normalizedProvider === PACKYCODE_PROVIDER) {
+    return PACKYCODE_DEFAULT_MODEL;
+  }
+  return getDefaultModelByAgent(agentId);
+}
+
+export function resolveProviderDefaultThinkingEffort(provider, fallback = "high") {
+  const normalizedProvider = sanitizeProvider(provider);
+  if (normalizedProvider === PACKYCODE_PROVIDER) {
+    return PACKYCODE_DEFAULT_THINKING_EFFORT;
+  }
+  return sanitizeThinkingEffort(fallback, "high");
+}
+
+function isPackyGpt54RuntimeModel(model = "") {
+  return getNormalizedModelCandidates(model).some(
+    (candidate) => candidate === PACKYCODE_DEFAULT_MODEL,
+  );
 }
 
 function getNormalizedModelCandidates(model) {
@@ -634,9 +670,11 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
     normalizedAgentId === "C"
       ? AGENT_C_FIXED_PROVIDER
       : sanitizeProvider(source.provider);
-  const protocol = sanitizeProtocol(source.protocol);
+  const protocol =
+    provider === PACKYCODE_PROVIDER ? "chat" : sanitizeProtocol(source.protocol);
   const model = sanitizeModel(source.model);
-  const modelForMatching = model || getDefaultModelByAgent(normalizedAgentId);
+  const modelForMatching =
+    model || resolveProviderDefaultModel(provider, normalizedAgentId);
   const tokenProfile = resolveRuntimeTokenProfileByModel(modelForMatching);
   const tokenDefaults = tokenProfile || defaults;
   const lockTokenFields = protocol === "responses" && provider === "volcengine";
@@ -693,7 +731,7 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
     ),
     thinkingEffort: sanitizeThinkingEffort(
       source.thinkingEffort,
-      defaults.thinkingEffort,
+      resolveProviderDefaultThinkingEffort(provider, defaults.thinkingEffort),
     ),
     includeCurrentTime: sanitizeBoolean(
       source.includeCurrentTime,
@@ -851,6 +889,16 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
     }
   }
 
+  if (provider === PACKYCODE_PROVIDER) {
+    next.protocol = "chat";
+    next.enableWebSearch = false;
+    if (isPackyGpt54RuntimeModel(modelForMatching)) {
+      next.contextWindowTokens = PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS;
+      next.maxInputTokens = PACKYCODE_GPT54_MAX_INPUT_TOKENS;
+      next.maxOutputTokens = PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS;
+    }
+  }
+
   if (normalizedAgentId === "D") {
     const sourceProvider = sanitizeProvider(source.provider);
     const sourceModel = sanitizeModel(source.model).toLowerCase();
@@ -941,6 +989,9 @@ function sanitizeProvider(value) {
   if (!key) return DEFAULT_AGENT_RUNTIME_CONFIG.provider;
   if (key === "inherit" || key === "default" || key === "auto") return "inherit";
   if (key === "openrouter") return "openrouter";
+  if (key === "packycode" || key === "packy" || key === "packyapi") {
+    return PACKYCODE_PROVIDER;
+  }
   if (key === "aliyun" || key === "alibaba" || key === "dashscope") return "aliyun";
   if (key === "volcengine" || key === "volc" || key === "ark") return "volcengine";
   return DEFAULT_AGENT_RUNTIME_CONFIG.provider;

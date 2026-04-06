@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Plus, ArrowUp, X, Image as ImageIcon } from "lucide-react";
+import { Plus, ArrowUp, Square, X, Image as ImageIcon } from "lucide-react";
 
 const ACCEPT_UPLOAD_TYPES = [
   ".doc",
@@ -75,7 +75,10 @@ const ACCEPT_UPLOAD_TYPES = [
 
 export default function MessageInput({
   onSend,
+  onStop,
   disabled = false,
+  isStreaming = false,
+  layoutMode = "thread",
   quoteText = "",
   quotePreviewMaxChars = 0,
   onClearQuote,
@@ -87,11 +90,14 @@ export default function MessageInput({
   const [imagePreviewUrlsByIndex, setImagePreviewUrlsByIndex] = useState({});
   const [preparingFiles, setPreparingFiles] = useState(false);
   const [prepareError, setPrepareError] = useState("");
+  const [isFocused, setIsFocused] = useState(false);
   const fileRef = useRef(null);
   const textRef = useRef(null);
 
   const normalizedQuoteText = useMemo(() => normalizeQuoteText(quoteText), [quoteText]);
   const hasQuote = normalizedQuoteText.length > 0;
+  const inputDisabled = disabled || isStreaming;
+  const hasText = text.length > 0;
   const quotePreviewText = useMemo(
     () => buildQuotePreviewText(normalizedQuoteText, quotePreviewMaxChars),
     [normalizedQuoteText, quotePreviewMaxChars],
@@ -99,9 +105,14 @@ export default function MessageInput({
   const canSend = useMemo(() => {
     return text.trim().length > 0 || files.length > 0 || hasQuote;
   }, [text, files, hasQuote]);
+  const isHomeLayout = layoutMode === "home";
+  const hasComposerExtras = hasQuote || files.length > 0 || preparingFiles || !!prepareError;
+  const isComposerExpanded =
+    hasComposerExtras || text.includes("\n") || text.length > 72;
+  const isComposerCompact = !isComposerExpanded;
 
   function submit() {
-    if (!canSend || disabled || preparingFiles) return;
+    if (!canSend || inputDisabled || preparingFiles) return;
 
     const t = buildFinalPrompt(text.trim(), normalizedQuoteText);
     onSend(t, files);
@@ -109,6 +120,7 @@ export default function MessageInput({
     setText("");
     setFiles([]);
     setPrepareError("");
+    setIsFocused(false);
     onConsumeQuote?.();
     if (fileRef.current) fileRef.current.value = "";
   }
@@ -144,7 +156,7 @@ export default function MessageInput({
   }
 
   async function onComposerPaste(e) {
-    if (disabled || preparingFiles) return;
+    if (inputDisabled || preparingFiles) return;
     const items = Array.from(e.clipboardData?.items || []);
     const imageFiles = items
       .filter((item) => item && item.kind === "file")
@@ -162,7 +174,12 @@ export default function MessageInput({
   useLayoutEffect(() => {
     if (!textRef.current) return;
 
-    const minHeight = 30;
+    if (isHomeLayout && isComposerCompact) {
+      textRef.current.style.height = "38px";
+      return;
+    }
+
+    const minHeight = isHomeLayout ? 38 : isComposerCompact ? 38 : 30;
     const maxHeight = 132;
 
     textRef.current.style.height = "auto";
@@ -171,7 +188,7 @@ export default function MessageInput({
       Math.max(minHeight, textRef.current.scrollHeight),
     );
     textRef.current.style.height = `${next}px`;
-  }, [text]);
+  }, [isComposerCompact, isHomeLayout, text]);
 
   useEffect(() => {
     if (files.length === 0) {
@@ -202,7 +219,11 @@ export default function MessageInput({
   }, [files]);
 
   return (
-    <div className={`composer${disabled ? " is-disabled" : ""}`}>
+    <div
+      className={`composer${inputDisabled ? " is-disabled" : ""}${
+        isHomeLayout ? " is-home-layout" : ""
+      }${isComposerExpanded ? " is-expanded" : " is-compact"}`}
+    >
       {hasQuote && (
         <div className="composer-quote">
           <span className="composer-quote-text" title={normalizedQuoteText}>
@@ -242,7 +263,7 @@ export default function MessageInput({
                     onClick={() => removeFile(idx)}
                     aria-label="移除附件"
                     title="移除"
-                    disabled={disabled || preparingFiles}
+                    disabled={inputDisabled || preparingFiles}
                   >
                     <X size={12} />
                   </button>
@@ -261,7 +282,7 @@ export default function MessageInput({
                   onClick={() => removeFile(idx)}
                   aria-label="移除附件"
                   title="移除"
-                  disabled={disabled || preparingFiles}
+                  disabled={inputDisabled || preparingFiles}
                 >
                   <X size={14} />
                 </button>
@@ -281,7 +302,7 @@ export default function MessageInput({
           multiple
           accept={ACCEPT_UPLOAD_TYPES}
           onChange={onPickFiles}
-          disabled={disabled}
+          disabled={inputDisabled}
           style={{ display: "none" }}
         />
 
@@ -289,7 +310,7 @@ export default function MessageInput({
           type="button"
           className="icon-btn"
           onClick={() => fileRef.current?.click()}
-          disabled={disabled || preparingFiles}
+          disabled={inputDisabled || preparingFiles}
           title="添加附件"
           aria-label="添加附件"
         >
@@ -301,7 +322,9 @@ export default function MessageInput({
           className="composer-text"
           placeholder="有问题，尽管问"
           value={text}
-          disabled={disabled}
+          disabled={inputDisabled}
+          onFocus={() => setIsFocused(true)}
+          onBlur={() => setIsFocused(false)}
           onChange={(e) => setText(e.target.value)}
           onPaste={onComposerPaste}
           onKeyDown={(e) => {
@@ -316,16 +339,29 @@ export default function MessageInput({
           rows={1}
         />
 
-        <button
-          type="button"
-          className="send-icon"
-          onClick={submit}
-          disabled={!canSend || disabled || preparingFiles}
-          title="发送"
-          aria-label="发送"
-        >
-          <ArrowUp size={18} />
-        </button>
+        {isStreaming ? (
+          <button
+            type="button"
+            className="send-icon stop-icon"
+            onClick={() => onStop?.()}
+            disabled={disabled}
+            title="停止生成"
+            aria-label="停止生成"
+          >
+            <Square size={16} fill="currentColor" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="send-icon"
+            onClick={submit}
+            disabled={!canSend || inputDisabled || preparingFiles}
+            title="发送"
+            aria-label="发送"
+          >
+            <ArrowUp size={18} />
+          </button>
+        )}
       </div>
     </div>
   );

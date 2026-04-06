@@ -141,3 +141,23 @@ export function suggestChatSessionTitle({
     }),
   });
 }
+
+export async function reportChatClientDebug(event, payload = {}) {
+  const safeEvent = String(event || "").trim();
+  if (!safeEvent) return;
+  try {
+    await fetch("/api/chat/debug-log", {
+      method: "POST",
+      headers: authHeaders({
+        "Content-Type": "application/json",
+      }),
+      body: JSON.stringify({
+        event: safeEvent,
+        payload,
+      }),
+      keepalive: true,
+    });
+  } catch {
+    // Ignore debug reporting failures.
+  }
+}

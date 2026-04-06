@@ -3,6 +3,7 @@ import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import LoginPage from "./pages/LoginPage.jsx";
 import LicensePage from "./pages/LicensePage.jsx";
 import ChatPage from "./pages/ChatPage.jsx";
+import ChatEntryPage from "./pages/ChatEntryPage.jsx";
 import ModeSelectionPage from "./pages/ModeSelectionPage.jsx";
 import ProductImprovementTaskPage from "./pages/ProductImprovementTaskPage.jsx";
 import AdminSettingsPage from "./pages/AdminSettingsPage.jsx";
@@ -59,6 +60,30 @@ export default function App() {
 
       <Route
         path="/chat"
+        element={
+          <RequireAuth>
+            <ChatEntryPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/chat/:sessionId"
+        element={
+          <RequireAuth>
+            <ChatEntryPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/c"
+        element={
+          <RequireAuth>
+            <ChatPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/c/:sessionId"
         element={
           <RequireAuth>
             <ChatPage />
