@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Lock, LockOpen, LogOut, X } from "lucide-react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import {
+  useBeforeUnload,
+  useLocation,
+  useNavigate,
+  useParams,
+} from "react-router-dom";
 import Sidebar from "../../../components/Sidebar.jsx";
 import AgentSelect from "../../../components/AgentSelect.jsx";
 import MessageList from "../../../components/MessageList.jsx";
@@ -45,17 +50,15 @@ import {
 import {
   clearManyStreamDrafts,
   clearStreamDraft,
-  getAllStreamDrafts,
   getStreamDraft,
   primeAllStreamDrafts,
   replaceAllStreamDrafts,
   startStreamDraft,
   updateStreamDraft,
-  useAllStreamDrafts,
 } from "../streamDraftStore.js";
-import { readChatBootstrapPrefetch } from "../bootstrapPrefetch.js";
 import {
   clearChatSmartContext,
+  downloadChatAttachment,
   fetchChatBootstrap,
   getAuthTokenHeader,
   prepareChatAttachments,
@@ -69,8 +72,6 @@ import {
 } from "../stateApi.js";
 import {
   clearUserAuthSession,
-  getStoredAuthUser,
-  resolveActiveAuthSlot,
   withAuthSlot,
 } from "../../../app/authStorage.js";
 import {
@@ -110,11 +111,14 @@ const AGENT_C_LOCKED_PROTOCOL = "responses";
 const AGENT_C_LOCKED_MAX_OUTPUT_TOKENS = 131072;
 const CHAT_ATTACHMENT_THUMBNAIL_MAX_EDGE = 176;
 const CHAT_ATTACHMENT_THUMBNAIL_QUALITY = 0.76;
-const CHAT_VIEW_SNAPSHOT_VERSION = 1;
-const CHAT_VIEW_SNAPSHOT_STORAGE_PREFIX = "educhat:chat:view-snapshot";
-const CHAT_VIEW_SNAPSHOT_MAX_JSON_LENGTH = 3_500_000;
 const EMPTY_ROUTE_NAVIGATION_SENTINEL = "__empty__";
 const CHAT_HOME_HEADLINE = "你今天想聊些什么？";
+const CHAT_STREAMING_SWITCH_SESSION_CONFIRM_MESSAGE =
+  "当前对话仍在生成中，切换到其他会话会中断本次生成。确定要切换吗？";
+const CHAT_STREAMING_LEAVE_PAGE_CONFIRM_MESSAGE =
+  "当前对话仍在生成中，离开聊天页会中断本次生成。确定要离开吗？";
+const CHAT_STREAMING_LOGOUT_CONFIRM_MESSAGE =
+  "当前对话仍在生成中，退出当前页面会中断本次生成。确定要继续吗？";
 const TEACHER_HOME_DEFAULT_GRADE = GRADE_OPTIONS.includes("大学四年级")
   ? "大学四年级"
   : GRADE_OPTIONS[0] || "";
@@ -128,7 +132,6 @@ const TEACHER_HOME_DEFAULT_USER_INFO = Object.freeze({
 const LOCKED_AGENT_BY_TEACHER_SCOPE = Object.freeze({
   [TEACHER_SCOPE_YANG_JUNFENG]: "C",
 });
-const chatViewSnapshotMemoryCache = new Map();
 
 function stripLegacyPlaceholderGroups(groups, sessions) {
   const safeGroups = Array.isArray(groups) ? groups : [];
@@ -879,31 +882,8 @@ function enableSmartContextForAgentSessions(map, sessions, agentId) {
   return next;
 }
 
-function sanitizeChatSnapshotUserKey(value) {
-  return (
-    String(value || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]+/g, "")
-      .slice(0, 64) || "anonymous"
-  );
-}
-
-function resolveChatViewSnapshotStorageKey() {
-  const slot = resolveActiveAuthSlot();
-  const storedUser = getStoredAuthUser(slot);
-  const userKey = sanitizeChatSnapshotUserKey(
-    storedUser?.id ||
-      storedUser?.userId ||
-      storedUser?.username ||
-      storedUser?.studentId,
-  );
-  return `${CHAT_VIEW_SNAPSHOT_STORAGE_PREFIX}:${slot}:${userKey}`;
-}
-
 function createDefaultChatViewState() {
   return {
-    hasSnapshot: false,
     groups: DEFAULT_GROUPS,
     sessions: DEFAULT_SESSIONS,
     sessionMessages: DEFAULT_SESSION_MESSAGES,
@@ -918,125 +898,6 @@ function createDefaultChatViewState() {
     lastAppliedReasoning: "high",
     smartContextEnabledBySessionAgent: {},
     userInfo: DEFAULT_USER_INFO,
-    streamDrafts: {},
-  };
-}
-
-function sanitizeStreamDraftMap(raw, validSessionIds = null) {
-  const source = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-  const normalized = {};
-
-  Object.entries(source)
-    .slice(0, 120)
-    .forEach(([rawSessionId, rawDraft]) => {
-      const sessionId = sanitizeSmartContextSessionId(rawSessionId);
-      if (!sessionId) return;
-      if (validSessionIds instanceof Set && !validSessionIds.has(sessionId)) return;
-      if (!rawDraft || typeof rawDraft !== "object") return;
-      const draftId = String(rawDraft.id || "").trim();
-      if (!draftId) return;
-
-      normalized[sessionId] = {
-        ...rawDraft,
-        id: draftId,
-        role: "assistant",
-        content: String(rawDraft.content || ""),
-        reasoning: String(rawDraft.reasoning || ""),
-        streaming: false,
-      };
-    });
-
-  return normalized;
-}
-
-function buildChatViewSnapshotPayload(state) {
-  const buildPreviewMessagesMap = (messagesBySession, activeSessionId = "") => {
-    const source =
-      messagesBySession && typeof messagesBySession === "object"
-        ? messagesBySession
-        : DEFAULT_SESSION_MESSAGES;
-    const safeActiveSessionId = String(activeSessionId || "").trim();
-    const previewMap = {};
-
-    Object.entries(source).forEach(([sessionId, list]) => {
-      if (!Array.isArray(list) || list.length === 0) return;
-      if (sessionId === safeActiveSessionId) {
-        previewMap[sessionId] = list;
-        return;
-      }
-      previewMap[sessionId] = list.slice(-2);
-    });
-
-    return previewMap;
-  };
-
-  const base = {
-    version: CHAT_VIEW_SNAPSHOT_VERSION,
-    groups: stripLegacyPlaceholderGroups(
-      Array.isArray(state.groups) ? state.groups : DEFAULT_GROUPS,
-      Array.isArray(state.sessions) ? state.sessions : DEFAULT_SESSIONS,
-    ),
-    sessions: Array.isArray(state.sessions) ? state.sessions : DEFAULT_SESSIONS,
-    activeId: String(state.activeId || ""),
-    agent: sanitizeSmartContextAgentId(state.agent) || "A",
-    agentBySession: sanitizeAgentBySessionMap(state.agentBySession),
-    agentRuntimeConfigs: sanitizeRuntimeConfigMap(state.agentRuntimeConfigs),
-    agentProviderDefaults: sanitizeAgentProviderDefaults(
-      state.agentProviderDefaults,
-    ),
-    teacherScopeKey: normalizeTeacherScopeKey(state.teacherScopeKey),
-    lastAppliedReasoning: normalizeReasoningEffort(
-      state.lastAppliedReasoning ?? "high",
-    ),
-    smartContextEnabledBySessionAgent: sanitizeSmartContextEnabledMap(
-      state.smartContextEnabledBySessionAgent,
-    ),
-    userInfo: sanitizeUserInfo(state.userInfo),
-    streamDrafts: sanitizeStreamDraftMap(
-      state.streamDrafts,
-      new Set(
-        (Array.isArray(state.sessions) ? state.sessions : DEFAULT_SESSIONS)
-          .map((session) => sanitizeSmartContextSessionId(session?.id))
-          .filter(Boolean),
-      ),
-    ),
-  };
-
-  const fullPayload = {
-    ...base,
-    sessionMessages: pruneSessionMessagesBySessions(
-      state.sessionMessages,
-      base.sessions,
-    ),
-    messageScope: "full",
-  };
-  const fullSerialized = JSON.stringify(fullPayload);
-  if (fullSerialized.length <= CHAT_VIEW_SNAPSHOT_MAX_JSON_LENGTH) {
-    return fullPayload;
-  }
-
-  const activeId = String(base.activeId || "").trim();
-  const activeMessages =
-    activeId &&
-    state.sessionMessages &&
-    typeof state.sessionMessages === "object" &&
-    Array.isArray(state.sessionMessages[activeId])
-      ? state.sessionMessages[activeId]
-      : [];
-  const activeOnlyPayload = {
-    ...base,
-    sessionMessages: buildPreviewMessagesMap(state.sessionMessages, activeId),
-    messageScope: "active-with-previews",
-  };
-  const activeOnlySerialized = JSON.stringify(activeOnlyPayload);
-  if (activeOnlySerialized.length <= CHAT_VIEW_SNAPSHOT_MAX_JSON_LENGTH) {
-    return activeOnlyPayload;
-  }
-
-  return {
-    ...base,
-    sessionMessages: activeId ? { [activeId]: activeMessages.slice(-120) } : {},
-    messageScope: "active-trimmed",
   };
 }
 
@@ -1057,339 +918,6 @@ function pruneSessionMessagesBySessions(sessionMessages, sessions) {
   return next;
 }
 
-function scoreSessionMessage(message) {
-  if (!message || typeof message !== "object") return 0;
-  const contentLength = String(message.content || "").trim().length;
-  const reasoningLength = String(message.reasoning || "").trim().length;
-  const attachmentCount = Array.isArray(message.attachments)
-    ? message.attachments.filter(Boolean).length
-    : 0;
-  return contentLength + reasoningLength + attachmentCount * 64;
-}
-
-function scoreSessionMessageList(list) {
-  const safeList = Array.isArray(list) ? list : [];
-  return safeList.reduce((total, message) => total + scoreSessionMessage(message), 0);
-}
-
-function mergeSessionMessageLists(primaryList, secondaryList) {
-  const base = Array.isArray(primaryList) ? primaryList.filter(Boolean) : [];
-  const extras = Array.isArray(secondaryList) ? secondaryList.filter(Boolean) : [];
-  const next = [...base];
-  const indexById = new Map();
-
-  next.forEach((message, index) => {
-    const messageId = String(message?.id || "").trim();
-    if (!messageId) return;
-    indexById.set(messageId, index);
-  });
-
-  extras.forEach((message) => {
-    const messageId = String(message?.id || "").trim();
-    if (!messageId) {
-      next.push(message);
-      return;
-    }
-
-    const existingIndex = indexById.get(messageId);
-    if (!Number.isInteger(existingIndex)) {
-      indexById.set(messageId, next.length);
-      next.push(message);
-      return;
-    }
-
-    if (scoreSessionMessage(message) > scoreSessionMessage(next[existingIndex])) {
-      next[existingIndex] = message;
-    }
-  });
-
-  return next;
-}
-
-function chooseMoreCompleteSessionMessageList(localList, remoteList) {
-  const safeLocal = Array.isArray(localList) ? localList.filter(Boolean) : [];
-  const safeRemote = Array.isArray(remoteList) ? remoteList.filter(Boolean) : [];
-
-  if (safeLocal.length === 0) {
-    return { list: safeRemote, preferLocal: false };
-  }
-  if (safeRemote.length === 0) {
-    return { list: safeLocal, preferLocal: true };
-  }
-
-  const localIds = new Set(
-    safeLocal.map((message) => String(message?.id || "").trim()).filter(Boolean),
-  );
-  const remoteIds = new Set(
-    safeRemote.map((message) => String(message?.id || "").trim()).filter(Boolean),
-  );
-  const localContainsRemote = Array.from(remoteIds).every((id) => localIds.has(id));
-  const remoteContainsLocal = Array.from(localIds).every((id) => remoteIds.has(id));
-  const localScore = scoreSessionMessageList(safeLocal);
-  const remoteScore = scoreSessionMessageList(safeRemote);
-
-  if (localContainsRemote && safeLocal.length >= safeRemote.length && localScore >= remoteScore) {
-    return { list: safeLocal, preferLocal: true };
-  }
-
-  if (remoteContainsLocal && safeRemote.length >= safeLocal.length && remoteScore >= localScore) {
-    return { list: safeRemote, preferLocal: false };
-  }
-
-  if (safeLocal.length > safeRemote.length || localScore > remoteScore) {
-    return {
-      list: mergeSessionMessageLists(safeLocal, safeRemote),
-      preferLocal: true,
-    };
-  }
-
-  return {
-    list: mergeSessionMessageLists(safeRemote, safeLocal),
-    preferLocal: false,
-  };
-}
-
-function writeChatViewSnapshot(state) {
-  if (typeof window === "undefined") return;
-  const storageKey = resolveChatViewSnapshotStorageKey();
-  try {
-    const payload = buildChatViewSnapshotPayload(state);
-    const serialized = JSON.stringify(payload);
-    if (serialized.length > CHAT_VIEW_SNAPSHOT_MAX_JSON_LENGTH) return;
-    chatViewSnapshotMemoryCache.set(storageKey, payload);
-    window.sessionStorage.setItem(storageKey, serialized);
-  } catch {
-    // Ignore snapshot write failures.
-  }
-}
-
-function clearChatViewSnapshot() {
-  if (typeof window === "undefined") return;
-  const storageKey = resolveChatViewSnapshotStorageKey();
-  chatViewSnapshotMemoryCache.delete(storageKey);
-  try {
-    window.sessionStorage.removeItem(storageKey);
-  } catch {
-    // Ignore snapshot cleanup failures.
-  }
-}
-
-function restoreChatViewStateFromSnapshot(rawSnapshot, preferredSessionId = "") {
-  const defaults = createDefaultChatViewState();
-  if (
-    !rawSnapshot ||
-    typeof rawSnapshot !== "object" ||
-    Number(rawSnapshot.version) !== CHAT_VIEW_SNAPSHOT_VERSION
-  ) {
-    return defaults;
-  }
-
-  const nextSessions = Array.isArray(rawSnapshot.sessions)
-    ? rawSnapshot.sessions
-    : DEFAULT_SESSIONS;
-  const nextGroups = stripLegacyPlaceholderGroups(
-    Array.isArray(rawSnapshot.groups) ? rawSnapshot.groups : DEFAULT_GROUPS,
-    nextSessions,
-  );
-  let nextActiveId = String(rawSnapshot.activeId || nextSessions[0]?.id || "");
-  const safePreferredSessionId = sanitizeSmartContextSessionId(preferredSessionId);
-  if (
-    safePreferredSessionId &&
-    nextSessions.some((session) => session?.id === safePreferredSessionId)
-  ) {
-    nextActiveId = safePreferredSessionId;
-  }
-  if (!nextSessions.some((session) => session?.id === nextActiveId)) {
-    nextActiveId = nextSessions[0]?.id || "";
-  }
-
-  let nextSessionMessages =
-    rawSnapshot.sessionMessages && typeof rawSnapshot.sessionMessages === "object"
-      ? rawSnapshot.sessionMessages
-      : nextSessions.length > 0
-        ? DEFAULT_SESSION_MESSAGES
-        : {};
-  nextSessionMessages = pruneSessionMessagesBySessions(
-    nextSessionMessages,
-    nextSessions,
-  );
-
-  const validSessionIds = new Set(
-    nextSessions
-      .map((session) => sanitizeSmartContextSessionId(session?.id))
-      .filter(Boolean),
-  );
-
-  const nextTeacherScopeKey = normalizeTeacherScopeKey(
-    rawSnapshot.teacherScopeKey,
-  );
-  const lockedAgentId =
-    resolveLockedAgentByTeacherScope(nextTeacherScopeKey);
-  const fallbackAgent =
-    lockedAgentId ||
-    (AGENT_META[rawSnapshot.agent] ? rawSnapshot.agent : defaults.agent);
-
-  let nextAgentBySession = ensureAgentBySessionMap(
-    rawSnapshot.agentBySession,
-    nextSessions,
-    fallbackAgent,
-  );
-  if (lockedAgentId) {
-    nextAgentBySession = lockAgentBySessionMap(
-      nextAgentBySession,
-      nextSessions,
-      lockedAgentId,
-    );
-  }
-
-  let nextSmartContextEnabledMap = sanitizeSmartContextEnabledMap(
-    rawSnapshot.smartContextEnabledBySessionAgent,
-  );
-  if (lockedAgentId) {
-    nextSmartContextEnabledMap = enableSmartContextForAgentSessions(
-      nextSmartContextEnabledMap,
-      nextSessions,
-      lockedAgentId,
-    );
-  }
-
-  return {
-    hasSnapshot: true,
-    groups: nextGroups,
-    sessions: nextSessions,
-    sessionMessages: nextSessionMessages,
-    activeId: nextActiveId,
-    agent: readAgentBySession(nextAgentBySession, nextActiveId, fallbackAgent),
-    agentBySession: nextAgentBySession,
-    agentRuntimeConfigs: sanitizeRuntimeConfigMap(
-      rawSnapshot.agentRuntimeConfigs,
-    ),
-    agentProviderDefaults: sanitizeAgentProviderDefaults(
-      rawSnapshot.agentProviderDefaults,
-    ),
-    teacherScopeKey: nextTeacherScopeKey,
-    lastAppliedReasoning: normalizeReasoningEffort(
-      rawSnapshot.lastAppliedReasoning ?? "high",
-    ),
-    smartContextEnabledBySessionAgent: nextSmartContextEnabledMap,
-    userInfo: sanitizeUserInfo(rawSnapshot.userInfo),
-    streamDrafts: sanitizeStreamDraftMap(rawSnapshot.streamDrafts, validSessionIds),
-  };
-}
-
-function readInitialChatViewState(preferredSessionId = "") {
-  const defaults = createDefaultChatViewState();
-  if (typeof window === "undefined") return defaults;
-  const storageKey = resolveChatViewSnapshotStorageKey();
-  const cached = chatViewSnapshotMemoryCache.get(storageKey);
-  if (cached) {
-    return restoreChatViewStateFromSnapshot(cached, preferredSessionId);
-  }
-  try {
-    const raw = String(window.sessionStorage.getItem(storageKey) || "").trim();
-    if (!raw) return defaults;
-    const parsed = JSON.parse(raw);
-    chatViewSnapshotMemoryCache.set(storageKey, parsed);
-    return restoreChatViewStateFromSnapshot(parsed, preferredSessionId);
-  } catch {
-    return defaults;
-  }
-}
-
-function restoreChatViewStateFromBootstrap(
-  bootstrapData,
-  preferredSessionId = "",
-) {
-  const defaults = createDefaultChatViewState();
-  if (!bootstrapData || typeof bootstrapData !== "object") {
-    return defaults;
-  }
-
-  const state =
-    bootstrapData.state && typeof bootstrapData.state === "object"
-      ? bootstrapData.state
-      : {};
-  const nextSessions =
-    Array.isArray(state.sessions) && state.sessions.length > 0
-      ? state.sessions
-      : DEFAULT_SESSIONS;
-  const nextGroups = stripLegacyPlaceholderGroups(
-    Array.isArray(state.groups) ? state.groups : DEFAULT_GROUPS,
-    nextSessions,
-  );
-  let nextActiveId = sanitizeSmartContextSessionId(
-    preferredSessionId || state.activeId || nextSessions[0]?.id || "",
-  );
-  if (!nextSessions.some((session) => session?.id === nextActiveId)) {
-    nextActiveId = nextSessions[0]?.id || "";
-  }
-
-  const nextSessionMessages = pruneSessionMessagesBySessions(
-    state.sessionMessages && typeof state.sessionMessages === "object"
-      ? state.sessionMessages
-      : nextSessions.length > 0
-        ? DEFAULT_SESSION_MESSAGES
-        : {},
-    nextSessions,
-  );
-  const stateSettings =
-    state.settings && typeof state.settings === "object" ? state.settings : {};
-  const nextTeacherScopeKey = normalizeTeacherScopeKey(
-    bootstrapData.teacherScopeKey,
-  );
-  const lockedAgentId =
-    resolveLockedAgentByTeacherScope(nextTeacherScopeKey);
-  const fallbackAgent =
-    lockedAgentId ||
-    (AGENT_META[stateSettings.agent] ? stateSettings.agent : defaults.agent);
-  let nextAgentBySession = ensureAgentBySessionMap(
-    stateSettings.agentBySession,
-    nextSessions,
-    fallbackAgent,
-  );
-  if (lockedAgentId) {
-    nextAgentBySession = lockAgentBySessionMap(
-      nextAgentBySession,
-      nextSessions,
-      lockedAgentId,
-    );
-  }
-
-  let nextSmartContextEnabledMap = sanitizeSmartContextEnabledMap(
-    stateSettings.smartContextEnabledBySessionAgent,
-  );
-  if (lockedAgentId) {
-    nextSmartContextEnabledMap = enableSmartContextForAgentSessions(
-      nextSmartContextEnabledMap,
-      nextSessions,
-      lockedAgentId,
-    );
-  }
-
-  return {
-    hasSnapshot: true,
-    groups: nextGroups,
-    sessions: nextSessions,
-    sessionMessages: nextSessionMessages,
-    activeId: nextActiveId,
-    agent: readAgentBySession(nextAgentBySession, nextActiveId, fallbackAgent),
-    agentBySession: nextAgentBySession,
-    agentRuntimeConfigs: sanitizeRuntimeConfigMap(
-      bootstrapData.agentRuntimeConfigs,
-    ),
-    agentProviderDefaults: sanitizeAgentProviderDefaults(
-      bootstrapData.agentProviderDefaults,
-    ),
-    teacherScopeKey: nextTeacherScopeKey,
-    lastAppliedReasoning: normalizeReasoningEffort(
-      stateSettings.lastAppliedReasoning ?? "high",
-    ),
-    smartContextEnabledBySessionAgent: nextSmartContextEnabledMap,
-    userInfo: sanitizeUserInfo(bootstrapData.profile),
-    streamDrafts: {},
-  };
-}
-
 export default function ChatDesktopPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -1397,16 +925,10 @@ export default function ChatDesktopPage() {
   const routeSessionId = sanitizeSmartContextSessionId(params.sessionId);
   const initialViewStateRef = useRef(null);
   if (initialViewStateRef.current === null) {
-    const prefetchedBootstrap = readChatBootstrapPrefetch(location.search);
-    initialViewStateRef.current =
-      restoreChatViewStateFromBootstrap(prefetchedBootstrap, routeSessionId);
-    if (!initialViewStateRef.current?.hasSnapshot) {
-      initialViewStateRef.current = readInitialChatViewState(routeSessionId);
-    }
-    primeAllStreamDrafts(initialViewStateRef.current.streamDrafts);
+    initialViewStateRef.current = createDefaultChatViewState();
+    primeAllStreamDrafts({});
   }
   const initialViewState = initialViewStateRef.current;
-  const hasInitialViewSnapshot = !!initialViewState?.hasSnapshot;
   const returnTarget = useMemo(
     () => resolveChatReturnTarget(location.search),
     [location.search],
@@ -1459,6 +981,8 @@ export default function ChatDesktopPage() {
   const [apiReasoningEffort, setApiReasoningEffort] = useState("high");
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamError, setStreamError] = useState("");
+  const [contextCompactingMessage, setContextCompactingMessage] = useState("");
+  const [upstreamReconnectMessage, setUpstreamReconnectMessage] = useState("");
   const [stateSaveError, setStateSaveError] = useState("");
   const [lastAppliedReasoning, setLastAppliedReasoning] = useState(
     () => initialViewState.lastAppliedReasoning,
@@ -1471,21 +995,14 @@ export default function ChatDesktopPage() {
   const [focusUserMessageId, setFocusUserMessageId] = useState("");
   const [isAtLatest, setIsAtLatest] = useState(true);
   const [pendingExportKind, setPendingExportKind] = useState("");
-  const [showUserInfoModal, setShowUserInfoModal] = useState(
-    () => hasInitialViewSnapshot && !isUserInfoComplete(initialViewState.userInfo),
-  );
-  const [forceUserInfoModal, setForceUserInfoModal] = useState(
-    () => hasInitialViewSnapshot && !isUserInfoComplete(initialViewState.userInfo),
-  );
+  const [showUserInfoModal, setShowUserInfoModal] = useState(false);
+  const [forceUserInfoModal, setForceUserInfoModal] = useState(false);
   const [userInfo, setUserInfo] = useState(() => initialViewState.userInfo);
   const [userInfoErrors, setUserInfoErrors] = useState({});
   const [userInfoSaving, setUserInfoSaving] = useState(false);
-  const [bootstrapLoading, setBootstrapLoading] = useState(
-    () => !hasInitialViewSnapshot,
-  );
-  const [bootstrapPending, setBootstrapPending] = useState(
-    () => !hasInitialViewSnapshot,
-  );
+  const [sessionMutationPending, setSessionMutationPending] = useState(false);
+  const [bootstrapLoading, setBootstrapLoading] = useState(true);
+  const [bootstrapPending, setBootstrapPending] = useState(true);
   const [bootstrapError, setBootstrapError] = useState("");
   const [teacherScopeKey, setTeacherScopeKey] = useState(
     () => initialViewState.teacherScopeKey,
@@ -1493,7 +1010,6 @@ export default function ChatDesktopPage() {
   const [dismissedRoundWarningBySession, setDismissedRoundWarningBySession] =
     useState({});
   const [messageBottomInset, setMessageBottomInset] = useState(0);
-  const allStreamDrafts = useAllStreamDrafts();
 
   const messageListRef = useRef(null);
   const chatInputWrapRef = useRef(null);
@@ -1513,13 +1029,11 @@ export default function ChatDesktopPage() {
   const streamAbortControllerRef = useRef(null);
   const streamAbortReasonRef = useRef("");
   const metaSaveTimerRef = useRef(null);
-  const messageSaveTimerRef = useRef(null);
-  const snapshotSaveTimerRef = useRef(null);
   const persistReadyRef = useRef(false);
   const pendingMetaSaveRef = useRef(false);
-  const forceFullStateSaveRef = useRef(false);
-  const messageUpsertQueueRef = useRef(new Map());
-  const messageUpsertRevisionRef = useRef(new Map());
+  const messagePersistChainRef = useRef(new Map());
+  const messagePersistRevisionRef = useRef(new Map());
+  const groupsRef = useRef(initialViewState.groups);
   const sessionsRef = useRef(initialViewState.sessions);
   const sessionMessagesRef = useRef(initialViewState.sessionMessages);
   const agentBySessionRef = useRef(initialViewState.agentBySession);
@@ -1527,22 +1041,6 @@ export default function ChatDesktopPage() {
     initialViewState.smartContextEnabledBySessionAgent,
   );
   const activeIdRef = useRef(initialViewState.activeId);
-  const latestSnapshotStateRef = useRef({
-    groups: initialViewState.groups,
-    sessions: initialViewState.sessions,
-    sessionMessages: initialViewState.sessionMessages,
-    activeId: initialViewState.activeId,
-    agent: initialViewState.agent,
-    agentBySession: initialViewState.agentBySession,
-    agentRuntimeConfigs: initialViewState.agentRuntimeConfigs,
-    agentProviderDefaults: initialViewState.agentProviderDefaults,
-    teacherScopeKey: initialViewState.teacherScopeKey,
-    lastAppliedReasoning: initialViewState.lastAppliedReasoning,
-    smartContextEnabledBySessionAgent:
-      initialViewState.smartContextEnabledBySessionAgent,
-    userInfo: initialViewState.userInfo,
-    streamDrafts: initialViewState.streamDrafts,
-  });
   const autoSessionTitleRequestRef = useRef(new Set());
   const pendingRouteSessionIdRef = useRef("");
   const pendingNavigationSessionIdRef = useRef("");
@@ -1565,6 +1063,9 @@ export default function ChatDesktopPage() {
     [activeSession, agent],
   );
 
+  useLayoutEffect(() => {
+    groupsRef.current = groups;
+  }, [groups]);
   useLayoutEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
@@ -1599,10 +1100,8 @@ export default function ChatDesktopPage() {
     () => isUserInfoComplete(userInfo),
     [userInfo],
   );
-  const interactionLocked =
-    (bootstrapLoading && !hasInitialViewSnapshot) ||
-    forceUserInfoModal ||
-    userInfoSaving;
+  const interactionLocked = bootstrapLoading || forceUserInfoModal || userInfoSaving;
+  const shouldConfirmStreamingExit = isStreaming;
   const teacherLockedAgentId = useMemo(
     () => resolveLockedAgentByTeacherScope(teacherScopeKey),
     [teacherScopeKey],
@@ -1647,7 +1146,9 @@ export default function ChatDesktopPage() {
     : "开启智能上下文管理后，需先关闭开关才能切换智能体。";
   const canonicalActiveHref = buildChatSessionHref(activeId);
   const sessionActionsLocked =
-    bootstrapPending || (!!activeId && canonicalActiveHref !== currentRouteHref);
+    bootstrapPending ||
+    sessionMutationPending ||
+    (!!activeId && canonicalActiveHref !== currentRouteHref);
   const makeRuntimeSnapshot = (agentId = agent) => {
     const runtime = resolveRuntimeConfigForAgent(agentId, agentRuntimeConfigs);
     return createRuntimeSnapshot({
@@ -1671,57 +1172,27 @@ export default function ChatDesktopPage() {
     });
   }, []);
 
-  useLayoutEffect(() => {
-    latestSnapshotStateRef.current = {
-      groups,
-      sessions,
-      sessionMessages,
-      activeId,
-      agent,
-      agentBySession,
-      agentRuntimeConfigs,
-      agentProviderDefaults,
-      teacherScopeKey,
-      lastAppliedReasoning,
-      smartContextEnabledBySessionAgent,
-      userInfo,
-      streamDrafts: allStreamDrafts,
-    };
-  }, [
-    activeId,
-    agent,
-    agentBySession,
-    agentProviderDefaults,
-    agentRuntimeConfigs,
-    allStreamDrafts,
-    groups,
-    lastAppliedReasoning,
-    sessionMessages,
-    sessions,
-    smartContextEnabledBySessionAgent,
-    teacherScopeKey,
-    userInfo,
-  ]);
+  const clearFloatingStatus = useCallback(() => {
+    setContextCompactingMessage("");
+    setUpstreamReconnectMessage("");
+  }, []);
+  const streamingStatusText =
+    upstreamReconnectMessage ||
+    contextCompactingMessage ||
+    (isStreaming ? "正在回答中..." : "");
 
-  const commitImmediateSnapshotState = useCallback((overrides = {}) => {
-    const base = latestSnapshotStateRef.current;
-    if (!base) return null;
-    const nextState = {
-      ...base,
-      ...overrides,
-      streamDrafts: Object.prototype.hasOwnProperty.call(overrides, "streamDrafts")
-        ? overrides.streamDrafts
-        : getAllStreamDrafts(),
-    };
-
+  const syncImmediateRefs = useCallback((overrides = {}) => {
+    if (Object.prototype.hasOwnProperty.call(overrides, "groups")) {
+      groupsRef.current = overrides.groups;
+    }
     if (Object.prototype.hasOwnProperty.call(overrides, "sessions")) {
-      sessionsRef.current = nextState.sessions;
+      sessionsRef.current = overrides.sessions;
     }
     if (Object.prototype.hasOwnProperty.call(overrides, "sessionMessages")) {
-      sessionMessagesRef.current = nextState.sessionMessages;
+      sessionMessagesRef.current = overrides.sessionMessages;
     }
     if (Object.prototype.hasOwnProperty.call(overrides, "agentBySession")) {
-      agentBySessionRef.current = nextState.agentBySession;
+      agentBySessionRef.current = overrides.agentBySession;
     }
     if (
       Object.prototype.hasOwnProperty.call(
@@ -1730,29 +1201,11 @@ export default function ChatDesktopPage() {
       )
     ) {
       smartContextEnabledBySessionAgentRef.current =
-        nextState.smartContextEnabledBySessionAgent;
+        overrides.smartContextEnabledBySessionAgent;
     }
     if (Object.prototype.hasOwnProperty.call(overrides, "activeId")) {
-      activeIdRef.current = nextState.activeId;
+      activeIdRef.current = overrides.activeId;
     }
-
-    latestSnapshotStateRef.current = nextState;
-    writeChatViewSnapshot(nextState);
-    return nextState;
-  }, []);
-
-  const persistLiveSnapshot = useCallback(() => {
-    const snapshotState = latestSnapshotStateRef.current;
-    if (!snapshotState) return;
-    if (streamFlushTimerRef.current) {
-      clearTimeout(streamFlushTimerRef.current);
-      streamFlushTimerRef.current = null;
-    }
-    flushStreamBuffer();
-    writeChatViewSnapshot({
-      ...snapshotState,
-      streamDrafts: getAllStreamDrafts(),
-    });
   }, []);
 
   const abortActiveStream = useCallback((reason = "user") => {
@@ -1763,15 +1216,44 @@ export default function ChatDesktopPage() {
     return true;
   }, []);
 
+  const confirmStreamingExit = useCallback((reason = "leave-page") => {
+    if (!shouldConfirmStreamingExit) return true;
+    const message =
+      reason === "switch-session"
+        ? CHAT_STREAMING_SWITCH_SESSION_CONFIRM_MESSAGE
+        : reason === "logout"
+          ? CHAT_STREAMING_LOGOUT_CONFIRM_MESSAGE
+          : CHAT_STREAMING_LEAVE_PAGE_CONFIRM_MESSAGE;
+    const confirmed = window.confirm(message);
+    if (!confirmed) return false;
+    abortActiveStream("navigation");
+    return true;
+  }, [abortActiveStream, shouldConfirmStreamingExit]);
+
+  useBeforeUnload(
+    useCallback(
+      (event) => {
+        if (!shouldConfirmStreamingExit) return;
+        event.preventDefault();
+        event.returnValue = "";
+      },
+      [shouldConfirmStreamingExit],
+    ),
+  );
+
   const activateSession = useCallback(
     (sessionId, { replace = false } = {}) => {
       const safeSessionId = sanitizeSmartContextSessionId(sessionId);
-      const nextAgentId = safeSessionId
-        ? readAgentBySession(agentBySessionRef.current, safeSessionId, agent)
-        : agent;
-      commitImmediateSnapshotState({
+      const currentActiveId = sanitizeSmartContextSessionId(activeIdRef.current);
+      if (
+        safeSessionId &&
+        safeSessionId !== currentActiveId &&
+        !confirmStreamingExit("switch-session")
+      ) {
+        return;
+      }
+      syncImmediateRefs({
         activeId: safeSessionId,
-        agent: nextAgentId,
       });
       pendingNavigationSessionIdRef.current =
         safeSessionId || EMPTY_ROUTE_NAVIGATION_SENTINEL;
@@ -1795,12 +1277,12 @@ export default function ChatDesktopPage() {
     },
     [
       buildChatSessionHref,
-      commitImmediateSnapshotState,
       emitChatDebugLog,
-      agent,
       location.pathname,
       location.search,
       navigate,
+      confirmStreamingExit,
+      syncImmediateRefs,
     ],
   );
 
@@ -1897,28 +1379,32 @@ export default function ChatDesktopPage() {
     };
   }, []);
 
-  function patchAssistantMessage(sessionId, assistantId, updater, onPatched) {
-    if (typeof updater !== "function") return;
-    setSessionMessages((prev) => {
-      const list = prev[sessionId] || [];
-      let touched = false;
-      let patchedMessage = null;
-      const nextList = list.map((item) => {
-        if (item?.id !== assistantId || item?.role !== "assistant") return item;
-        touched = true;
-        const nextMessage = updater(item);
-        patchedMessage = nextMessage;
-        return nextMessage;
-      });
-      if (!touched) return prev;
-      if (typeof onPatched === "function" && patchedMessage) {
-        onPatched(patchedMessage);
-      }
-      return {
-        ...prev,
-        [sessionId]: nextList,
-      };
+  function patchAssistantMessage(sessionId, assistantId, updater) {
+    if (typeof updater !== "function") return null;
+    const currentMessages =
+      sessionMessagesRef.current && typeof sessionMessagesRef.current === "object"
+        ? sessionMessagesRef.current
+        : {};
+    const list = Array.isArray(currentMessages[sessionId])
+      ? currentMessages[sessionId]
+      : [];
+    let touched = false;
+    let patchedMessage = null;
+    const nextList = list.map((item) => {
+      if (item?.id !== assistantId || item?.role !== "assistant") return item;
+      touched = true;
+      const nextMessage = updater(item);
+      patchedMessage = nextMessage;
+      return nextMessage;
     });
+    if (!touched) return null;
+    const nextSessionMessages = {
+      ...currentMessages,
+      [sessionId]: nextList,
+    };
+    syncImmediateRefs({ sessionMessages: nextSessionMessages });
+    setSessionMessages(nextSessionMessages);
+    return patchedMessage;
   }
 
   function updateAssistantRuntimeFromMeta(sessionId, assistantId, meta) {
@@ -2008,31 +1494,100 @@ export default function ChatDesktopPage() {
         [sessionId]: nextList,
       };
     });
-    queueMessageUpsert(sessionId, summaryMessage);
+    void persistMessageUpsertsImmediately([
+      { sessionId, message: summaryMessage },
+    ]);
   }
 
-  function queueMessageUpsert(sessionId, message) {
-    const sid = String(sessionId || "").trim();
-    const mid = String(message?.id || "").trim();
-    if (!sid || !mid || !message || typeof message !== "object") return;
-    const key = `${sid}::${mid}`;
-    messageUpsertQueueRef.current.set(key, { sessionId: sid, message });
-    const current = messageUpsertRevisionRef.current.get(key) || 0;
-    messageUpsertRevisionRef.current.set(key, current + 1);
+  function persistMessageUpsertsImmediately(
+    upserts,
+    { awaitCompletion = false } = {},
+  ) {
+    const safeUpserts = Array.isArray(upserts)
+      ? upserts
+          .map((item) => {
+            const sessionId = String(item?.sessionId || "").trim();
+            const messageId = String(item?.message?.id || "").trim();
+            if (!sessionId || !messageId || !item?.message) return null;
+            return { sessionId, message: item.message };
+          })
+          .filter(Boolean)
+      : [];
+
+    if (safeUpserts.length === 0) {
+      return Promise.resolve({ ok: true, updated: 0 });
+    }
+
+    const revisionsByKey = new Map();
+    const upsertsBySession = new Map();
+    safeUpserts.forEach((item) => {
+      const key = `${item.sessionId}::${item.message.id}`;
+      const nextRevision =
+        (messagePersistRevisionRef.current.get(key) || 0) + 1;
+      messagePersistRevisionRef.current.set(key, nextRevision);
+      revisionsByKey.set(key, nextRevision);
+      const list = upsertsBySession.get(item.sessionId) || [];
+      list.push(item);
+      upsertsBySession.set(item.sessionId, list);
+    });
+
+    const tasks = Array.from(upsertsBySession.entries()).map(
+      ([sessionId, sessionUpserts]) => {
+        const previous = messagePersistChainRef.current.get(sessionId);
+        const base = previous instanceof Promise ? previous : Promise.resolve();
+        const next = base.catch(() => {}).then(async () => {
+          const latestUpserts = sessionUpserts.filter((item) => {
+            const key = `${item.sessionId}::${item.message.id}`;
+            return (
+              (messagePersistRevisionRef.current.get(key) || 0) ===
+              revisionsByKey.get(key)
+            );
+          });
+          if (latestUpserts.length === 0) {
+            return { ok: true, updated: 0, skipped: true };
+          }
+          await saveChatSessionMessages({ upserts: latestUpserts });
+          setStateSaveError("");
+          return { ok: true, updated: latestUpserts.length };
+        });
+        let tracked = null;
+        tracked = next.finally(() => {
+          if (messagePersistChainRef.current.get(sessionId) === tracked) {
+            messagePersistChainRef.current.delete(sessionId);
+          }
+          sessionUpserts.forEach((item) => {
+            const key = `${item.sessionId}::${item.message.id}`;
+            const latestRevision =
+              messagePersistRevisionRef.current.get(key) || 0;
+            if (latestRevision === revisionsByKey.get(key)) {
+              messagePersistRevisionRef.current.delete(key);
+            }
+          });
+        });
+        messagePersistChainRef.current.set(sessionId, tracked);
+        return tracked;
+      },
+    );
+
+    const combined = Promise.all(tasks);
+    if (awaitCompletion) {
+      return combined;
+    }
+
+    void combined.catch((error) => {
+      setStateSaveError(error?.message || "聊天记录保存失败");
+    });
+    return combined;
   }
 
   function clearSessionMessageQueue(sessionId) {
     const sid = String(sessionId || "").trim();
     if (!sid) return;
+    messagePersistChainRef.current.delete(sid);
     const prefix = `${sid}::`;
-    Array.from(messageUpsertQueueRef.current.keys()).forEach((key) => {
+    Array.from(messagePersistRevisionRef.current.keys()).forEach((key) => {
       if (key.startsWith(prefix)) {
-        messageUpsertQueueRef.current.delete(key);
-      }
-    });
-    Array.from(messageUpsertRevisionRef.current.keys()).forEach((key) => {
-      if (key.startsWith(prefix)) {
-        messageUpsertRevisionRef.current.delete(key);
+        messagePersistRevisionRef.current.delete(key);
       }
     });
   }
@@ -2071,13 +1626,34 @@ export default function ChatDesktopPage() {
     }
 
     if (!nextTitle || isUntitledSessionTitle(nextTitle)) return;
-    setSessions((prev) =>
-      prev.map((session) => {
-        if (session.id !== sid) return session;
-        if (!isUntitledSessionTitle(session.title)) return session;
-        return { ...session, title: nextTitle };
-      }),
-    );
+    const currentSessions = Array.isArray(sessionsRef.current)
+      ? sessionsRef.current
+      : [];
+    const nextSessions = currentSessions.map((session) => {
+      if (session.id !== sid) return session;
+      if (!isUntitledSessionTitle(session.title)) return session;
+      return { ...session, title: nextTitle };
+    });
+    const persistResult = await persistSessionStateImmediately({
+      nextGroups: groupsRef.current || [],
+      nextSessions,
+      nextSessionMessages: sessionMessagesRef.current || {},
+      nextActiveId: activeIdRef.current,
+      nextAgentBySession: agentBySessionRef.current || {},
+      nextSmartContextEnabledBySessionAgent:
+        smartContextEnabledBySessionAgentRef.current || {},
+    });
+    if (!persistResult.ok) return;
+    setSessions(nextSessions);
+    syncImmediateRefs({
+      groups: groupsRef.current || [],
+      sessions: nextSessions,
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
   }
 
   function updateUserInfoField(field, value) {
@@ -2104,7 +1680,95 @@ export default function ChatDesktopPage() {
     setPendingExportKind("");
   }
 
-  function onNewChat() {
+  async function persistSessionStateImmediately({
+    nextGroups,
+    nextSessions,
+    nextSessionMessages,
+    nextActiveId,
+    nextAgentBySession,
+    nextSmartContextEnabledBySessionAgent,
+  }) {
+    const safeGroups = Array.isArray(nextGroups)
+      ? nextGroups
+      : Array.isArray(groupsRef.current)
+        ? groupsRef.current
+        : [];
+    const safeSessions = Array.isArray(nextSessions) ? nextSessions : [];
+    const prunedSessionMessages = pruneSessionMessagesBySessions(
+      nextSessionMessages,
+      safeSessions,
+    );
+    const safeActiveId = sanitizeSmartContextSessionId(
+      nextActiveId || safeSessions[0]?.id || "",
+    );
+    const safeAgentBySession = sanitizeAgentBySessionMap(nextAgentBySession);
+    const safeSmartContextMap = sanitizeSmartContextEnabledMap(
+      nextSmartContextEnabledBySessionAgent,
+    );
+    const fallbackAgent = teacherLockedAgentId || agent || "A";
+    const nextAgentId = readAgentBySession(
+      safeAgentBySession,
+      safeActiveId,
+      fallbackAgent,
+    );
+    const nextRuntimeConfig = resolveRuntimeConfigForAgent(
+      nextAgentId,
+      agentRuntimeConfigs,
+    );
+    const nextProvider = resolveAgentProvider(
+      nextAgentId,
+      nextRuntimeConfig,
+      agentProviderDefaults,
+    );
+    const nextSmartContextEnabled = readSmartContextEnabledBySessionAgent(
+      safeSmartContextMap,
+      safeActiveId,
+      nextAgentId,
+    );
+    const nextEffectiveSmartContextEnabled =
+      nextProvider === "volcengine" &&
+      (teacherScopedAgentLocked || nextSmartContextEnabled);
+
+    if (metaSaveTimerRef.current) {
+      clearTimeout(metaSaveTimerRef.current);
+      metaSaveTimerRef.current = null;
+    }
+    pendingMetaSaveRef.current = false;
+    setSessionMutationPending(true);
+    try {
+      await saveChatState({
+        activeId: safeActiveId,
+        groups: safeGroups,
+        sessions: safeSessions,
+        settings: {
+          agent: nextAgentId,
+          agentBySession: safeAgentBySession,
+          apiTemperature: normalizeTemperature(nextRuntimeConfig.temperature),
+          apiTopP: normalizeTopP(nextRuntimeConfig.topP),
+          apiReasoningEffort: nextRuntimeConfig.enableThinking ? "high" : "none",
+          lastAppliedReasoning: normalizeReasoningEffort(lastAppliedReasoning),
+          smartContextEnabled: nextEffectiveSmartContextEnabled,
+          smartContextEnabledBySessionAgent: safeSmartContextMap,
+        },
+      });
+      setStateSaveError("");
+      return {
+        ok: true,
+        activeId: safeActiveId,
+        sessionMessages: prunedSessionMessages,
+        agentBySession: safeAgentBySession,
+        smartContextEnabledBySessionAgent: safeSmartContextMap,
+        agent: nextAgentId,
+      };
+    } catch (error) {
+      setStateSaveError(error?.message || "聊天记录保存失败");
+      return { ok: false };
+    } finally {
+      setSessionMutationPending(false);
+    }
+  }
+
+  async function onNewChat() {
     if (sessionActionsLocked) return;
     const next = createNewSessionRecord();
     const currentSessions = Array.isArray(sessionsRef.current)
@@ -2147,34 +1811,51 @@ export default function ChatDesktopPage() {
           true,
         )
       : currentSmartContextMap;
-    const nextActiveAgent = teacherScopedAgentLocked ? nextAgentId : agent;
-
-    commitImmediateSnapshotState({
-      sessions: nextSessions,
-      sessionMessages: nextSessionMessages,
-      activeId: next.session.id,
-      agent: nextActiveAgent,
-      agentBySession: nextAgentBySession,
-      smartContextEnabledBySessionAgent: nextSmartContextMap,
+    const persistResult = await persistSessionStateImmediately({
+      nextSessions,
+      nextSessionMessages,
+      nextActiveId: next.session.id,
+      nextAgentBySession,
+      nextSmartContextEnabledBySessionAgent: nextSmartContextMap,
     });
+    if (!persistResult.ok) return;
+    try {
+      await persistMessageUpsertsImmediately(
+        next.messages.map((message) => ({
+          sessionId: next.session.id,
+          message,
+        })),
+        { awaitCompletion: true },
+      );
+    } catch (error) {
+      setStateSaveError(error?.message || "聊天记录保存失败");
+      return;
+    }
 
     setSessions(nextSessions);
-    setSessionMessages(nextSessionMessages);
-    setAgentBySession(nextAgentBySession);
-    if (teacherScopedAgentLocked) {
-      setSmartContextEnabledBySessionAgent(nextSmartContextMap);
-      setAgent(nextAgentId);
-    }
-    if (next.messages[0]) {
-      queueMessageUpsert(next.session.id, next.messages[0]);
-    }
+    setSessionMessages(persistResult.sessionMessages);
+    setAgentBySession(persistResult.agentBySession);
+    setSmartContextEnabledBySessionAgent(
+      persistResult.smartContextEnabledBySessionAgent,
+    );
+    setAgent(persistResult.agent);
+    syncImmediateRefs({
+      sessions: nextSessions,
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
     activateSession(next.session.id);
     setStreamError("");
+    clearFloatingStatus();
     setSelectedAskText("");
     setFocusUserMessageId("");
   }
 
   function onOpenImageGeneration() {
+    if (!confirmStreamingExit("leave-page")) return;
     const context = normalizeImageReturnContext({
       sessionId: activeId,
       agentId: agent,
@@ -2213,6 +1894,7 @@ export default function ChatDesktopPage() {
   }
 
   function onOpenGroupChat() {
+    if (!confirmStreamingExit("leave-page")) return;
     const nextReturnTarget =
       returnTarget === "teacher-home" ? "teacher-home" : "chat";
     const params = new URLSearchParams();
@@ -2238,7 +1920,7 @@ export default function ChatDesktopPage() {
     navigate(withAuthSlot(`/party?${params.toString()}`));
   }
 
-  function onDeleteSession(sessionId) {
+  async function onDeleteSession(sessionId) {
     if (sessionActionsLocked) return;
     const currentSessions = Array.isArray(sessionsRef.current)
       ? sessionsRef.current
@@ -2270,18 +1952,14 @@ export default function ChatDesktopPage() {
       currentAgentBySession,
       new Set([sessionId]),
     );
-    const nextAgentId = nextActiveSessionId
-      ? readAgentBySession(nextAgentBySession, nextActiveSessionId, agent)
-      : agent;
-
-    commitImmediateSnapshotState({
-      sessions: nextSessions,
-      sessionMessages: nextMessages,
-      activeId: nextActiveSessionId || "",
-      agent: nextAgentId,
-      agentBySession: nextAgentBySession,
-      smartContextEnabledBySessionAgent: nextSmartContextMap,
+    const persistResult = await persistSessionStateImmediately({
+      nextSessions,
+      nextSessionMessages: nextMessages,
+      nextActiveId: nextActiveSessionId || "",
+      nextAgentBySession,
+      nextSmartContextEnabledBySessionAgent: nextSmartContextMap,
     });
+    if (!persistResult.ok) return;
 
     emitChatDebugLog("delete_session_apply", {
       clickedSessionId: sanitizeSmartContextSessionId(sessionId),
@@ -2291,6 +1969,20 @@ export default function ChatDesktopPage() {
     });
     redirectAfterSessionRemoval([sessionId], nextActiveSessionId);
     setSessions(nextSessions);
+    setSessionMessages(persistResult.sessionMessages);
+    setSmartContextEnabledBySessionAgent(
+      persistResult.smartContextEnabledBySessionAgent,
+    );
+    setAgentBySession(persistResult.agentBySession);
+    setAgent(persistResult.agent);
+    syncImmediateRefs({
+      sessions: nextSessions,
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
     if (sessionId === currentActiveId) {
       if (nextSessions.length > 0) {
         activateSession(nextSessions[0].id);
@@ -2298,16 +1990,12 @@ export default function ChatDesktopPage() {
         activateSession("", { replace: true });
       }
     }
-
-    setSessionMessages(nextMessages);
     setDismissedRoundWarningBySession((prev) => {
       if (!prev[sessionId]) return prev;
       const next = { ...prev };
       delete next[sessionId];
       return next;
     });
-    setSmartContextEnabledBySessionAgent(nextSmartContextMap);
-    setAgentBySession(nextAgentBySession);
     clearStreamDraft(sessionId);
     clearSessionMessageQueue(sessionId);
 
@@ -2322,7 +2010,7 @@ export default function ChatDesktopPage() {
     setAgentBySession((prev) => patchAgentBySession(prev, activeId, nextAgent));
   }
 
-  function onBatchDeleteSessions(sessionIds) {
+  async function onBatchDeleteSessions(sessionIds) {
     if (sessionActionsLocked) return;
     const remove = new Set(sessionIds);
     const currentSessions = Array.isArray(sessionsRef.current)
@@ -2355,18 +2043,14 @@ export default function ChatDesktopPage() {
       remove,
     );
     const nextAgentBySession = removeAgentBySessions(currentAgentBySession, remove);
-    const nextAgentId = nextActiveSessionId
-      ? readAgentBySession(nextAgentBySession, nextActiveSessionId, agent)
-      : agent;
-
-    commitImmediateSnapshotState({
-      sessions: nextSessions,
-      sessionMessages: nextMessages,
-      activeId: nextActiveSessionId || "",
-      agent: nextAgentId,
-      agentBySession: nextAgentBySession,
-      smartContextEnabledBySessionAgent: nextSmartContextMap,
+    const persistResult = await persistSessionStateImmediately({
+      nextSessions,
+      nextSessionMessages: nextMessages,
+      nextActiveId: nextActiveSessionId || "",
+      nextAgentBySession,
+      nextSmartContextEnabledBySessionAgent: nextSmartContextMap,
     });
+    if (!persistResult.ok) return;
 
     emitChatDebugLog("batch_delete_sessions_apply", {
       clickedSessionIds: Array.from(remove),
@@ -2376,6 +2060,20 @@ export default function ChatDesktopPage() {
     });
     redirectAfterSessionRemoval(Array.from(remove), nextActiveSessionId);
     setSessions(nextSessions);
+    setSessionMessages(persistResult.sessionMessages);
+    setSmartContextEnabledBySessionAgent(
+      persistResult.smartContextEnabledBySessionAgent,
+    );
+    setAgentBySession(persistResult.agentBySession);
+    setAgent(persistResult.agent);
+    syncImmediateRefs({
+      sessions: nextSessions,
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
     if (remove.has(currentActiveId)) {
       if (nextSessions.length > 0) {
         activateSession(nextSessions[0].id);
@@ -2383,8 +2081,6 @@ export default function ChatDesktopPage() {
         activateSession("", { replace: true });
       }
     }
-
-    setSessionMessages(nextMessages);
     setDismissedRoundWarningBySession((prev) => {
       const next = { ...prev };
       let changed = false;
@@ -2396,8 +2092,6 @@ export default function ChatDesktopPage() {
       });
       return changed ? next : prev;
     });
-    setSmartContextEnabledBySessionAgent(nextSmartContextMap);
-    setAgentBySession(nextAgentBySession);
     clearManyStreamDrafts(sessionIds);
     sessionIds.forEach((id) => clearSessionMessageQueue(id));
   }
@@ -2428,85 +2122,223 @@ export default function ChatDesktopPage() {
     }
   }
 
-  function onMoveSessionToGroup(sessionId, groupId) {
+  async function onMoveSessionToGroup(sessionId, groupId) {
     if (sessionActionsLocked) return;
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.id !== sessionId) return s;
-        return { ...s, groupId: groupId || null };
-      }),
-    );
+    const currentSessions = Array.isArray(sessionsRef.current)
+      ? sessionsRef.current
+      : [];
+    const nextSessions = currentSessions.map((session) => {
+      if (session.id !== sessionId) return session;
+      return { ...session, groupId: groupId || null };
+    });
+    const persistResult = await persistSessionStateImmediately({
+      nextSessions,
+      nextSessionMessages: sessionMessagesRef.current || {},
+      nextActiveId: activeIdRef.current,
+      nextAgentBySession: agentBySessionRef.current || {},
+      nextSmartContextEnabledBySessionAgent:
+        smartContextEnabledBySessionAgentRef.current || {},
+    });
+    if (!persistResult.ok) return;
+    setSessions(nextSessions);
+    syncImmediateRefs({
+      sessions: nextSessions,
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
   }
 
-  function onBatchMoveSessionsToGroup(sessionIds, groupId) {
+  async function onBatchMoveSessionsToGroup(sessionIds, groupId) {
     if (sessionActionsLocked) return;
     const selected = new Set(sessionIds);
-
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (!selected.has(s.id)) return s;
-        return { ...s, groupId: groupId || null };
-      }),
-    );
+    const currentSessions = Array.isArray(sessionsRef.current)
+      ? sessionsRef.current
+      : [];
+    const nextSessions = currentSessions.map((session) => {
+      if (!selected.has(session.id)) return session;
+      return { ...session, groupId: groupId || null };
+    });
+    const persistResult = await persistSessionStateImmediately({
+      nextSessions,
+      nextSessionMessages: sessionMessagesRef.current || {},
+      nextActiveId: activeIdRef.current,
+      nextAgentBySession: agentBySessionRef.current || {},
+      nextSmartContextEnabledBySessionAgent:
+        smartContextEnabledBySessionAgentRef.current || {},
+    });
+    if (!persistResult.ok) return;
+    setSessions(nextSessions);
+    syncImmediateRefs({
+      sessions: nextSessions,
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
   }
 
-  function onRenameSession(sessionId, title) {
+  async function onRenameSession(sessionId, title) {
     if (sessionActionsLocked) return;
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.id !== sessionId) return s;
-        return { ...s, title };
-      }),
-    );
+    const currentSessions = Array.isArray(sessionsRef.current)
+      ? sessionsRef.current
+      : [];
+    const nextSessions = currentSessions.map((session) => {
+      if (session.id !== sessionId) return session;
+      return { ...session, title };
+    });
+    const persistResult = await persistSessionStateImmediately({
+      nextSessions,
+      nextSessionMessages: sessionMessagesRef.current || {},
+      nextActiveId: activeIdRef.current,
+      nextAgentBySession: agentBySessionRef.current || {},
+      nextSmartContextEnabledBySessionAgent:
+        smartContextEnabledBySessionAgentRef.current || {},
+    });
+    if (!persistResult.ok) return;
+    setSessions(nextSessions);
+    syncImmediateRefs({
+      sessions: nextSessions,
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
   }
 
-  function onToggleSessionPin(sessionId) {
+  async function onToggleSessionPin(sessionId) {
     if (sessionActionsLocked) return;
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.id !== sessionId) return s;
-        return { ...s, pinned: !s.pinned };
-      }),
-    );
+    const currentSessions = Array.isArray(sessionsRef.current)
+      ? sessionsRef.current
+      : [];
+    const nextSessions = currentSessions.map((session) => {
+      if (session.id !== sessionId) return session;
+      return { ...session, pinned: !session.pinned };
+    });
+    const persistResult = await persistSessionStateImmediately({
+      nextSessions,
+      nextSessionMessages: sessionMessagesRef.current || {},
+      nextActiveId: activeIdRef.current,
+      nextAgentBySession: agentBySessionRef.current || {},
+      nextSmartContextEnabledBySessionAgent:
+        smartContextEnabledBySessionAgentRef.current || {},
+    });
+    if (!persistResult.ok) return;
+    setSessions(nextSessions);
+    syncImmediateRefs({
+      sessions: nextSessions,
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
   }
 
-  function onCreateGroup(payload) {
+  async function onCreateGroup(payload) {
     if (sessionActionsLocked) return;
+    const currentGroups = Array.isArray(groupsRef.current) ? groupsRef.current : [];
     const item = {
       id: `g${Date.now()}`,
       name: payload.name,
       description: payload.description,
     };
-
-    setGroups((prev) => [item, ...prev]);
+    const nextGroups = [item, ...currentGroups];
+    const persistResult = await persistSessionStateImmediately({
+      nextGroups,
+      nextSessions: sessionsRef.current || [],
+      nextSessionMessages: sessionMessagesRef.current || {},
+      nextActiveId: activeIdRef.current,
+      nextAgentBySession: agentBySessionRef.current || {},
+      nextSmartContextEnabledBySessionAgent:
+        smartContextEnabledBySessionAgentRef.current || {},
+    });
+    if (!persistResult.ok) return;
+    setGroups(nextGroups);
+    syncImmediateRefs({
+      groups: nextGroups,
+      sessions: sessionsRef.current || [],
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
   }
 
-  function onRenameGroup(groupId, payload) {
+  async function onRenameGroup(groupId, payload) {
     if (sessionActionsLocked) return;
     const safeGroupId = String(groupId || "").trim();
     if (!safeGroupId) return;
-    setGroups((prev) =>
-      prev.map((group) => {
-        if (group.id !== safeGroupId) return group;
-        return {
-          ...group,
-          name: payload.name,
-          description: payload.description,
-        };
-      }),
-    );
+    const currentGroups = Array.isArray(groupsRef.current) ? groupsRef.current : [];
+    const nextGroups = currentGroups.map((group) => {
+      if (group.id !== safeGroupId) return group;
+      return {
+        ...group,
+        name: payload.name,
+        description: payload.description,
+      };
+    });
+    const persistResult = await persistSessionStateImmediately({
+      nextGroups,
+      nextSessions: sessionsRef.current || [],
+      nextSessionMessages: sessionMessagesRef.current || {},
+      nextActiveId: activeIdRef.current,
+      nextAgentBySession: agentBySessionRef.current || {},
+      nextSmartContextEnabledBySessionAgent:
+        smartContextEnabledBySessionAgentRef.current || {},
+    });
+    if (!persistResult.ok) return;
+    setGroups(nextGroups);
+    syncImmediateRefs({
+      groups: nextGroups,
+      sessions: sessionsRef.current || [],
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
   }
 
-  function onDeleteGroup(groupId) {
+  async function onDeleteGroup(groupId) {
     if (sessionActionsLocked) return;
-    setGroups((prev) => prev.filter((g) => g.id !== groupId));
-
-    setSessions((prev) =>
-      prev.map((s) => {
-        if (s.groupId !== groupId) return s;
-        return { ...s, groupId: null };
-      }),
-    );
+    const safeGroupId = String(groupId || "").trim();
+    if (!safeGroupId) return;
+    const currentGroups = Array.isArray(groupsRef.current) ? groupsRef.current : [];
+    const currentSessions = Array.isArray(sessionsRef.current)
+      ? sessionsRef.current
+      : [];
+    const nextGroups = currentGroups.filter((group) => group.id !== safeGroupId);
+    const nextSessions = currentSessions.map((session) => {
+      if (session.groupId !== safeGroupId) return session;
+      return { ...session, groupId: null };
+    });
+    const persistResult = await persistSessionStateImmediately({
+      nextGroups,
+      nextSessions,
+      nextSessionMessages: sessionMessagesRef.current || {},
+      nextActiveId: activeIdRef.current,
+      nextAgentBySession: agentBySessionRef.current || {},
+      nextSmartContextEnabledBySessionAgent:
+        smartContextEnabledBySessionAgentRef.current || {},
+    });
+    if (!persistResult.ok) return;
+    setGroups(nextGroups);
+    setSessions(nextSessions);
+    syncImmediateRefs({
+      groups: nextGroups,
+      sessions: nextSessions,
+      sessionMessages: persistResult.sessionMessages,
+      activeId: persistResult.activeId,
+      agentBySession: persistResult.agentBySession,
+      smartContextEnabledBySessionAgent:
+        persistResult.smartContextEnabledBySessionAgent,
+    });
   }
 
   function flushStreamBuffer() {
@@ -2515,29 +2347,8 @@ export default function ChatDesktopPage() {
 
     const { content, reasoning, firstTextAt } = streamBufferRef.current;
     if (!content && !reasoning && !firstTextAt) return;
-    const snapshotState = latestSnapshotStateRef.current;
 
     if (target.mode === "message") {
-      if (snapshotState?.sessionMessages) {
-        const snapshotList = snapshotState.sessionMessages[target.sessionId] || [];
-        snapshotState.sessionMessages = {
-          ...snapshotState.sessionMessages,
-          [target.sessionId]: snapshotList.map((message) => {
-            if (
-              message?.id !== target.assistantId ||
-              message?.role !== "assistant"
-            ) {
-              return message;
-            }
-            return {
-              ...message,
-              content: (message.content || "") + content,
-              reasoning: (message.reasoning || "") + reasoning,
-              firstTextAt: message.firstTextAt || firstTextAt || null,
-            };
-          }),
-        };
-      }
       patchAssistantMessage(
         target.sessionId,
         target.assistantId,
@@ -2549,20 +2360,6 @@ export default function ChatDesktopPage() {
         }),
       );
     } else {
-      if (snapshotState?.streamDrafts) {
-        const previousDraft = snapshotState.streamDrafts[target.sessionId] || null;
-        if (previousDraft?.id === target.assistantId) {
-          snapshotState.streamDrafts = {
-            ...snapshotState.streamDrafts,
-            [target.sessionId]: {
-              ...previousDraft,
-              content: (previousDraft.content || "") + content,
-              reasoning: (previousDraft.reasoning || "") + reasoning,
-              firstTextAt: previousDraft.firstTextAt || firstTextAt || null,
-            },
-          };
-        }
-      }
       updateStreamDraft(target.sessionId, (draft) => {
         if (!draft || draft.id !== target.assistantId) return draft;
         return {
@@ -3012,7 +2809,15 @@ export default function ChatDesktopPage() {
       const list = prev[currentSessionId] || [];
       return { ...prev, [currentSessionId]: [...list, userMsg] };
     });
-    queueMessageUpsert(currentSessionId, userMsg);
+    try {
+      await persistMessageUpsertsImmediately(
+        [{ sessionId: currentSessionId, message: userMsg }],
+        { awaitCompletion: true },
+      );
+    } catch (error) {
+      setStreamError(error?.message || "聊天记录保存失败");
+      return;
+    }
     startStreamDraft(currentSessionId, assistantMsg);
 
     const historyForApi = toApiMessages(
@@ -3063,6 +2868,7 @@ export default function ChatDesktopPage() {
 
     setFocusUserMessageId("");
     setIsAtLatest(true);
+    clearFloatingStatus();
     requestAnimationFrame(() => {
       scrollToLatestRound(220);
     });
@@ -3100,6 +2906,7 @@ export default function ChatDesktopPage() {
             ? meta.uploadedAttachmentLinks
             : [];
           if (uploadedLinks.length > 0) {
+            const changedMessages = [];
             setSessionMessages((prev) => {
               const list = prev[currentSessionId] || [];
               const nextList = list.map((item) => {
@@ -3117,7 +2924,7 @@ export default function ChatDesktopPage() {
                   ...item,
                   attachments: nextAttachments,
                 };
-                queueMessageUpsert(currentSessionId, changedMessage);
+                changedMessages.push(changedMessage);
                 return changedMessage;
               });
               return {
@@ -3125,6 +2932,14 @@ export default function ChatDesktopPage() {
                 [currentSessionId]: nextList,
               };
             });
+            if (changedMessages.length > 0) {
+              void persistMessageUpsertsImmediately(
+                changedMessages.map((message) => ({
+                  sessionId: currentSessionId,
+                  message,
+                })),
+              );
+            }
           }
           const enabled = !!meta?.reasoningEnabled;
           const applied = meta?.reasoningApplied || "none";
@@ -3135,8 +2950,40 @@ export default function ChatDesktopPage() {
         onUsage: (usage) => {
           updateAssistantRuntimeUsage(currentSessionId, assistantId, usage);
         },
+        onContextCompacting: (payload) => {
+          const phase = String(payload?.phase || "").trim().toLowerCase();
+          if (phase === "start") {
+            setContextCompactingMessage(
+              String(payload?.message || "正在压缩背景信息").trim() ||
+                "正在压缩背景信息",
+            );
+            return;
+          }
+          if (phase === "done" || phase === "error") {
+            setContextCompactingMessage("");
+          }
+        },
+        onUpstreamReconnecting: (payload) => {
+          const phase = String(payload?.phase || "").trim().toLowerCase();
+          if (phase === "retrying") {
+            const retryAttempt = Number(payload?.retryAttempt || 0);
+            if (retryAttempt < 2) {
+              setUpstreamReconnectMessage("");
+              return;
+            }
+            setUpstreamReconnectMessage(
+              String(payload?.message || "").trim() ||
+                `网络波动，重连 ${retryAttempt}/${payload?.totalRetries || 5}…`,
+            );
+            return;
+          }
+          if (phase === "recovered" || phase === "failed") {
+            setUpstreamReconnectMessage("");
+          }
+        },
         onToken: (textChunk) => {
           if (!textChunk) return;
+          clearFloatingStatus();
           streamBufferRef.current.content += textChunk;
           if (!streamBufferRef.current.firstTextAt) {
             streamBufferRef.current.firstTextAt = new Date().toISOString();
@@ -3150,6 +2997,7 @@ export default function ChatDesktopPage() {
           scheduleStreamFlush();
         },
         onError: (msg) => {
+          clearFloatingStatus();
           throw new Error(msg || "stream error");
         },
       });
@@ -3157,6 +3005,7 @@ export default function ChatDesktopPage() {
       const aborted =
         error?.name === "AbortError" || !!streamAbortReasonRef.current;
       if (!aborted) {
+        clearFloatingStatus();
         const msg = error?.message || "请求失败";
         setStreamError(msg);
         flushStreamBuffer();
@@ -3193,7 +3042,14 @@ export default function ChatDesktopPage() {
             [currentSessionId]: [...list, completedMsg],
           };
         });
-        queueMessageUpsert(currentSessionId, completedMsg);
+        try {
+          await persistMessageUpsertsImmediately(
+            [{ sessionId: currentSessionId, message: completedMsg }],
+            { awaitCompletion: true },
+          );
+        } catch (error) {
+          setStateSaveError(error?.message || "聊天记录保存失败");
+        }
         if (
           shouldAutoRenameSession &&
           String(completedMsg.content || "").trim()
@@ -3211,11 +3067,12 @@ export default function ChatDesktopPage() {
         assistantId: "",
         mode: "draft",
       };
+      clearFloatingStatus();
       setIsStreaming(false);
     }
   }
 
-  function onAssistantFeedback(messageId, feedback) {
+  async function onAssistantFeedback(messageId, feedback) {
     if (!activeId) return;
     const currentList = sessionMessages[activeId] || [];
     const currentMessage = currentList.find(
@@ -3235,7 +3092,14 @@ export default function ChatDesktopPage() {
       });
       return { ...prev, [activeId]: next };
     });
-    queueMessageUpsert(activeId, changedMessage);
+    try {
+      await persistMessageUpsertsImmediately(
+        [{ sessionId: activeId, message: changedMessage }],
+        { awaitCompletion: true },
+      );
+    } catch (error) {
+      setStateSaveError(error?.message || "聊天记录保存失败");
+    }
   }
 
   async function onAssistantRegenerate(
@@ -3255,6 +3119,7 @@ export default function ChatDesktopPage() {
       agent,
       agentRuntimeConfigs,
     );
+    setStreamError("");
 
     const currentSessionId = activeId;
     const list = sessionMessages[currentSessionId] || [];
@@ -3326,6 +3191,7 @@ export default function ChatDesktopPage() {
 
     setFocusUserMessageId(promptMessageId);
     setIsStreaming(true);
+    clearFloatingStatus();
     streamReasoningEnabledRef.current = !!runtimeConfig.enableThinking;
     streamTargetRef.current = {
       sessionId: currentSessionId,
@@ -3372,9 +3238,41 @@ export default function ChatDesktopPage() {
             usage,
           );
         },
+        onContextCompacting: (payload) => {
+          const phase = String(payload?.phase || "").trim().toLowerCase();
+          if (phase === "start") {
+            setContextCompactingMessage(
+              String(payload?.message || "正在压缩背景信息").trim() ||
+                "正在压缩背景信息",
+            );
+            return;
+          }
+          if (phase === "done" || phase === "error") {
+            setContextCompactingMessage("");
+          }
+        },
+        onUpstreamReconnecting: (payload) => {
+          const phase = String(payload?.phase || "").trim().toLowerCase();
+          if (phase === "retrying") {
+            const retryAttempt = Number(payload?.retryAttempt || 0);
+            if (retryAttempt < 2) {
+              setUpstreamReconnectMessage("");
+              return;
+            }
+            setUpstreamReconnectMessage(
+              String(payload?.message || "").trim() ||
+                `网络波动，重连 ${retryAttempt}/${payload?.totalRetries || 5}…`,
+            );
+            return;
+          }
+          if (phase === "recovered" || phase === "failed") {
+            setUpstreamReconnectMessage("");
+          }
+        },
         onToken: (textChunk) => {
           if (!textChunk) return;
           hasReceivedRegeneratedOutput = true;
+          clearFloatingStatus();
           streamBufferRef.current.content += textChunk;
           if (!streamBufferRef.current.firstTextAt) {
             streamBufferRef.current.firstTextAt = new Date().toISOString();
@@ -3389,6 +3287,7 @@ export default function ChatDesktopPage() {
           scheduleStreamFlush();
         },
         onError: (msg) => {
+          clearFloatingStatus();
           throw new Error(msg || "stream error");
         },
       });
@@ -3396,6 +3295,7 @@ export default function ChatDesktopPage() {
       const aborted =
         error?.name === "AbortError" || !!streamAbortReasonRef.current;
       if (!aborted) {
+        clearFloatingStatus();
         const msg = error?.message || "请求失败";
         setStreamError(msg);
         flushStreamBuffer();
@@ -3418,29 +3318,43 @@ export default function ChatDesktopPage() {
       }
       flushStreamBuffer();
       if (!hasReceivedRegeneratedOutput) {
-        patchAssistantMessage(
+        const completedMessage = patchAssistantMessage(
           currentSessionId,
           assistantIdToRegenerate,
           () => ({
             ...previousAssistant,
             streaming: false,
           }),
-          (completedMessage) => {
-            queueMessageUpsert(currentSessionId, completedMessage);
-          },
         );
+        if (completedMessage) {
+          try {
+            await persistMessageUpsertsImmediately(
+              [{ sessionId: currentSessionId, message: completedMessage }],
+              { awaitCompletion: true },
+            );
+          } catch (error) {
+            setStateSaveError(error?.message || "聊天记录保存失败");
+          }
+        }
       } else {
-        patchAssistantMessage(
+        const completedMessage = patchAssistantMessage(
           currentSessionId,
           assistantIdToRegenerate,
           (message) => ({
             ...message,
             streaming: false,
           }),
-          (completedMessage) => {
-            queueMessageUpsert(currentSessionId, completedMessage);
-          },
         );
+        if (completedMessage) {
+          try {
+            await persistMessageUpsertsImmediately(
+              [{ sessionId: currentSessionId, message: completedMessage }],
+              { awaitCompletion: true },
+            );
+          } catch (error) {
+            setStateSaveError(error?.message || "聊天记录保存失败");
+          }
+        }
       }
       streamAbortReasonRef.current = "";
       streamTargetRef.current = {
@@ -3448,6 +3362,7 @@ export default function ChatDesktopPage() {
         assistantId: "",
         mode: "draft",
       };
+      clearFloatingStatus();
       setIsStreaming(false);
     }
   }
@@ -3460,6 +3375,20 @@ export default function ChatDesktopPage() {
 
   function onStopStreaming() {
     abortActiveStream("user");
+  }
+
+  async function handleMessageAttachmentDownload(message, _attachment, attachmentIndex) {
+    const sessionId = sanitizeSmartContextSessionId(activeIdRef.current);
+    const messageId = sanitizeSmartContextSessionId(message?.id);
+    const safeAttachmentIndex = Number(attachmentIndex);
+    if (!sessionId || !messageId || !Number.isInteger(safeAttachmentIndex)) {
+      throw new Error("无效附件下载参数");
+    }
+    return downloadChatAttachment({
+      sessionId,
+      messageId,
+      attachmentIndex: safeAttachmentIndex,
+    });
   }
 
   function scrollToLatestRound(duration = 420) {
@@ -3527,6 +3456,7 @@ export default function ChatDesktopPage() {
   }
 
   function onLogout() {
+    if (!confirmStreamingExit("logout")) return;
     if (returnTarget === "mode-selection") {
       navigate(withAuthSlot("/mode-selection"), { replace: true });
       return;
@@ -3551,7 +3481,6 @@ export default function ChatDesktopPage() {
       navigate(withAuthSlot(query), { replace: true });
       return;
     }
-    clearChatViewSnapshot();
     replaceAllStreamDrafts({});
     clearUserAuthSession();
     navigate(withAuthSlot("/login"), { replace: true });
@@ -3623,20 +3552,8 @@ export default function ChatDesktopPage() {
     };
   }, []);
 
-  useEffect(() => {
-    function handlePageHide() {
-      persistLiveSnapshot();
-    }
-
-    window.addEventListener("pagehide", handlePageHide);
-    return () => {
-      window.removeEventListener("pagehide", handlePageHide);
-    };
-  }, [persistLiveSnapshot]);
-
   useEffect(
     () => () => {
-      persistLiveSnapshot();
       abortActiveStream("navigation");
       if (streamFlushTimerRef.current) {
         clearTimeout(streamFlushTimerRef.current);
@@ -3646,51 +3563,30 @@ export default function ChatDesktopPage() {
         clearTimeout(metaSaveTimerRef.current);
         metaSaveTimerRef.current = null;
       }
-      if (messageSaveTimerRef.current) {
-        clearTimeout(messageSaveTimerRef.current);
-        messageSaveTimerRef.current = null;
-      }
-      if (snapshotSaveTimerRef.current) {
-        clearTimeout(snapshotSaveTimerRef.current);
-        snapshotSaveTimerRef.current = null;
-      }
       pendingMetaSaveRef.current = false;
-      messageUpsertQueueRef.current.clear();
-      messageUpsertRevisionRef.current.clear();
+      messagePersistChainRef.current.clear();
+      messagePersistRevisionRef.current.clear();
       streamAbortControllerRef.current = null;
       streamAbortReasonRef.current = "";
     },
-    [abortActiveStream, persistLiveSnapshot],
+    [abortActiveStream],
   );
 
   useEffect(() => {
     let cancelled = false;
 
     async function bootstrap() {
-      if (!hasInitialViewSnapshot) {
-        setBootstrapPending(true);
-      }
-      if (!hasInitialViewSnapshot) {
-        setBootstrapLoading(true);
-      }
+      setBootstrapPending(true);
+      setBootstrapLoading(true);
       setBootstrapError("");
-      // Capture the local session state BEFORE the network request so we can detect
-      // what the user changed during the async wait (deleted or created sessions).
-      const preBootstrapSessions = Array.isArray(sessionsRef.current)
-        ? [...sessionsRef.current]
-        : [];
-      const preBootstrapActiveId = sanitizeSmartContextSessionId(
-        activeIdRef.current,
-      );
       emitChatDebugLog("bootstrap_start", {
-        hasInitialViewSnapshot,
         routeSessionId,
         liveRouteSessionId: sanitizeSmartContextSessionId(
           pendingRouteSessionIdRef.current || routeSessionId,
         ),
-        activeId: preBootstrapActiveId,
+        activeId: sanitizeSmartContextSessionId(activeIdRef.current),
         pendingNavigationSessionId: pendingNavigationSessionIdRef.current,
-        sessionIds: preBootstrapSessions.map((session) =>
+        sessionIds: (sessionsRef.current || []).map((session) =>
           sanitizeSmartContextSessionId(session?.id),
         ),
       });
@@ -3748,123 +3644,11 @@ export default function ChatDesktopPage() {
         );
 
         let resolvedSessions = nextSessions;
-        let resolvedMessages = nextSessionMessages;
+        let resolvedMessages = pruneSessionMessagesBySessions(
+          nextSessionMessages,
+          resolvedSessions,
+        );
         let resolvedActiveId = rawActiveId;
-
-        // localOnlySessions is used later to restore per-session agent/smart-context state.
-        let localOnlySessions = [];
-
-        // Reconcile server state with what the user may have changed locally while the
-        // network request was in flight.  Two distinct cases:
-        //
-        // A) Component remounted with an existing snapshot (hasInitialViewSnapshot=true):
-        //    The snapshot already reflects the user's intended state (Fix 1/1b flush it
-        //    synchronously on delete/create).  Use it as the source of truth:
-        //    • filter out server sessions the user deleted (not in snapshot)
-        //    • add sessions the user created locally but that haven't reached the server yet
-        //
-        // B) First visit – no snapshot (hasInitialViewSnapshot=false):
-        //    sessionsRef.current starts as DEFAULT_SESSIONS and may have drifted by the time
-        //    bootstrap returns (the user could have deleted or created sessions).
-        //    Compare the state captured just BEFORE the request with the state NOW to find
-        //    the delta, then apply it on top of the server result.
-        //    This also fixes the "s1 always comes back" bug: because s1 is in BOTH
-        //    preBootstrapSessions and currentSessions (user didn't touch it), it is never
-        //    treated as a "locally created" session and is therefore not merged back in.
-
-        const currentLocalSessions = Array.isArray(sessionsRef.current)
-          ? sessionsRef.current
-          : [];
-        const currentLocalMessages =
-          sessionMessagesRef.current && typeof sessionMessagesRef.current === "object"
-            ? sessionMessagesRef.current
-            : {};
-        let shouldForceFullStateSave = false;
-
-        if (hasInitialViewSnapshot) {
-          // ── Case A: snapshot-guided reconciliation ───────────────────────────────
-          const localSessionIdSet = new Set(
-            currentLocalSessions
-              .map((s) => sanitizeSmartContextSessionId(s?.id))
-              .filter(Boolean),
-          );
-          // Remove sessions the user deleted before the server-save debounce fired.
-          resolvedSessions = resolvedSessions.filter((s) => {
-            const id = sanitizeSmartContextSessionId(s?.id);
-            return !id || localSessionIdSet.has(id);
-          });
-          // Preserve sessions created locally but not yet persisted.
-          localOnlySessions = currentLocalSessions.filter((s) => {
-            const id = sanitizeSmartContextSessionId(s?.id);
-            return id && !resolvedSessions.some((r) => r?.id === id);
-          });
-        } else {
-          // ── Case B: delta-based reconciliation (first visit, no snapshot) ────────
-          const preIds = new Set(
-            preBootstrapSessions
-              .map((s) => sanitizeSmartContextSessionId(s?.id))
-              .filter(Boolean),
-          );
-          const currentIds = new Set(
-            currentLocalSessions
-              .map((s) => sanitizeSmartContextSessionId(s?.id))
-              .filter(Boolean),
-          );
-          // Sessions that existed at bootstrap-start but are gone now → user deleted them.
-          const deletedSet = new Set(
-            [...preIds].filter((id) => !currentIds.has(id)),
-          );
-          if (deletedSet.size > 0) {
-            resolvedSessions = resolvedSessions.filter((s) => {
-              const id = sanitizeSmartContextSessionId(s?.id);
-              return !id || !deletedSet.has(id);
-            });
-          }
-          // Sessions that appeared since bootstrap-start → user created them.
-          localOnlySessions = currentLocalSessions.filter((s) => {
-            const id = sanitizeSmartContextSessionId(s?.id);
-            return (
-              id && !preIds.has(id) && !resolvedSessions.some((r) => r?.id === id)
-            );
-          });
-        }
-
-        if (localOnlySessions.length > 0) {
-          resolvedSessions = [...localOnlySessions, ...resolvedSessions];
-          resolvedMessages = {
-            ...resolvedMessages,
-            ...localOnlySessions.reduce((acc, session) => {
-              const sessionId = sanitizeSmartContextSessionId(session?.id);
-              if (!sessionId) return acc;
-              acc[sessionId] =
-                sessionMessagesRef.current?.[sessionId] ||
-                resolvedMessages?.[sessionId] ||
-                [];
-              return acc;
-            }, {}),
-          };
-        }
-        if (hasInitialViewSnapshot) {
-          resolvedMessages = resolvedSessions.reduce((acc, session) => {
-            const sessionId = sanitizeSmartContextSessionId(session?.id);
-            if (!sessionId) return acc;
-            const localList = Array.isArray(currentLocalMessages[sessionId])
-              ? currentLocalMessages[sessionId]
-              : [];
-            const remoteList = Array.isArray(resolvedMessages?.[sessionId])
-              ? resolvedMessages[sessionId]
-              : [];
-            const { list, preferLocal } = chooseMoreCompleteSessionMessageList(
-              localList,
-              remoteList,
-            );
-            if (preferLocal) {
-              shouldForceFullStateSave = true;
-            }
-            acc[sessionId] = list;
-            return acc;
-          }, {});
-        }
         const resolvedSessionIds = new Set(
           resolvedSessions
             .map((session) => sanitizeSmartContextSessionId(session?.id))
@@ -3880,12 +3664,6 @@ export default function ChatDesktopPage() {
           pendingNavigationSessionIdRaw === EMPTY_ROUTE_NAVIGATION_SENTINEL
             ? ""
             : sanitizeSmartContextSessionId(pendingNavigationSessionIdRaw);
-        const currentActiveId = sanitizeSmartContextSessionId(activeIdRef.current);
-        const currentActiveStillValid =
-          currentActiveId &&
-          resolvedSessions.some((session) => session?.id === currentActiveId);
-        const currentActiveChangedDuringBootstrap =
-          currentActiveStillValid && currentActiveId !== preBootstrapActiveId;
         const canRestoreSession =
           !liveRouteSessionId &&
           !pendingNavigationSessionId &&
@@ -3895,9 +3673,6 @@ export default function ChatDesktopPage() {
           pendingNavigationSessionId,
           liveRouteSessionId,
           canRestoreSession ? restoreContext.sessionId : "",
-          hasInitialViewSnapshot || currentActiveChangedDuringBootstrap
-            ? currentActiveId
-            : "",
           sanitizeSmartContextSessionId(rawActiveId),
         ].filter(Boolean);
         const preferredResolvedActiveId = preferredActiveIdCandidates.find(
@@ -3912,15 +3687,9 @@ export default function ChatDesktopPage() {
           routeSessionId,
           liveRouteSessionId,
           pendingNavigationSessionId,
-          preBootstrapActiveId,
-          currentActiveId,
-          currentActiveChangedDuringBootstrap,
           rawActiveId,
           resolvedActiveId,
           resolvedSessionIds: Array.from(resolvedSessionIds),
-          localOnlySessionIds: localOnlySessions.map((session) =>
-            sanitizeSmartContextSessionId(session?.id),
-          ),
         });
 
         let nextAgentBySession = ensureAgentBySessionMap(
@@ -3928,20 +3697,6 @@ export default function ChatDesktopPage() {
           resolvedSessions,
           fallbackAgent,
         );
-        localOnlySessions.forEach((session) => {
-          const sessionId = sanitizeSmartContextSessionId(session?.id);
-          if (!sessionId) return;
-          const localAgentId = readAgentBySession(
-            agentBySessionRef.current,
-            sessionId,
-            fallbackAgent,
-          );
-          nextAgentBySession = patchAgentBySession(
-            nextAgentBySession,
-            sessionId,
-            localAgentId,
-          );
-        });
         if (
           !lockedAgentId &&
           canRestoreSession &&
@@ -3995,23 +3750,6 @@ export default function ChatDesktopPage() {
             nextSmartContextEnabledMap[legacyKey] = true;
           }
         }
-        localOnlySessions.forEach((session) => {
-          const sessionId = sanitizeSmartContextSessionId(session?.id);
-          if (!sessionId) return;
-          CHAT_AGENT_IDS.forEach((agentId) => {
-            const enabled = readSmartContextEnabledBySessionAgent(
-              smartContextEnabledBySessionAgentRef.current,
-              sessionId,
-              agentId,
-            );
-            nextSmartContextEnabledMap = patchSmartContextEnabledBySessionAgent(
-              nextSmartContextEnabledMap,
-              sessionId,
-              agentId,
-              enabled,
-            );
-          });
-        });
         if (lockedAgentId) {
           const forcedSmartContextMap = enableSmartContextForAgentSessions(
             nextSmartContextEnabledMap,
@@ -4035,13 +3773,14 @@ export default function ChatDesktopPage() {
         setApiReasoningEffort(nextApiReasoning);
         setLastAppliedReasoning(nextAppliedReasoning);
         setSmartContextEnabledBySessionAgent(nextSmartContextEnabledMap);
-        replaceAllStreamDrafts(
-          sanitizeStreamDraftMap(getAllStreamDrafts(), resolvedSessionIds),
-        );
-        if (shouldForceFullStateSave) {
-          forceFullStateSaveRef.current = true;
-          pendingMetaSaveRef.current = true;
-        }
+        syncImmediateRefs({
+          sessions: resolvedSessions,
+          sessionMessages: resolvedMessages,
+          activeId: resolvedActiveId,
+          agentBySession: nextAgentBySession,
+          smartContextEnabledBySessionAgent: nextSmartContextEnabledMap,
+        });
+        replaceAllStreamDrafts({});
 
         let profile = sanitizeUserInfo(data?.profile);
         if (returnTarget === "teacher-home" && !isUserInfoComplete(profile)) {
@@ -4071,7 +3810,6 @@ export default function ChatDesktopPage() {
           msg.includes("重新登录") ||
           msg.includes("账号不存在")
         ) {
-          clearChatViewSnapshot();
           replaceAllStreamDrafts({});
           clearUserAuthSession();
           navigate(withAuthSlot("/login"), { replace: true });
@@ -4091,11 +3829,12 @@ export default function ChatDesktopPage() {
       cancelled = true;
     };
   }, [
-    hasInitialViewSnapshot,
+    emitChatDebugLog,
     location.state,
     navigate,
     routeSessionId,
     returnTarget,
+    syncImmediateRefs,
   ]);
 
   useLayoutEffect(() => {
@@ -4113,10 +3852,10 @@ export default function ChatDesktopPage() {
       search: location.search,
       routeSessionId,
     });
-  }, [location.pathname, location.search, routeSessionId]);
+  }, [emitChatDebugLog, location.pathname, location.search, routeSessionId]);
 
   useLayoutEffect(() => {
-    if (bootstrapLoading && !hasInitialViewSnapshot) return;
+    if (bootstrapLoading) return;
     if (
       pendingNavigationSessionIdRef.current &&
       !(
@@ -4150,7 +3889,7 @@ export default function ChatDesktopPage() {
   }, [
     bootstrapLoading,
     buildChatSessionHref,
-    hasInitialViewSnapshot,
+    emitChatDebugLog,
     location.pathname,
     location.search,
     navigate,
@@ -4158,7 +3897,7 @@ export default function ChatDesktopPage() {
   ]);
 
   useLayoutEffect(() => {
-    if (bootstrapLoading && !hasInitialViewSnapshot) return;
+    if (bootstrapLoading) return;
     if (
       routeSessionId &&
       !sessions.some((session) => session?.id === routeSessionId) &&
@@ -4202,7 +3941,6 @@ export default function ChatDesktopPage() {
     bootstrapLoading,
     buildChatSessionHref,
     emitChatDebugLog,
-    hasInitialViewSnapshot,
     location.pathname,
     location.search,
     navigate,
@@ -4248,51 +3986,6 @@ export default function ChatDesktopPage() {
   }, [activeSessionTitle]);
 
   useEffect(() => {
-    if (!persistReadyRef.current && !hasInitialViewSnapshot) return;
-
-    if (snapshotSaveTimerRef.current) {
-      clearTimeout(snapshotSaveTimerRef.current);
-      snapshotSaveTimerRef.current = null;
-    }
-
-    snapshotSaveTimerRef.current = setTimeout(() => {
-      writeChatViewSnapshot({
-        groups,
-        sessions,
-        sessionMessages,
-        activeId,
-        agent,
-        agentBySession,
-        agentRuntimeConfigs,
-        agentProviderDefaults,
-        teacherScopeKey,
-        lastAppliedReasoning,
-        smartContextEnabledBySessionAgent,
-        userInfo,
-        streamDrafts: allStreamDrafts,
-      });
-      snapshotSaveTimerRef.current = null;
-    }, isStreaming ? 180 : 90);
-  }, [
-    activeId,
-    agent,
-    agentBySession,
-    agentProviderDefaults,
-    agentRuntimeConfigs,
-    allStreamDrafts,
-    bootstrapLoading,
-    groups,
-    hasInitialViewSnapshot,
-    isStreaming,
-    lastAppliedReasoning,
-    sessionMessages,
-    sessions,
-    smartContextEnabledBySessionAgent,
-    teacherScopeKey,
-    userInfo,
-  ]);
-
-  useEffect(() => {
     setApiTemperature(
       String(normalizeTemperature(activeRuntimeConfig.temperature)),
     );
@@ -4326,20 +4019,9 @@ export default function ChatDesktopPage() {
     metaSaveTimerRef.current = setTimeout(async () => {
       if (!pendingMetaSaveRef.current) return;
       pendingMetaSaveRef.current = false;
-      const prunedSessionMessages = pruneSessionMessagesBySessions(
-        sessionMessages,
-        sessions,
-      );
-      const shouldPersistFullState =
-        forceFullStateSaveRef.current ||
-        sessions.length === 0 ||
-        Object.keys(prunedSessionMessages).length !==
-          Object.keys(sessionMessages || {}).length;
       try {
         const payload = {
           activeId,
-          groups,
-          sessions,
           settings: {
             agent,
             agentBySession: sanitizeAgentBySessionMap(agentBySession),
@@ -4354,15 +4036,7 @@ export default function ChatDesktopPage() {
             ),
           },
         };
-        if (shouldPersistFullState) {
-          await saveChatState({
-            ...payload,
-            sessionMessages: prunedSessionMessages,
-          });
-          forceFullStateSaveRef.current = false;
-        } else {
-          await saveChatStateMeta(payload);
-        }
+        await saveChatStateMeta(payload);
         setStateSaveError("");
       } catch (error) {
         setStateSaveError(error?.message || "聊天记录保存失败");
@@ -4372,8 +4046,6 @@ export default function ChatDesktopPage() {
     }, 360);
   }, [
     activeId,
-    groups,
-    sessions,
     agent,
     agentBySession,
     apiTemperature,
@@ -4384,68 +4056,8 @@ export default function ChatDesktopPage() {
     smartContextEnabledBySessionAgent,
     bootstrapLoading,
     isStreaming,
-    sessionMessages,
   ]);
 
-  useEffect(() => {
-    if (!persistReadyRef.current || bootstrapLoading) return;
-    if (messageUpsertQueueRef.current.size === 0) return;
-
-    if (isStreaming) {
-      if (messageSaveTimerRef.current) {
-        clearTimeout(messageSaveTimerRef.current);
-        messageSaveTimerRef.current = null;
-      }
-      return;
-    }
-
-    if (messageSaveTimerRef.current) {
-      clearTimeout(messageSaveTimerRef.current);
-      messageSaveTimerRef.current = null;
-    }
-
-    messageSaveTimerRef.current = setTimeout(async () => {
-      const entries = Array.from(messageUpsertQueueRef.current.entries());
-      if (entries.length === 0) {
-        messageSaveTimerRef.current = null;
-        return;
-      }
-
-      const upserts = [];
-      const sentRevisionByKey = {};
-      entries.forEach(([key, payload]) => {
-        if (!payload?.sessionId || !payload?.message?.id) return;
-        upserts.push(payload);
-        sentRevisionByKey[key] = messageUpsertRevisionRef.current.get(key) || 0;
-      });
-
-      if (upserts.length === 0) {
-        entries.forEach(([key]) => {
-          messageUpsertQueueRef.current.delete(key);
-          messageUpsertRevisionRef.current.delete(key);
-        });
-        messageSaveTimerRef.current = null;
-        return;
-      }
-
-      try {
-        await saveChatSessionMessages({ upserts });
-        Object.entries(sentRevisionByKey).forEach(([key, sentRevision]) => {
-          const currentRevision =
-            messageUpsertRevisionRef.current.get(key) || 0;
-          if (currentRevision === sentRevision) {
-            messageUpsertQueueRef.current.delete(key);
-            messageUpsertRevisionRef.current.delete(key);
-          }
-        });
-        setStateSaveError("");
-      } catch (error) {
-        setStateSaveError(error?.message || "聊天记录保存失败");
-      } finally {
-        messageSaveTimerRef.current = null;
-      }
-    }, 320);
-  }, [sessionMessages, bootstrapLoading, isStreaming]);
 
   useEffect(() => {
     setSelectedAskText("");
@@ -4584,8 +4196,10 @@ export default function ChatDesktopPage() {
           activeSessionId={activeId}
           messages={displayedMessages}
           isStreaming={isStreaming}
+          streamingStatusText={streamingStatusText}
           focusMessageId={focusUserMessageId}
           bottomInset={messageBottomInset}
+          onDownloadAttachment={handleMessageAttachmentDownload}
           onAssistantFeedback={onAssistantFeedback}
           onAssistantRegenerate={onAssistantRegenerate}
           onAskSelection={onAskSelection}

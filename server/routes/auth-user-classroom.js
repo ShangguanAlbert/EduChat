@@ -478,8 +478,11 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     normalizeChatStateDoc,
     getTeacherScopedChatStatePath,
     readTeacherScopedSessionContextRefs,
+    createChatSessionId,
+    migrateLegacyChatStateSessionIds,
     sanitizeChatStatePayload,
     sanitizeChatStateMetaPayload,
+    mergeSanitizedChatMessageLists,
     mergeChatStateSessionMessagesPreservingCompleteness,
     sanitizeSessionMessageUpsertsPayload,
     sanitizeSmartContextMapAgentId,
@@ -795,6 +798,243 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     });
   });
 
+  function buildInitialPersistedChatState() {
+    const sessionId = createChatSessionId();
+    const firstTextAt = new Date().toISOString();
+    return sanitizeChatStatePayload({
+      activeId: sessionId,
+      groups: [],
+      sessions: [{ id: sessionId, title: "新对话 1", groupId: null, pinned: false }],
+      sessionMessages: {
+        [sessionId]: [
+          {
+            id: `m${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+            role: "assistant",
+            content: "你好，今天做点啥？",
+            firstTextAt,
+          },
+        ],
+      },
+      settings: defaultChatState().settings,
+    });
+  }
+
+  async function ensureBootstrapChatState(stateDoc, userId, teacherScopeKey) {
+    const rawState = readTeacherScopedChatStateRaw(stateDoc, teacherScopeKey);
+    if (!rawState) {
+      const initialState = buildInitialPersistedChatState();
+      const setPayload = { userId };
+      setPayload[getTeacherScopedChatStatePath("activeId", teacherScopeKey)] =
+        initialState.activeId;
+      setPayload[getTeacherScopedChatStatePath("groups", teacherScopeKey)] =
+        initialState.groups;
+      setPayload[getTeacherScopedChatStatePath("sessions", teacherScopeKey)] =
+        initialState.sessions;
+      setPayload[getTeacherScopedChatStatePath("sessionMessages", teacherScopeKey)] =
+        initialState.sessionMessages;
+      setPayload[getTeacherScopedChatStatePath("settings", teacherScopeKey)] =
+        initialState.settings;
+
+      await ChatState.findOneAndUpdate(
+        { userId },
+        { $set: setPayload },
+        {
+          upsert: true,
+          new: true,
+          setDefaultsOnInsert: isDefaultTeacherScopeKey(teacherScopeKey),
+        },
+      );
+      return initialState;
+    }
+
+    const migrated = migrateLegacyChatStateSessionIds(rawState);
+    if (!migrated.changed) {
+      return normalizeChatStateDoc(stateDoc, teacherScopeKey);
+    }
+
+    const setPayload = { userId };
+    setPayload[getTeacherScopedChatStatePath("activeId", teacherScopeKey)] =
+      migrated.state.activeId;
+    setPayload[getTeacherScopedChatStatePath("groups", teacherScopeKey)] =
+      migrated.state.groups;
+    setPayload[getTeacherScopedChatStatePath("sessions", teacherScopeKey)] =
+      migrated.state.sessions;
+    setPayload[getTeacherScopedChatStatePath("sessionMessages", teacherScopeKey)] =
+      migrated.state.sessionMessages;
+    setPayload[getTeacherScopedChatStatePath("sessionContextRefs", teacherScopeKey)] =
+      migrated.state.sessionContextRefs;
+    setPayload[getTeacherScopedChatStatePath("settings", teacherScopeKey)] =
+      migrated.state.settings;
+
+    await ChatState.findOneAndUpdate(
+      { userId },
+      { $set: setPayload },
+      {
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: isDefaultTeacherScopeKey(teacherScopeKey),
+      },
+    );
+
+    return sanitizeChatStatePayload(migrated.state);
+  }
+
+  function resolveChatAttachmentLinkFromOssFiles(attachment, attachmentIndex, ossFiles = []) {
+    const safeOssFiles = normalizeUploadedFileContextOssFiles(ossFiles);
+    if (safeOssFiles.length === 0) return null;
+
+    const attachmentName = sanitizeGroupChatFileName(attachment?.name);
+    const attachmentMimeType = sanitizeGroupChatFileMimeType(attachment?.type);
+    const attachmentSize = sanitizeRuntimeInteger(
+      attachment?.size,
+      0,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const matchedByMeta =
+      safeOssFiles.find((item) => {
+        const sameName =
+          sanitizeGroupChatFileName(item?.fileName) === attachmentName &&
+          !!attachmentName;
+        const sameMime =
+          sanitizeGroupChatFileMimeType(item?.mimeType) === attachmentMimeType &&
+          !!attachmentMimeType;
+        const sameSize =
+          sanitizeRuntimeInteger(item?.size, 0, 0, Number.MAX_SAFE_INTEGER) ===
+            attachmentSize && attachmentSize > 0;
+        return sameName || (sameMime && sameSize);
+      }) || null;
+    const matchedByIndex =
+      !matchedByMeta &&
+      attachmentIndex >= 0 &&
+      attachmentIndex < safeOssFiles.length
+        ? safeOssFiles[attachmentIndex]
+        : null;
+    const matched = matchedByMeta || matchedByIndex;
+    if (!matched) return null;
+
+    const ossKey = sanitizeGroupChatOssObjectKey(matched?.ossKey);
+    const url = sanitizeGroupChatHttpUrl(matched?.fileUrl);
+    if (!ossKey && !url) return null;
+    return { ossKey, url };
+  }
+
+  function enrichChatMessageAttachmentsFromOssFiles(message, ossFiles = []) {
+    const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+    if (attachments.length === 0) {
+      return { message, changed: false };
+    }
+
+    let changed = false;
+    const nextAttachments = attachments.map((attachment, attachmentIndex) => {
+      const currentUrl = sanitizeGroupChatHttpUrl(attachment?.url || attachment?.fileUrl);
+      const currentOssKey = sanitizeGroupChatOssObjectKey(attachment?.ossKey);
+      if (currentUrl && currentOssKey) return attachment;
+
+      const resolved = resolveChatAttachmentLinkFromOssFiles(
+        attachment,
+        attachmentIndex,
+        ossFiles,
+      );
+      if (!resolved) return attachment;
+
+      const nextUrl = currentUrl || resolved.url;
+      const nextOssKey = currentOssKey || resolved.ossKey;
+      if (nextUrl === currentUrl && nextOssKey === currentOssKey) {
+        return attachment;
+      }
+
+      changed = true;
+      return {
+        ...attachment,
+        ...(nextUrl ? { url: nextUrl } : {}),
+        ...(nextOssKey ? { ossKey: nextOssKey } : {}),
+      };
+    });
+
+    if (!changed) {
+      return { message, changed: false };
+    }
+
+    return {
+      message: {
+        ...message,
+        attachments: nextAttachments,
+      },
+      changed: true,
+    };
+  }
+
+  async function hydrateChatStateAttachmentLinks(sessionMessages, userId) {
+    const safeSessionMessages =
+      sessionMessages && typeof sessionMessages === "object" ? sessionMessages : {};
+    const refs = [];
+
+    Object.entries(safeSessionMessages).forEach(([rawSessionId, rawMessages]) => {
+      const sessionId = sanitizeId(rawSessionId, "");
+      const messages = Array.isArray(rawMessages) ? rawMessages : [];
+      if (!sessionId || messages.length === 0) return;
+      messages.forEach((message) => {
+        const messageId = sanitizeId(message?.id, "");
+        const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
+        const needsHydrate = attachments.some((attachment) => {
+          const hasUrl = !!sanitizeGroupChatHttpUrl(attachment?.url || attachment?.fileUrl);
+          const hasOssKey = !!sanitizeGroupChatOssObjectKey(attachment?.ossKey);
+          return !hasUrl || !hasOssKey;
+        });
+        if (!messageId || !needsHydrate) return;
+        refs.push({ sessionId, messageId });
+      });
+    });
+
+    if (refs.length === 0) {
+      return { sessionMessages: safeSessionMessages, changed: false };
+    }
+
+    const docs = await UploadedFileContext.find({
+      userId: String(userId || "").trim(),
+      sessionId: { $in: Array.from(new Set(refs.map((item) => item.sessionId))) },
+      messageId: { $in: Array.from(new Set(refs.map((item) => item.messageId))) },
+    })
+      .select({ sessionId: 1, messageId: 1, ossFiles: 1 })
+      .lean();
+
+    if (!Array.isArray(docs) || docs.length === 0) {
+      return { sessionMessages: safeSessionMessages, changed: false };
+    }
+
+    const ossFilesByMessageKey = new Map();
+    docs.forEach((doc) => {
+      const sessionId = sanitizeId(doc?.sessionId, "");
+      const messageId = sanitizeId(doc?.messageId, "");
+      if (!sessionId || !messageId) return;
+      ossFilesByMessageKey.set(
+        `${sessionId}::${messageId}`,
+        normalizeUploadedFileContextOssFiles(doc?.ossFiles),
+      );
+    });
+
+    let changed = false;
+    const nextSessionMessages = {};
+    Object.entries(safeSessionMessages).forEach(([rawSessionId, rawMessages]) => {
+      const sessionId = sanitizeId(rawSessionId, "");
+      const messages = Array.isArray(rawMessages) ? rawMessages : [];
+      nextSessionMessages[rawSessionId] = messages.map((message) => {
+        const messageId = sanitizeId(message?.id, "");
+        const ossFiles = ossFilesByMessageKey.get(`${sessionId}::${messageId}`) || [];
+        if (ossFiles.length === 0) return message;
+        const enriched = enrichChatMessageAttachmentsFromOssFiles(message, ossFiles);
+        if (enriched.changed) changed = true;
+        return enriched.message;
+      });
+    });
+
+    return {
+      sessionMessages: changed ? nextSessionMessages : safeSessionMessages,
+      changed,
+    };
+  }
+
   app.get("/api/chat/bootstrap", requireChatAuth, async (req, res) => {
     const user = req.authUser;
     const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
@@ -805,7 +1045,30 @@ export function registerAuthUserClassroomRoutes(app, deps) {
 
     const normalizedProfile = sanitizeUserProfile(user.profile);
     const profileComplete = isUserProfileComplete(normalizedProfile);
-    const state = normalizeChatStateDoc(stateDoc, teacherScopeKey);
+    const state = await ensureBootstrapChatState(
+      stateDoc,
+      String(user._id || ""),
+      teacherScopeKey,
+    );
+    const hydratedState = await hydrateChatStateAttachmentLinks(
+      state.sessionMessages,
+      String(user._id || ""),
+    );
+    if (hydratedState.changed) {
+      state.sessionMessages = hydratedState.sessionMessages;
+      const setPayload = { userId: req.authUser._id };
+      setPayload[getTeacherScopedChatStatePath("sessionMessages", teacherScopeKey)] =
+        hydratedState.sessionMessages;
+      await ChatState.findOneAndUpdate(
+        { userId: req.authUser._id },
+        { $set: setPayload },
+        {
+          upsert: true,
+          new: true,
+          setDefaultsOnInsert: isDefaultTeacherScopeKey(teacherScopeKey),
+        },
+      );
+    }
 
     res.json({
       ok: true,
@@ -1276,25 +1539,12 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   });
 
   app.put("/api/chat/state", requireChatAuth, async (req, res) => {
-    const nextState = sanitizeChatStatePayload(req.body || {});
+    const nextState = sanitizeChatStateMetaPayload(req.body || {});
     const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
-    const stateDoc = await ChatState.findOne(
-      { userId: req.authUser._id },
-      { sessionMessages: 1, teacherStates: 1 },
-    ).lean();
-    const currentState = normalizeChatStateDoc(stateDoc, teacherScopeKey);
-    const { sessionMessages, preservedSessionIds } =
-      mergeChatStateSessionMessagesPreservingCompleteness(
-        currentState.sessionMessages,
-        nextState.sessionMessages,
-        nextState.sessions,
-      );
     const setPayload = { userId: req.authUser._id };
     setPayload[getTeacherScopedChatStatePath("activeId", teacherScopeKey)] = nextState.activeId;
     setPayload[getTeacherScopedChatStatePath("groups", teacherScopeKey)] = nextState.groups;
     setPayload[getTeacherScopedChatStatePath("sessions", teacherScopeKey)] = nextState.sessions;
-    setPayload[getTeacherScopedChatStatePath("sessionMessages", teacherScopeKey)] =
-      sessionMessages;
     setPayload[getTeacherScopedChatStatePath("settings", teacherScopeKey)] = nextState.settings;
 
     await ChatState.findOneAndUpdate(
@@ -1307,20 +1557,28 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       },
     );
 
-    res.json({
-      ok: true,
-      preservedSessionIds,
-    });
+    res.json({ ok: true });
   });
 
   app.put("/api/chat/state/meta", requireChatAuth, async (req, res) => {
-    const nextMeta = sanitizeChatStateMetaPayload(req.body || {});
+    const payload = req.body && typeof req.body === "object" ? req.body : {};
     const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
+    const stateDoc = await ChatState.findOne(
+      { userId: req.authUser._id },
+      { activeId: 1, sessions: 1, teacherStates: 1, settings: 1 },
+    ).lean();
+    const currentState = normalizeChatStateDoc(stateDoc, teacherScopeKey);
+    const nextActiveId = resolveActiveId(
+      payload.activeId,
+      currentState.sessions,
+      currentState.activeId,
+    );
+    const nextSettings = sanitizeStateSettings(payload.settings);
     const setPayload = { userId: req.authUser._id };
-    setPayload[getTeacherScopedChatStatePath("activeId", teacherScopeKey)] = nextMeta.activeId;
-    setPayload[getTeacherScopedChatStatePath("groups", teacherScopeKey)] = nextMeta.groups;
-    setPayload[getTeacherScopedChatStatePath("sessions", teacherScopeKey)] = nextMeta.sessions;
-    setPayload[getTeacherScopedChatStatePath("settings", teacherScopeKey)] = nextMeta.settings;
+    setPayload[getTeacherScopedChatStatePath("activeId", teacherScopeKey)] =
+      nextActiveId;
+    setPayload[getTeacherScopedChatStatePath("settings", teacherScopeKey)] =
+      nextSettings;
 
     await ChatState.findOneAndUpdate(
       { userId: req.authUser._id },
@@ -1368,36 +1626,26 @@ export function registerAuthUserClassroomRoutes(app, deps) {
 
     const stateDoc = await ChatState.findOne(
       { userId: req.authUser._id },
-      { sessionMessages: 1, teacherStates: 1 },
+      { sessionMessages: 1, sessions: 1, teacherStates: 1 },
     ).lean();
-    const sourceMessages = normalizeChatStateDoc(stateDoc, teacherScopeKey).sessionMessages;
+    const currentState = normalizeChatStateDoc(stateDoc, teacherScopeKey);
+    const sourceMessages = currentState.sessionMessages;
+    const existingSessionIds = new Set(
+      (Array.isArray(currentState.sessions) ? currentState.sessions : [])
+        .map((session) => sanitizeId(session?.id, ""))
+        .filter(Boolean),
+    );
 
     const setPayload = { userId: req.authUser._id };
     bySession.forEach((updates, sessionId) => {
+      if (!existingSessionIds.has(sessionId)) return;
       const currentList = Array.isArray(sourceMessages[sessionId])
         ? sourceMessages[sessionId].slice(0, 400)
         : [];
-
-      const indexById = new Map();
-      currentList.forEach((message, idx) => {
-        if (!message?.id) return;
-        indexById.set(message.id, idx);
-      });
-
-      updates.forEach((message) => {
-        const existingIndex = indexById.get(message.id);
-        if (Number.isInteger(existingIndex)) {
-          currentList[existingIndex] = message;
-          return;
-        }
-        if (currentList.length < 400) {
-          currentList.push(message);
-          indexById.set(message.id, currentList.length - 1);
-        }
-      });
+      const mergedList = mergeSanitizedChatMessageLists(currentList, updates);
 
       setPayload[getTeacherScopedChatStatePath(`sessionMessages.${sessionId}`, teacherScopeKey)] =
-        currentList;
+        mergedList.slice(0, 400);
     });
 
     await ChatState.findOneAndUpdate(
@@ -1411,6 +1659,100 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     );
 
     res.json({ ok: true, updated: upserts.length });
+  });
+
+  app.get("/api/chat/attachments/download", requireChatAuth, async (req, res) => {
+    const userId = sanitizeId(req.authUser?._id, "");
+    const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
+    const sessionId = sanitizeId(req.query?.sessionId, "");
+    const messageId = sanitizeId(req.query?.messageId, "");
+    const attachmentIndex = sanitizeRuntimeInteger(req.query?.attachmentIndex, -1, -1, 7);
+
+    if (!userId || !sessionId || !messageId || attachmentIndex < 0) {
+      res.status(400).json({ error: "无效参数。" });
+      return;
+    }
+
+    const stateDoc = await ChatState.findOne(
+      { userId: req.authUser._id },
+      { sessionMessages: 1, teacherStates: 1 },
+    ).lean();
+    const currentState = normalizeChatStateDoc(stateDoc, teacherScopeKey);
+    const currentMessages = Array.isArray(currentState.sessionMessages?.[sessionId])
+      ? currentState.sessionMessages[sessionId]
+      : [];
+    const message =
+      currentMessages.find((item) => sanitizeId(item?.id, "") === messageId) || null;
+    if (!message) {
+      res.status(404).json({ error: "未找到对应消息。" });
+      return;
+    }
+
+    const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+    const attachment = attachments[attachmentIndex] || null;
+    if (!attachment) {
+      res.status(404).json({ error: "未找到对应附件。" });
+      return;
+    }
+
+    const fileName = sanitizeGroupChatFileName(
+      attachment?.name || `聊天附件-${attachmentIndex + 1}.bin`,
+    );
+    const mimeType = sanitizeGroupChatFileMimeType(attachment?.type);
+    let ossKey = sanitizeGroupChatOssObjectKey(attachment?.ossKey);
+    let directUrl = sanitizeGroupChatHttpUrl(attachment?.url || attachment?.fileUrl);
+
+    if (!ossKey && !directUrl) {
+      const uploadedContextDoc = await UploadedFileContext.findOne({
+        userId,
+        sessionId,
+        messageId,
+      })
+        .select({ ossFiles: 1 })
+        .lean();
+      const resolved = resolveChatAttachmentLinkFromOssFiles(
+        attachment,
+        attachmentIndex,
+        uploadedContextDoc?.ossFiles,
+      );
+      if (resolved) {
+        ossKey = sanitizeGroupChatOssObjectKey(resolved.ossKey);
+        directUrl = sanitizeGroupChatHttpUrl(resolved.url);
+      }
+    }
+
+    if (ossKey) {
+      const downloadUrl =
+        (await buildTeacherLessonFileDownloadUrl({
+          ossKey,
+          fileName,
+        })) ||
+        directUrl ||
+        buildGroupChatOssObjectUrl(ossKey);
+      if (!downloadUrl) {
+        res.status(500).json({ error: "附件下载地址生成失败，请稍后重试。" });
+        return;
+      }
+      res.json({
+        ok: true,
+        downloadUrl,
+        fileName,
+        mimeType,
+      });
+      return;
+    }
+
+    if (directUrl) {
+      res.json({
+        ok: true,
+        downloadUrl: directUrl,
+        fileName,
+        mimeType,
+      });
+      return;
+    }
+
+    res.status(404).json({ error: "附件缺少可下载地址。" });
   });
 
   app.post("/api/auth/register", async (req, res) => {

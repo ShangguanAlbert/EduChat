@@ -129,6 +129,18 @@ export async function prepareChatAttachments({
   return data;
 }
 
+export function downloadChatAttachment({
+  sessionId = "",
+  messageId = "",
+  attachmentIndex = -1,
+} = {}) {
+  const params = new URLSearchParams();
+  params.set("sessionId", String(sessionId || "").trim());
+  params.set("messageId", String(messageId || "").trim());
+  params.set("attachmentIndex", String(Number(attachmentIndex)));
+  return request(`/api/chat/attachments/download?${params.toString()}`);
+}
+
 export function suggestChatSessionTitle({
   question = "",
   answer = "",

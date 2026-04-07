@@ -15,7 +15,14 @@
     "audit:chat-state": "node scripts/audit-chat-state.mjs",
     "test:packy-thinking": "node scripts/test-packy-thinking.mjs",
     "test:packy-attachments": "node scripts/test-packy-attachments.mjs",
-    "test:packy-params": "node scripts/test-packy-params.mjs"
+    "test:packy-params": "node scripts/test-packy-params.mjs",
+    "test:memory": "node scripts/test-memory.mjs",
+    "test:chat-mongo-persistence": "node scripts/test-chat-mongo-persistence.mjs",
+    "backfill:chat-session-ids": "node scripts/backfill-chat-legacy-session-ids.mjs",
+    "backfill:chat-attachment-links": "node scripts/backfill-chat-attachment-links.mjs",
+    "test:chat-session-id-migration": "node scripts/test-chat-session-id-migration.mjs",
+    "test:session-notes": "node scripts/test-session-notes-runtime.mjs",
+    "test:session-notes:integration": "node scripts/test-session-notes-stream-integration.mjs"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.80",

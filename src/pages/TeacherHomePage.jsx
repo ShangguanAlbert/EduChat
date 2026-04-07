@@ -95,12 +95,6 @@ import {
   setUserToken,
   withAuthSlot,
 } from "../app/authStorage.js";
-import {
-  deletePageSnapshot,
-  getPageSnapshot,
-  isSnapshotUsable,
-  setPageSnapshot,
-} from "../app/indexedDbCache.js";
 import "../styles/teacher-home.css";
 
 const TARGET_CLASS_NAMES = Object.freeze(["教技231", "810班", "811班"]);
@@ -183,8 +177,6 @@ const USER_CREATE_DEFAULT_TEACHER_SCOPE_KEY =
       DEFAULT_TEACHER_SCOPE_KEY,
   ).trim() || DEFAULT_TEACHER_SCOPE_KEY;
 const PARTY_ROOM_CREATE_MAX_MEMBERS = 10;
-const TEACHER_HOME_SNAPSHOT_VERSION = 1;
-const TEACHER_HOME_SNAPSHOT_TTL_MS = 5 * 60 * 1000;
 const TEACHER_HOME_REFRESH_SUCCESS_MS = 2000;
 const USER_CREATE_CLASS_TEACHER_SCOPE_RULES = Object.freeze([
   {
@@ -816,11 +808,6 @@ function buildClassroomConfigSnapshot({
   });
 }
 
-function buildTeacherHomeSnapshotKey(activeSlot) {
-  const safeSlot = String(activeSlot || "").trim() || "default";
-  return `teacher-home:${safeSlot}`;
-}
-
 function resolveTeacherFeatureTransitionLabel(pathname) {
   const safePath = String(pathname || "")
     .trim()
@@ -869,111 +856,6 @@ function resolveTeacherHomeExportContextFromSearch(search = "") {
   }
 }
 
-function normalizeTeacherHomeAdminProfile(profile) {
-  const source = profile && typeof profile === "object" ? profile : {};
-  return {
-    id: String(source.id || ""),
-    username: String(source.username || ""),
-    role: String(source.role || "admin"),
-    createdAt: String(source.createdAt || ""),
-    updatedAt: String(source.updatedAt || ""),
-  };
-}
-
-function normalizeTeacherHomeSnapshot(raw) {
-  const source = raw && typeof raw === "object" ? raw : {};
-  const normalizedPlans = forceHomeworkUploadEnabled(source.teacherCoursePlans);
-  const normalizedHomeworkLessons = forceHomeworkUploadEnabled(
-    source.homeworkLessons,
-  );
-  const normalizedTargetClasses = Array.isArray(
-    source.userDirectoryTargetClasses,
-  )
-    ? source.userDirectoryTargetClasses
-        .map((item) => String(item || "").trim())
-        .filter(Boolean)
-    : [];
-
-  return {
-    adminProfile: normalizeTeacherHomeAdminProfile(source.adminProfile),
-    activePanel:
-      String(source.activePanel || "classroom").trim() || "classroom",
-    lessonListVisible: source.lessonListVisible !== false,
-    classroomUpdatedAt: String(source.classroomUpdatedAt || ""),
-    productTaskEnabled: !!source.productTaskEnabled,
-    teacherCoursePlans: normalizedPlans,
-    selectedCourseId: String(
-      source.selectedCourseId || normalizedPlans[0]?.id || "",
-    ),
-    classroomDisciplineConfig: normalizeDisciplineConfig(
-      source.classroomDisciplineConfig,
-    ),
-    seatLayoutsByClass: normalizeSeatLayoutsByClass(source.seatLayoutsByClass),
-    seatManageClassName: String(source.seatManageClassName || ""),
-    homeworkOverviewUpdatedAt: String(source.homeworkOverviewUpdatedAt || ""),
-    homeworkLessons: normalizedHomeworkLessons,
-    selectedHomeworkLessonId: String(
-      source.selectedHomeworkLessonId || normalizedHomeworkLessons[0]?.id || "",
-    ),
-    imageLibraryUpdatedAt: String(source.imageLibraryUpdatedAt || ""),
-    imageLibraryKeyword: String(source.imageLibraryKeyword || ""),
-    imageLibrarySearchInput: String(
-      source.imageLibrarySearchInput || source.imageLibraryKeyword || "",
-    ),
-    imageLibraryGroups: Array.isArray(source.imageLibraryGroups)
-      ? source.imageLibraryGroups
-      : [],
-    imageLibraryClassFilter:
-      String(source.imageLibraryClassFilter || "all") || "all",
-    imageLibrarySortBy:
-      String(source.imageLibrarySortBy || "latest") || "latest",
-    userDirectoryUpdatedAt: String(source.userDirectoryUpdatedAt || ""),
-    userDirectoryItems: Array.isArray(source.userDirectoryItems)
-      ? source.userDirectoryItems
-      : [],
-    userDirectoryKeyword: String(source.userDirectoryKeyword || ""),
-    userDirectorySearchInput: String(
-      source.userDirectorySearchInput || source.userDirectoryKeyword || "",
-    ),
-    userDirectoryRoleFilter:
-      String(source.userDirectoryRoleFilter || "all") || "all",
-    userDirectoryClassFilter:
-      String(source.userDirectoryClassFilter || "all") || "all",
-    userDirectorySortBy:
-      String(source.userDirectorySortBy || "updated") || "updated",
-    userDirectoryTargetClasses:
-      normalizedTargetClasses.length > 0
-        ? normalizedTargetClasses
-        : USER_DIRECTORY_DEFAULT_TARGET_CLASSES,
-    partyRoomManageUpdatedAt: String(source.partyRoomManageUpdatedAt || ""),
-    partyRoomItems: Array.isArray(source.partyRoomItems)
-      ? source.partyRoomItems
-      : [],
-    partyRoomManageUsers: Array.isArray(source.partyRoomManageUsers)
-      ? source.partyRoomManageUsers
-      : [],
-    partyRoomOwnerFilter: String(source.partyRoomOwnerFilter || "all") || "all",
-    partyRoomSortBy:
-      String(source.partyRoomSortBy || "admin-order") || "admin-order",
-    onlineGeneratedAt: String(source.onlineGeneratedAt || ""),
-    onlineUsers: Array.isArray(source.onlineUsers) ? source.onlineUsers : [],
-    onlineWindowSeconds:
-      Number(source.onlineWindowSeconds) > 0
-        ? Number(source.onlineWindowSeconds)
-        : 300,
-    onlineHeartbeatStaleSeconds:
-      Number(source.onlineHeartbeatStaleSeconds) > 0
-        ? Number(source.onlineHeartbeatStaleSeconds)
-        : 70,
-    onlineClassFilter: String(source.onlineClassFilter || "all") || "all",
-    exportCenterScopeKey:
-      String(source.exportCenterScopeKey || DEFAULT_TEACHER_SCOPE_KEY).trim() ||
-      DEFAULT_TEACHER_SCOPE_KEY,
-    exportCenterDate:
-      String(source.exportCenterDate || "").trim() || readTodayDateInputValue(),
-  };
-}
-
 const TeacherSeatFixedPanel = memo(function TeacherSeatFixedPanel({
   seatManageClassName,
   classroomSeatClassOptions,
@@ -989,20 +871,17 @@ const TeacherSeatFixedPanel = memo(function TeacherSeatFixedPanel({
   onToggleSeatStudentFillEnabled,
   onUpdateSeatValue,
 }) {
-  const [hydrated, setHydrated] = useState(false);
+  const [hydrated, setHydrated] = useState(() => typeof window === "undefined");
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      setHydrated(true);
-      return undefined;
-    }
+    if (hydrated || typeof window === "undefined") return undefined;
     const frameId = window.requestAnimationFrame(() => {
       setHydrated(true);
     });
     return () => {
       window.cancelAnimationFrame(frameId);
     };
-  }, []);
+  }, [hydrated]);
 
   const seatNormalizedValues = useMemo(
     () =>
@@ -1305,16 +1184,11 @@ export default function TeacherHomePage() {
     () => resolveTeacherHomeExportContextFromSearch(location.search),
     [location.search],
   );
-  const snapshotKey = useMemo(
-    () => buildTeacherHomeSnapshotKey(activeSlot),
-    [activeSlot],
-  );
   const taskFileInputRef = useRef(null);
   const lessonListScrollRef = useRef(null);
   const deleteConfirmInputRef = useRef(null);
   const disciplineStudentSearchInputRef = useRef(null);
   const classroomConfigSavedSnapshotRef = useRef("");
-  const initialPageLoadStartedRef = useRef(false);
 
   const [adminToken, setAdminToken] = useState(() => getAdminToken());
   const [loading, setLoading] = useState(true);
@@ -1327,10 +1201,6 @@ export default function TeacherHomePage() {
     () => requestedTeacherPanel || "classroom",
   );
   const [lessonListVisible, setLessonListVisible] = useState(true);
-  const [snapshotBootstrapReady, setSnapshotBootstrapReady] = useState(false);
-  const [snapshotPersistenceReady, setSnapshotPersistenceReady] =
-    useState(false);
-  const [usedCachedSnapshot, setUsedCachedSnapshot] = useState(false);
   const [pageRefreshState, setPageRefreshState] = useState("idle");
   const [featureTransition, setFeatureTransition] = useState({
     active: false,
@@ -1688,92 +1558,6 @@ export default function TeacherHomePage() {
     }
   }, [adminToken, handleAuthError]);
 
-  const teacherHomeSnapshot = useMemo(
-    () =>
-      normalizeTeacherHomeSnapshot({
-        adminProfile,
-        activePanel,
-        lessonListVisible,
-        classroomUpdatedAt,
-        productTaskEnabled,
-        teacherCoursePlans,
-        selectedCourseId,
-        classroomDisciplineConfig,
-        seatLayoutsByClass,
-        seatManageClassName,
-        homeworkOverviewUpdatedAt,
-        homeworkLessons,
-        selectedHomeworkLessonId,
-        imageLibraryUpdatedAt,
-        imageLibraryKeyword,
-        imageLibrarySearchInput,
-        imageLibraryGroups,
-        imageLibraryClassFilter,
-        imageLibrarySortBy,
-        userDirectoryUpdatedAt,
-        userDirectoryItems,
-        userDirectoryKeyword,
-        userDirectorySearchInput,
-        userDirectoryRoleFilter,
-        userDirectoryClassFilter,
-        userDirectorySortBy,
-        userDirectoryTargetClasses,
-        partyRoomManageUpdatedAt,
-        partyRoomItems,
-        partyRoomManageUsers,
-        partyRoomOwnerFilter,
-        partyRoomSortBy,
-        onlineGeneratedAt,
-        onlineUsers,
-        onlineWindowSeconds,
-        onlineHeartbeatStaleSeconds,
-        onlineClassFilter,
-        exportCenterScopeKey,
-        exportCenterDate,
-      }),
-    [
-      activePanel,
-      adminProfile,
-      classroomDisciplineConfig,
-      classroomUpdatedAt,
-      exportCenterDate,
-      exportCenterScopeKey,
-      homeworkLessons,
-      homeworkOverviewUpdatedAt,
-      imageLibraryClassFilter,
-      imageLibraryGroups,
-      imageLibraryKeyword,
-      imageLibrarySearchInput,
-      imageLibrarySortBy,
-      imageLibraryUpdatedAt,
-      lessonListVisible,
-      onlineClassFilter,
-      onlineGeneratedAt,
-      onlineHeartbeatStaleSeconds,
-      onlineUsers,
-      onlineWindowSeconds,
-      partyRoomItems,
-      partyRoomManageUpdatedAt,
-      partyRoomManageUsers,
-      partyRoomOwnerFilter,
-      partyRoomSortBy,
-      productTaskEnabled,
-      seatLayoutsByClass,
-      seatManageClassName,
-      selectedCourseId,
-      selectedHomeworkLessonId,
-      teacherCoursePlans,
-      userDirectoryClassFilter,
-      userDirectoryItems,
-      userDirectoryKeyword,
-      userDirectoryRoleFilter,
-      userDirectorySearchInput,
-      userDirectorySortBy,
-      userDirectoryTargetClasses,
-      userDirectoryUpdatedAt,
-    ],
-  );
-
   const loadPageData = useCallback(
     async ({ background = false } = {}) => {
       if (!adminToken) {
@@ -1782,7 +1566,7 @@ export default function TeacherHomePage() {
         return;
       }
       setSeatLayoutsSyncReady(false);
-      if (background && !usedCachedSnapshot) {
+      if (background) {
         setPageRefreshState("refreshing");
       } else {
         setLoading(true);
@@ -1835,9 +1619,7 @@ export default function TeacherHomePage() {
         const firstPlan = sortLessonPlans(normalizedPlans)[0];
         setSelectedCourseId(String(firstPlan?.id || ""));
         setClassroomUpdatedAt(String(plansData?.updatedAt || ""));
-        setSnapshotPersistenceReady(true);
-        if (background || usedCachedSnapshot) {
-          setUsedCachedSnapshot(false);
+        if (background) {
           setPageRefreshState("success");
         } else {
           setPageRefreshState("idle");
@@ -1845,7 +1627,7 @@ export default function TeacherHomePage() {
       } catch (rawError) {
         if (handleAuthError(rawError)) return;
         setError(readErrorMessage(rawError));
-        if (background && usedCachedSnapshot) {
+        if (background) {
           setPageRefreshState("stale");
         } else {
           setPageRefreshState("idle");
@@ -1854,96 +1636,20 @@ export default function TeacherHomePage() {
         setLoading(false);
       }
     },
-    [activeSlot, adminToken, handleAuthError, navigate, usedCachedSnapshot],
+    [activeSlot, adminToken, handleAuthError, navigate],
   );
 
   useEffect(() => {
-    let cancelled = false;
-    initialPageLoadStartedRef.current = false;
-    setSnapshotBootstrapReady(false);
-    setSnapshotPersistenceReady(false);
-    setUsedCachedSnapshot(false);
     setPageRefreshState("idle");
-
-    async function restoreSnapshot() {
-      const record = await getPageSnapshot(snapshotKey);
-      if (cancelled) return;
-      if (record && !isSnapshotUsable(record, TEACHER_HOME_SNAPSHOT_VERSION)) {
-        void deletePageSnapshot(snapshotKey);
-      }
-      if (record && isSnapshotUsable(record, TEACHER_HOME_SNAPSHOT_VERSION)) {
-        const snapshot = normalizeTeacherHomeSnapshot(record.data);
-        setAdminProfile(snapshot.adminProfile);
-        setActivePanel(requestedTeacherPanel || snapshot.activePanel);
-        setLessonListVisible(snapshot.lessonListVisible);
-        setClassroomUpdatedAt(snapshot.classroomUpdatedAt);
-        setProductTaskEnabled(snapshot.productTaskEnabled);
-        setTeacherCoursePlans(snapshot.teacherCoursePlans);
-        setSelectedCourseId(snapshot.selectedCourseId);
-        setClassroomDisciplineConfig(snapshot.classroomDisciplineConfig);
-        setSeatLayoutsByClass(snapshot.seatLayoutsByClass);
-        setSeatManageClassName(snapshot.seatManageClassName);
-        setHomeworkOverviewUpdatedAt(snapshot.homeworkOverviewUpdatedAt);
-        setHomeworkLessons(snapshot.homeworkLessons);
-        setSelectedHomeworkLessonId(snapshot.selectedHomeworkLessonId);
-        setImageLibraryUpdatedAt(snapshot.imageLibraryUpdatedAt);
-        setImageLibraryKeyword(snapshot.imageLibraryKeyword);
-        setImageLibrarySearchInput(snapshot.imageLibrarySearchInput);
-        setImageLibraryGroups(snapshot.imageLibraryGroups);
-        setImageLibraryClassFilter(snapshot.imageLibraryClassFilter);
-        setImageLibrarySortBy(snapshot.imageLibrarySortBy);
-        setUserDirectoryUpdatedAt(snapshot.userDirectoryUpdatedAt);
-        setUserDirectoryItems(snapshot.userDirectoryItems);
-        setUserDirectoryKeyword(snapshot.userDirectoryKeyword);
-        setUserDirectorySearchInput(snapshot.userDirectorySearchInput);
-        setUserDirectoryRoleFilter(snapshot.userDirectoryRoleFilter);
-        setUserDirectoryClassFilter(snapshot.userDirectoryClassFilter);
-        setUserDirectorySortBy(snapshot.userDirectorySortBy);
-        setUserDirectoryTargetClasses(snapshot.userDirectoryTargetClasses);
-        setPartyRoomManageUpdatedAt(snapshot.partyRoomManageUpdatedAt);
-        setPartyRoomItems(snapshot.partyRoomItems);
-        setPartyRoomManageUsers(snapshot.partyRoomManageUsers);
-        setPartyRoomOwnerFilter(snapshot.partyRoomOwnerFilter);
-        setPartyRoomSortBy(snapshot.partyRoomSortBy);
-        setOnlineGeneratedAt(snapshot.onlineGeneratedAt);
-        setOnlineUsers(snapshot.onlineUsers);
-        setOnlineWindowSeconds(snapshot.onlineWindowSeconds);
-        setOnlineHeartbeatStaleSeconds(snapshot.onlineHeartbeatStaleSeconds);
-        setOnlineClassFilter(snapshot.onlineClassFilter);
-        setExportCenterScopeKey(
-          requestedExportCenterContext.teacherScopeKey ||
-            snapshot.exportCenterScopeKey,
-        );
-        setExportCenterDate(
-          requestedExportCenterContext.exportDate || snapshot.exportCenterDate,
-        );
-        classroomConfigSavedSnapshotRef.current = buildClassroomConfigSnapshot({
-          productTaskEnabled: snapshot.productTaskEnabled,
-          teacherCoursePlans: snapshot.teacherCoursePlans,
-          classroomDisciplineConfig: snapshot.classroomDisciplineConfig,
-        });
-        seatLayoutsLastSavedSnapshotRef.current = JSON.stringify(
-          snapshot.seatLayoutsByClass,
-        );
-        setSnapshotPersistenceReady(true);
-        setUsedCachedSnapshot(true);
-        setLoading(false);
-      }
-      setSnapshotBootstrapReady(true);
-    }
-
-    void restoreSnapshot();
-    return () => {
-      cancelled = true;
-    };
-  }, [requestedExportCenterContext, requestedTeacherPanel, snapshotKey]);
-
-  useEffect(() => {
-    if (!snapshotBootstrapReady) return;
-    if (initialPageLoadStartedRef.current) return;
-    initialPageLoadStartedRef.current = true;
-    void loadPageData({ background: usedCachedSnapshot });
-  }, [loadPageData, snapshotBootstrapReady, usedCachedSnapshot]);
+    setActivePanel(requestedTeacherPanel || "classroom");
+    setExportCenterScopeKey(
+      requestedExportCenterContext.teacherScopeKey || DEFAULT_TEACHER_SCOPE_KEY,
+    );
+    setExportCenterDate(
+      requestedExportCenterContext.exportDate || readTodayDateInputValue(),
+    );
+    void loadPageData();
+  }, [loadPageData, requestedExportCenterContext, requestedTeacherPanel]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1984,19 +1690,6 @@ export default function TeacherHomePage() {
     location.pathname,
     location.search,
   ]);
-
-  useEffect(() => {
-    if (!snapshotPersistenceReady) return undefined;
-    const timerId = window.setTimeout(() => {
-      void setPageSnapshot(
-        snapshotKey,
-        teacherHomeSnapshot,
-        TEACHER_HOME_SNAPSHOT_TTL_MS,
-        TEACHER_HOME_SNAPSHOT_VERSION,
-      );
-    }, 180);
-    return () => window.clearTimeout(timerId);
-  }, [snapshotKey, snapshotPersistenceReady, teacherHomeSnapshot]);
 
   useEffect(() => {
     if (pageRefreshState !== "success") return undefined;
@@ -3915,7 +3608,6 @@ export default function TeacherHomePage() {
   }, [selectedCourseTasks, selectedTaskId]);
 
   function onLogout() {
-    void deletePageSnapshot(snapshotKey);
     clearAdminToken();
     clearUserAuthSession(activeSlot);
     setAdminToken("");

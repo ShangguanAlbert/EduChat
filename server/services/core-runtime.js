@@ -145,21 +145,29 @@ const DEFAULT_VOLCENGINE_IMAGE_GENERATION_ENDPOINT =
 const SYSTEM_PROMPT_MAX_LENGTH = 24000;
 const DEFAULT_SYSTEM_PROMPT_FALLBACK = "你是用户的助手";
 const RUNTIME_CONTEXT_ROUNDS_MAX = 20;
-const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
-const RUNTIME_MAX_INPUT_TOKENS = 512000;
+const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 1000000;
+const RUNTIME_MAX_INPUT_TOKENS = 1000000;
 const RUNTIME_MAX_OUTPUT_TOKENS = 1048576;
 const RUNTIME_MAX_REASONING_TOKENS = 128000;
 const VOLCENGINE_FIXED_SAMPLING_MODEL_ID = "doubao-seed-2-0-pro-260215";
 const VOLCENGINE_FIXED_TEMPERATURE = 1;
 const VOLCENGINE_FIXED_TOP_P = 0.95;
 const PACKYCODE_DEFAULT_MODEL = "gpt-5.4";
-const PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS = 256000;
-const PACKYCODE_GPT54_MAX_INPUT_TOKENS = 256000;
+const PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS = 1000000;
+const PACKYCODE_GPT54_MAX_INPUT_TOKENS = 1000000;
 const PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS = 256000;
-const PACKYCODE_GPT54_COMPRESSION_TRIGGER_TOKENS = 204800;
-const PACKYCODE_GPT54_COMPRESSION_TARGET_TOKENS = 179200;
+const PACKYCODE_GPT54_COMPRESSION_TRIGGER_TOKENS = 800000;
+const PACKYCODE_GPT54_COMPRESSION_TARGET_TOKENS = 700000;
 const PACKYCODE_GPT54_DEFAULT_KEEP_USER_ROUNDS = 6;
 const PACKYCODE_GPT54_MIN_KEEP_USER_ROUNDS = 2;
+const SESSION_NOTES_MAX_ESTIMATED_TOKENS = 4000;
+const SESSION_NOTES_MAX_LIST_ITEMS = 24;
+const SESSION_NOTES_MAX_FILE_SUMMARIES = 12;
+const SESSION_NOTES_RECENT_USER_ROUNDS = 8;
+const SESSION_NOTES_CONTEXT_SAFETY_MARGIN_TOKENS = 12000;
+const SESSION_NOTES_COMPRESSION_LOCK_MS = 30 * 1000;
+const PACKYCODE_REQUEST_RECONNECT_RETRIES = 5;
+const PACKYCODE_REQUEST_RECONNECT_DELAY_MS = 15 * 1000;
 const UPLOADED_FILE_CONTEXT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const GENERATED_IMAGE_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -375,9 +383,9 @@ const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
     provider: AGENT_A_FIXED_PROVIDER,
     model: AGENT_A_FIXED_MODEL,
     protocol: AGENT_A_FIXED_PROTOCOL,
-    contextWindowTokens: 256000,
-    maxInputTokens: 256000,
-    maxOutputTokens: 256000,
+    contextWindowTokens: PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
+    maxInputTokens: PACKYCODE_GPT54_MAX_INPUT_TOKENS,
+    maxOutputTokens: PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
     maxReasoningTokens: RUNTIME_MAX_REASONING_TOKENS,
     enableWebSearch: false,
   }),
@@ -1108,6 +1116,82 @@ uploadedFileContextSchema.index(
 const UploadedFileContext =
   mongoose.models.UploadedFileContext ||
   mongoose.model("UploadedFileContext", uploadedFileContextSchema);
+
+const sessionNotesSchema = new mongoose.Schema(
+  {
+    userId: { type: String, required: true, index: true },
+    sessionId: { type: String, required: true, index: true },
+    tokenEstimate: { type: Number, default: 0 },
+    notes: {
+      type: new mongoose.Schema(
+        {
+          goal: { type: String, default: "" },
+          facts: { type: [String], default: () => [] },
+          preferences: { type: [String], default: () => [] },
+          completed: { type: [String], default: () => [] },
+          pending: { type: [String], default: () => [] },
+          openQuestions: { type: [String], default: () => [] },
+          fileSummaries: {
+            type: [
+              new mongoose.Schema(
+                {
+                  filename: { type: String, default: "" },
+                  summary: { type: String, default: "" },
+                  keyPoints: { type: [String], default: () => [] },
+                },
+                { _id: false },
+              ),
+            ],
+            default: () => [],
+          },
+          doNotRepeat: { type: [String], default: () => [] },
+        },
+        { _id: false },
+      ),
+      default: () => ({
+        goal: "",
+        facts: [],
+        preferences: [],
+        completed: [],
+        pending: [],
+        openQuestions: [],
+        fileSummaries: [],
+        doNotRepeat: [],
+      }),
+    },
+    recentTurns: {
+      type: [
+        new mongoose.Schema(
+          {
+            role: { type: String, default: "user" },
+            content: { type: String, default: "" },
+          },
+          { _id: false },
+        ),
+      ],
+      default: () => [],
+    },
+    summaryUpToMessageId: { type: String, default: "" },
+    compressionLockUntil: { type: Date, default: null },
+  },
+  {
+    timestamps: true,
+    collection: "session_notes",
+    autoIndex: false,
+  },
+);
+sessionNotesSchema.index(
+  { userId: 1, sessionId: 1 },
+  { unique: true, name: "ux_session_notes_user_session" },
+);
+sessionNotesSchema.index(
+  { compressionLockUntil: 1 },
+  { name: "ix_session_notes_compression_lock_until" },
+);
+
+const SessionNotes =
+  mongoose.models.SessionNotes ||
+  mongoose.model("SessionNotes", sessionNotesSchema);
 
 const generatedImageHistorySchema = new mongoose.Schema(
   {
@@ -2117,6 +2201,447 @@ async function buildUploadedAttachmentLinksForClient(ossFiles = []) {
   return links;
 }
 
+function createDefaultSessionNotes() {
+  return {
+    goal: "",
+    facts: [],
+    preferences: [],
+    completed: [],
+    pending: [],
+    openQuestions: [],
+    fileSummaries: [],
+    doNotRepeat: [],
+  };
+}
+
+function sanitizeSessionNotesList(input, maxItems = SESSION_NOTES_MAX_LIST_ITEMS) {
+  const safeList = Array.isArray(input) ? input : [];
+  const dedup = new Set();
+  const normalized = [];
+  safeList.forEach((item) => {
+    const text = sanitizeText(item, "", 600);
+    if (!text) return;
+    const key = text.trim().toLowerCase();
+    if (!key || dedup.has(key)) return;
+    dedup.add(key);
+    normalized.push(text);
+  });
+  return normalized.slice(0, maxItems);
+}
+
+function sanitizeSessionNotesFileSummaries(input) {
+  const safeList = Array.isArray(input) ? input : [];
+  const dedup = new Set();
+  const normalized = [];
+  safeList.forEach((item) => {
+    const filename = sanitizeText(item?.filename, "", 180);
+    const summary = sanitizeText(item?.summary, "", 1200);
+    const keyPoints = sanitizeSessionNotesList(item?.keyPoints, 6);
+    const key = `${filename.toLowerCase()}::${summary.slice(0, 120).toLowerCase()}`;
+    if ((!filename && !summary) || dedup.has(key)) return;
+    dedup.add(key);
+    normalized.push({ filename, summary, keyPoints });
+  });
+  return normalized.slice(0, SESSION_NOTES_MAX_FILE_SUMMARIES);
+}
+
+function sanitizeSessionNotesPayload(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  return {
+    goal: sanitizeText(source.goal, "", 1200),
+    facts: sanitizeSessionNotesList(source.facts),
+    preferences: sanitizeSessionNotesList(source.preferences),
+    completed: sanitizeSessionNotesList(source.completed),
+    pending: sanitizeSessionNotesList(source.pending),
+    openQuestions: sanitizeSessionNotesList(source.openQuestions),
+    fileSummaries: sanitizeSessionNotesFileSummaries(source.fileSummaries),
+    doNotRepeat: sanitizeSessionNotesList(source.doNotRepeat),
+  };
+}
+
+function trimSessionNotesGoal(goal, maxChars = 900) {
+  return sanitizeText(goal, "", maxChars);
+}
+
+function trimSessionNotesListItems(list, maxChars = 240, maxItems = SESSION_NOTES_MAX_LIST_ITEMS) {
+  const safeList = Array.isArray(list) ? list : [];
+  return sanitizeSessionNotesList(
+    safeList.map((item) => sanitizeText(item, "", maxChars)),
+    maxItems,
+  );
+}
+
+function trimSessionNotesFileSummariesToBudget(input, { maxSummaryChars = 360, maxKeyPoints = 4 } = {}) {
+  return sanitizeSessionNotesFileSummaries(input).map((item) => ({
+    filename: sanitizeText(item?.filename, "", 180),
+    summary: sanitizeText(item?.summary, "", maxSummaryChars),
+    keyPoints: trimSessionNotesListItems(item?.keyPoints, 180, maxKeyPoints),
+  }));
+}
+
+function fitSessionNotesToTokenBudget(rawNotes) {
+  let next = sanitizeSessionNotesPayload(rawNotes);
+  if (
+    estimateSessionNotesTokens(next) <= SESSION_NOTES_MAX_ESTIMATED_TOKENS
+  ) {
+    return next;
+  }
+
+  next = {
+    ...next,
+    goal: trimSessionNotesGoal(next.goal, 800),
+    facts: trimSessionNotesListItems(next.facts, 240, 18),
+    preferences: trimSessionNotesListItems(next.preferences, 200, 12),
+    completed: trimSessionNotesListItems(next.completed, 220, 14),
+    pending: trimSessionNotesListItems(next.pending, 220, 14),
+    openQuestions: trimSessionNotesListItems(next.openQuestions, 220, 14),
+    fileSummaries: trimSessionNotesFileSummariesToBudget(next.fileSummaries, {
+      maxSummaryChars: 320,
+      maxKeyPoints: 4,
+    }).slice(-8),
+    doNotRepeat: trimSessionNotesListItems(next.doNotRepeat, 220, 12),
+  };
+  if (
+    estimateSessionNotesTokens(next) <= SESSION_NOTES_MAX_ESTIMATED_TOKENS
+  ) {
+    return next;
+  }
+
+  const removableFields = [
+    "facts",
+    "completed",
+    "pending",
+    "openQuestions",
+    "preferences",
+    "doNotRepeat",
+    "fileSummaries",
+  ];
+  let safetyCounter = 0;
+  while (
+    estimateSessionNotesTokens(next) > SESSION_NOTES_MAX_ESTIMATED_TOKENS &&
+    safetyCounter < 64
+  ) {
+    safetyCounter += 1;
+    let shrunk = false;
+
+    for (const field of removableFields) {
+      const value = Array.isArray(next[field]) ? next[field] : [];
+      if (value.length > 1) {
+        next = { ...next, [field]: value.slice(1) };
+        shrunk = true;
+        break;
+      }
+    }
+
+    if (shrunk) continue;
+
+    if (next.goal && next.goal.length > 240) {
+      next = { ...next, goal: trimSessionNotesGoal(next.goal, Math.ceil(next.goal.length * 0.75)) };
+      continue;
+    }
+
+    const fileSummaries = trimSessionNotesFileSummariesToBudget(
+      next.fileSummaries,
+      {
+        maxSummaryChars: 200,
+        maxKeyPoints: 3,
+      },
+    );
+    if (JSON.stringify(fileSummaries) !== JSON.stringify(next.fileSummaries)) {
+      next = { ...next, fileSummaries };
+      continue;
+    }
+
+    const compacted = {
+      ...next,
+      facts: trimSessionNotesListItems(next.facts, 160, 8),
+      preferences: trimSessionNotesListItems(next.preferences, 140, 8),
+      completed: trimSessionNotesListItems(next.completed, 160, 8),
+      pending: trimSessionNotesListItems(next.pending, 160, 8),
+      openQuestions: trimSessionNotesListItems(next.openQuestions, 160, 8),
+      doNotRepeat: trimSessionNotesListItems(next.doNotRepeat, 160, 8),
+      fileSummaries: fileSummaries.slice(-4),
+      goal: trimSessionNotesGoal(next.goal, 320),
+    };
+    if (JSON.stringify(compacted) !== JSON.stringify(next)) {
+      next = compacted;
+      continue;
+    }
+
+    next = {
+      ...next,
+      facts: [],
+      preferences: [],
+      completed: [],
+      pending: [],
+      openQuestions: [],
+      doNotRepeat: [],
+      fileSummaries: fileSummaries.slice(-2),
+      goal: trimSessionNotesGoal(next.goal, 220),
+    };
+  }
+
+  return sanitizeSessionNotesPayload(next);
+}
+
+function sanitizeSessionNotesTurn(item, index = 0) {
+  const role = item?.role === "assistant" ? "assistant" : "user";
+  const content = sanitizeText(item?.content, "", 4000);
+  return {
+    role,
+    content: content || `（空白消息 ${index + 1}）`,
+  };
+}
+
+function sanitizeSessionRecentTurns(input) {
+  const safeList = Array.isArray(input) ? input : [];
+  return safeList
+    .slice(-SESSION_NOTES_RECENT_USER_ROUNDS * 2)
+    .map((item, index) => sanitizeSessionNotesTurn(item, index))
+    .filter((item) => !!item.content);
+}
+
+function estimateSessionNotesTokens(value) {
+  const text =
+    typeof value === "string"
+      ? value
+      : JSON.stringify(value && typeof value === "object" ? value : {});
+  const length = String(text || "").trim().length;
+  if (!length) return 0;
+  return Math.ceil((length / 4) * 1.2);
+}
+
+function buildSessionNotesPrompt(notes) {
+  const safeNotes = sanitizeSessionNotesPayload(notes);
+  const sections = [];
+
+  if (safeNotes.goal) sections.push(`当前目标：\n${safeNotes.goal}`);
+  if (safeNotes.facts.length > 0) {
+    sections.push(
+      `已确认事实：\n${safeNotes.facts.map((item) => `- ${item}`).join("\n")}`,
+    );
+  }
+  if (safeNotes.preferences.length > 0) {
+    sections.push(
+      `用户偏好：\n${safeNotes.preferences.map((item) => `- ${item}`).join("\n")}`,
+    );
+  }
+  if (safeNotes.completed.length > 0) {
+    sections.push(
+      `已完成事项：\n${safeNotes.completed.map((item) => `- ${item}`).join("\n")}`,
+    );
+  }
+  if (safeNotes.pending.length > 0) {
+    sections.push(
+      `待办事项：\n${safeNotes.pending.map((item) => `- ${item}`).join("\n")}`,
+    );
+  }
+  if (safeNotes.openQuestions.length > 0) {
+    sections.push(
+      `未决问题：\n${safeNotes.openQuestions.map((item) => `- ${item}`).join("\n")}`,
+    );
+  }
+  if (safeNotes.fileSummaries.length > 0) {
+    sections.push(
+      `文件摘要：\n${safeNotes.fileSummaries
+        .map((item) => {
+          const keyPoints = item.keyPoints
+            .map((point) => `  - ${point}`)
+            .join("\n");
+          return [
+            `- ${item.filename || "未命名文件"}：${item.summary || "无摘要"}`,
+            keyPoints,
+          ]
+            .filter(Boolean)
+            .join("\n");
+        })
+        .join("\n")}`,
+    );
+  }
+  if (safeNotes.doNotRepeat.length > 0) {
+    sections.push(
+      `避免重复：\n${safeNotes.doNotRepeat.map((item) => `- ${item}`).join("\n")}`,
+    );
+  }
+
+  if (sections.length === 0) return "";
+  return [
+    "以下是当前会话的结构化笔记（session notes）。这些笔记是长期记忆，请优先参考它，而不是假设更早的原始对话仍会完整出现在上下文中。",
+    sections.join("\n\n"),
+  ].join("\n\n");
+}
+
+function buildSessionNotesMessageContent(content) {
+  const text = buildPackyEstimatorTextContent(content);
+  return sanitizeText(text, "", 4000);
+}
+
+function buildSessionRecentTurnsFromMessages(messages) {
+  const visibleMessages = (Array.isArray(messages) ? messages : []).filter(
+    (message) => !message?.hidden,
+  );
+  const recentMessages = pickRecentUserRounds(
+    visibleMessages,
+    SESSION_NOTES_RECENT_USER_ROUNDS,
+  );
+  return recentMessages
+    .map((message, index) => ({
+      role: message?.role === "assistant" ? "assistant" : "user",
+      content: buildSessionNotesMessageContent(message?.content) || `（空白消息 ${index + 1}）`,
+    }))
+    .filter((item) => !!item.content);
+}
+
+function buildMessagesBeforeRecentTurns(messages, recentTurns) {
+  const safeMessages = Array.isArray(messages) ? messages : [];
+  const safeRecent = Array.isArray(recentTurns) ? recentTurns : [];
+  if (safeMessages.length === 0 || safeRecent.length === 0) return [];
+  const firstRecentId = sanitizeId(safeRecent[0]?.id, "");
+  if (!firstRecentId) return [];
+  const index = safeMessages.findIndex(
+    (message) => sanitizeId(message?.id, "") === firstRecentId,
+  );
+  if (index <= 0) return [];
+  return safeMessages.slice(0, index);
+}
+
+function buildSessionNotesTranscript(messages) {
+  return renderPackySummarySourceMessages(
+    (Array.isArray(messages) ? messages : []).filter(
+      (message) => !message?.hidden,
+    ),
+  );
+}
+
+async function readSessionNotes({ userId, sessionId }) {
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  if (!safeUserId || !safeSessionId) return null;
+
+  const doc = await SessionNotes.findOne(
+    { userId: safeUserId, sessionId: safeSessionId },
+    {
+      userId: 1,
+      sessionId: 1,
+      tokenEstimate: 1,
+      notes: 1,
+      recentTurns: 1,
+      summaryUpToMessageId: 1,
+      compressionLockUntil: 1,
+      updatedAt: 1,
+    },
+  )
+    .lean()
+    .catch(() => null);
+
+  if (!doc) return null;
+  return {
+    userId: safeUserId,
+    sessionId: safeSessionId,
+    tokenEstimate: sanitizeRuntimeInteger(
+      doc?.tokenEstimate,
+      0,
+      0,
+      SESSION_NOTES_MAX_ESTIMATED_TOKENS * 4,
+    ),
+    notes: sanitizeSessionNotesPayload(doc?.notes),
+    recentTurns: sanitizeSessionRecentTurns(doc?.recentTurns),
+    summaryUpToMessageId: sanitizeId(doc?.summaryUpToMessageId, ""),
+    compressionLockUntil: doc?.compressionLockUntil || null,
+    updatedAt: doc?.updatedAt || null,
+  };
+}
+
+async function upsertSessionNotes({
+  userId,
+  sessionId,
+  notes,
+  recentTurns,
+  summaryUpToMessageId = "",
+}) {
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  if (!safeUserId || !safeSessionId) return null;
+
+  const safeNotes = fitSessionNotesToTokenBudget(notes);
+  const safeRecentTurns = sanitizeSessionRecentTurns(recentTurns);
+  const tokenEstimate = estimateSessionNotesTokens(safeNotes);
+
+  await SessionNotes.findOneAndUpdate(
+    { userId: safeUserId, sessionId: safeSessionId },
+    {
+      $set: {
+        notes: safeNotes,
+        recentTurns: safeRecentTurns,
+        tokenEstimate,
+        summaryUpToMessageId: sanitizeId(summaryUpToMessageId, ""),
+      },
+      $setOnInsert: {
+        userId: safeUserId,
+        sessionId: safeSessionId,
+      },
+    },
+    {
+      upsert: true,
+      new: true,
+    },
+  ).catch(() => null);
+
+  return {
+    userId: safeUserId,
+    sessionId: safeSessionId,
+    notes: safeNotes,
+    recentTurns: safeRecentTurns,
+    tokenEstimate,
+    summaryUpToMessageId: sanitizeId(summaryUpToMessageId, ""),
+  };
+}
+
+async function acquireSessionNotesCompressionLock({ userId, sessionId }) {
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  if (!safeUserId || !safeSessionId) return false;
+
+  const now = new Date();
+  const lockUntil = new Date(now.getTime() + SESSION_NOTES_COMPRESSION_LOCK_MS);
+  const doc = await SessionNotes.findOneAndUpdate(
+    {
+      userId: safeUserId,
+      sessionId: safeSessionId,
+      $or: [
+        { compressionLockUntil: { $exists: false } },
+        { compressionLockUntil: null },
+        { compressionLockUntil: { $lte: now } },
+      ],
+    },
+    {
+      $set: { compressionLockUntil: lockUntil },
+      $setOnInsert: {
+        userId: safeUserId,
+        sessionId: safeSessionId,
+        notes: createDefaultSessionNotes(),
+        recentTurns: [],
+        tokenEstimate: 0,
+      },
+    },
+    { upsert: true, new: true },
+  )
+    .lean()
+    .catch(() => null);
+
+  return !!doc;
+}
+
+async function releaseSessionNotesCompressionLock({ userId, sessionId }) {
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  if (!safeUserId || !safeSessionId) return;
+  await SessionNotes.updateOne(
+    { userId: safeUserId, sessionId: safeSessionId },
+    { $set: { compressionLockUntil: null } },
+  ).catch(() => {});
+}
+
 async function saveUploadedFileContext({
   userId,
   sessionId,
@@ -2365,7 +2890,12 @@ async function rehydrateUploadedFileContexts(
     if (!hasUsableMessageContent(normalized)) continue;
 
     let hydrated = cloneNormalizedMessageContent(normalized);
-    if (shouldRefreshAliyunMediaUrls) {
+    if (safeProvider === "packycode" && safeProtocol === "chat") {
+      hydrated = await hydratePackyImagePartsToInlineData(
+        hydrated,
+        doc?.ossFiles,
+      );
+    } else if (shouldRefreshAliyunMediaUrls) {
       hydrated = await buildAliyunDashScopeRehydratedContent(
         normalized,
         doc?.ossFiles,
@@ -2458,9 +2988,10 @@ function extractPackyAttachmentMemoryParts(content) {
     const type = String(part?.type || "")
       .trim()
       .toLowerCase();
+    if (type === "image_url" || type === "input_image") {
+      return isInlineDataUrl(extractInputImageUrl(part));
+    }
     if (
-      type === "image_url" ||
-      type === "input_image" ||
       type === "file" ||
       type === "file_url" ||
       type === "input_file_url" ||
@@ -3041,6 +3572,83 @@ function buildDataUrlForBuffer(buffer, mime) {
   return `data:${safeMime};base64,${buffer.toString("base64")}`;
 }
 
+function isInlineDataUrl(value) {
+  return /^data:/i.test(String(value || "").trim());
+}
+
+async function hydratePackyImagePartsToInlineData(content, ossFiles = []) {
+  const normalized = normalizeMessageContent(content);
+  if (!Array.isArray(normalized) || normalized.length === 0) {
+    return cloneNormalizedMessageContent(normalized);
+  }
+
+  const safeOssFiles = normalizeUploadedFileContextOssFiles(ossFiles);
+  let ossImageCursor = 0;
+  const next = [];
+
+  for (const part of normalized) {
+    const type = String(part?.type || "")
+      .trim()
+      .toLowerCase();
+    if (type !== "image_url" && type !== "input_image") {
+      const cloned = cloneNormalizedMessageContent([part]);
+      if (Array.isArray(cloned) && cloned[0]) {
+        next.push(cloned[0]);
+      }
+      continue;
+    }
+
+    let payload = null;
+    const existingUrl = extractInputImageUrl(part);
+    if (isInlineDataUrl(existingUrl)) {
+      const cloned = cloneNormalizedMessageContent([part]);
+      if (Array.isArray(cloned) && cloned[0]) {
+        next.push(cloned[0]);
+      }
+      continue;
+    }
+    if (existingUrl) {
+      payload = await buildGeneratedImageBinaryPayload(existingUrl);
+    }
+
+    while (
+      !payload &&
+      ossImageCursor < safeOssFiles.length &&
+      !String(safeOssFiles[ossImageCursor]?.mimeType || "")
+        .trim()
+        .toLowerCase()
+        .startsWith("image/")
+    ) {
+      ossImageCursor += 1;
+    }
+
+    if (!payload && ossImageCursor < safeOssFiles.length) {
+      const imageOssFile = safeOssFiles[ossImageCursor];
+      ossImageCursor += 1;
+      const resolvedUrl = await resolveAliyunDashScopeAttachmentUrl({
+        ossFile: imageOssFile,
+        fallbackFileName: imageOssFile?.fileName,
+      });
+      if (resolvedUrl) {
+        payload = await buildGeneratedImageBinaryPayload(resolvedUrl);
+      }
+    }
+
+    if (!payload?.data?.length) {
+      continue;
+    }
+
+    const inlineUrl = buildDataUrlForBuffer(
+      payload.data,
+      payload.mimeType || "image/png",
+    );
+    if (!inlineUrl) continue;
+    next.push({ type: "image_url", image_url: { url: inlineUrl } });
+  }
+
+  return next;
+}
+
 function resolveOpenRouterAudioFormat({ mime, ext }) {
   const normalizedExt = String(ext || "")
     .trim()
@@ -3104,12 +3712,14 @@ async function buildOpenRouterFileInputPart(file, { ossFile = null } = {}) {
   const safeName = sanitizeText(file?.originalname, "upload.bin", 180);
 
   if (mime.startsWith("image/")) {
-    const imageUrlFromOss = await resolveAliyunDashScopeAttachmentUrl({
-      ossFile,
-      fallbackFileName: safeName,
-    });
-    if (!imageUrlFromOss) return null;
-    return { type: "image_url", image_url: { url: imageUrlFromOss } };
+    void ossFile;
+    void safeName;
+    const inlineImageUrl = buildDataUrlForBuffer(
+      safeBuffer,
+      mime || "application/octet-stream",
+    );
+    if (!inlineImageUrl) return null;
+    return { type: "image_url", image_url: { url: inlineImageUrl } };
   }
 
   if (isPdfFile(ext, mime)) {
@@ -3620,12 +4230,15 @@ async function buildPackyFileInputPart(file, { ossFile = null } = {}) {
   const safeName = sanitizeText(file?.originalname, "upload.bin", 180);
 
   if (mime.startsWith("image/")) {
-    const imageUrlFromOss = await resolveAliyunDashScopeAttachmentUrl({
-      ossFile,
-      fallbackFileName: safeName,
-    });
-    if (!imageUrlFromOss) return null;
-    return { type: "image_url", image_url: { url: imageUrlFromOss } };
+    void ossFile;
+    void ext;
+    void safeName;
+    const inlineImageUrl = buildDataUrlForBuffer(
+      safeBuffer,
+      mime || "application/octet-stream",
+    );
+    if (!inlineImageUrl) return null;
+    return { type: "image_url", image_url: { url: inlineImageUrl } };
   }
 
   const audioFormat = resolveOpenRouterAudioFormat({ mime, ext });
@@ -3953,6 +4566,17 @@ async function streamAgentResponse({
     sessionId,
     contextMode,
   });
+  const shouldUseSessionNotesRuntime =
+    provider === "packycode" &&
+    protocol === "chat" &&
+    !!storageUserId &&
+    !!sanitizeId(sessionId, "");
+  let sessionNotesState = shouldUseSessionNotesRuntime
+    ? await readSessionNotes({
+        userId: storageUserId,
+        sessionId,
+      })
+    : null;
 
   let safeMessages = normalizeMessages(messages);
   let filesForLocalAttach = Array.isArray(files) ? files.filter(Boolean) : [];
@@ -4065,10 +4689,7 @@ async function streamAgentResponse({
     });
   }
   let packySessionFileContextReuse = null;
-  const shouldReusePackySessionFileContext =
-    provider === "packycode" &&
-    protocol === "chat" &&
-    attachUploadedFiles;
+  const shouldReusePackySessionFileContext = false;
 
   const narrowedMessages = isPackyTokenBudgetRuntime(provider, model)
     ? [...safeMessages]
@@ -4225,10 +4846,6 @@ async function streamAgentResponse({
       ...uploadedContextOssFiles,
     ]);
   }
-  const turnUploadedAttachmentOssFiles = normalizeUploadedFileContextOssFiles(
-    uploadedAttachmentOssFilesForMeta,
-  );
-
   let uploadedFileContextRecord = null;
   if (attachUploadedFiles && filesForLocalAttach.length > 0) {
     try {
@@ -4275,8 +4892,15 @@ async function streamAgentResponse({
         ...uploadedContextOssFiles,
         ...preparedOssFiles,
       ]);
+      uploadedAttachmentOssFilesForMeta = dedupeUploadedFileContextOssFiles([
+        ...uploadedAttachmentOssFilesForMeta,
+        ...preparedOssFiles,
+      ]);
     }
   }
+  const turnUploadedAttachmentOssFiles = normalizeUploadedFileContextOssFiles(
+    uploadedAttachmentOssFilesForMeta,
+  );
   if (shouldUsePersistentFileContext && uploadedFileContextRecord?.messageId) {
     await saveUploadedFileContext({
       userId: storageUserId,
@@ -4297,6 +4921,161 @@ async function streamAgentResponse({
   const uploadedAttachmentLinks = await buildUploadedAttachmentLinksForClient(
     turnUploadedAttachmentOssFiles,
   );
+  let sessionNotesCompressionMeta = null;
+  const pendingFileNoteEntries =
+    shouldUseSessionNotesRuntime && uploadedFileContextRecord?.content
+      ? extractSessionNoteFileEntriesFromContent(uploadedFileContextRecord.content)
+      : [];
+  if (shouldUseSessionNotesRuntime) {
+    const recentTurnMessages = pickRecentUserRounds(
+      requestMessages,
+      SESSION_NOTES_RECENT_USER_ROUNDS,
+    );
+    const olderMessages = buildMessagesBeforeRecentTurns(
+      requestMessages.filter((message) => !message?.hidden),
+      recentTurnMessages,
+    );
+    const unsummarizedOlderMessages = extractUnsummarizedMessages(
+      olderMessages,
+      sessionNotesState?.summaryUpToMessageId || "",
+    );
+    const notesPromptPreview = buildSessionNotesPrompt(sessionNotesState?.notes);
+    const notesAwareInputEstimate = estimatePackyChatInputTokens({
+      messages:
+        recentTurnMessages.length > 0 ? recentTurnMessages : requestMessages,
+      systemPrompt: [composedSystemPrompt, notesPromptPreview]
+        .filter(Boolean)
+        .join("\n\n"),
+    });
+    const requestedMaxOutputTokens = resolvePackyRequestedMaxOutputTokens(config);
+    const hasExistingCompactedHistory =
+      !!sanitizeId(sessionNotesState?.summaryUpToMessageId, "");
+    const needsContextCompaction =
+      unsummarizedOlderMessages.length > 0 &&
+      (hasExistingCompactedHistory ||
+        shouldCompactSessionNotesContext({
+          estimatedInputTokens: notesAwareInputEstimate,
+          requestedMaxOutputTokens,
+          contextWindowTokens: PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
+        }));
+    const needsNotesUpdate =
+      pendingFileNoteEntries.length > 0 || needsContextCompaction;
+
+    if (needsNotesUpdate) {
+      ensureSseHeaders(res);
+      writeEvent(res, "context_compacting", {
+        phase: "start",
+        message: needsContextCompaction
+          ? "正在压缩背景信息…"
+          : "正在整理背景笔记…",
+      });
+      const lockAcquired = await acquireSessionNotesCompressionLock({
+        userId: storageUserId,
+        sessionId,
+      });
+      if (lockAcquired) {
+        try {
+          const refreshedNotes = (await readSessionNotes({
+            userId: storageUserId,
+            sessionId,
+          })) || sessionNotesState;
+          const transcript = needsContextCompaction
+            ? buildSessionNotesTranscript(unsummarizedOlderMessages)
+            : "";
+          const nextNotes = await summarizeSessionNotesBlock({
+            provider,
+            protocol,
+            providerConfig,
+            model,
+            thinkingEffort: config?.thinkingEffort,
+            existingNotes: refreshedNotes?.notes,
+            transcript,
+            fileEntries: pendingFileNoteEntries,
+          });
+          const summaryUpToMessageId = needsContextCompaction
+            ? sanitizeId(
+                unsummarizedOlderMessages[unsummarizedOlderMessages.length - 1]?.id,
+                refreshedNotes?.summaryUpToMessageId || "",
+              )
+            : refreshedNotes?.summaryUpToMessageId || "";
+          sessionNotesState = await upsertSessionNotes({
+            userId: storageUserId,
+            sessionId,
+            notes: nextNotes,
+            recentTurns: buildSessionRecentTurnsFromMessages(recentTurnMessages),
+            summaryUpToMessageId,
+          });
+          sessionNotesCompressionMeta = needsContextCompaction
+            ? {
+                applied: true,
+                estimatedInputTokensBefore: notesAwareInputEstimate,
+                estimatedInputTokensAfter: estimatePackyChatInputTokens({
+                  messages: recentTurnMessages,
+                  systemPrompt: [
+                    composedSystemPrompt,
+                    buildSessionNotesPrompt(sessionNotesState?.notes),
+                  ]
+                    .filter(Boolean)
+                    .join("\n\n"),
+                }),
+                sourceMessageCount: unsummarizedOlderMessages.length,
+                updatedAt: new Date().toISOString(),
+                summaryUpToMessageId,
+              }
+            : null;
+        } finally {
+          await releaseSessionNotesCompressionLock({
+            userId: storageUserId,
+            sessionId,
+          });
+        }
+      } else {
+        sessionNotesState = await readSessionNotes({
+          userId: storageUserId,
+          sessionId,
+        });
+      }
+      writeEvent(res, "context_compacting", {
+        phase: "done",
+        message: "背景笔记已更新。",
+      });
+    }
+
+    const canShapeRequestWithSessionNotes =
+      !hasUnsummarizedOlderMessages(
+        olderMessages,
+        sessionNotesState?.summaryUpToMessageId || "",
+      );
+
+    const notesPrompt = buildSessionNotesPrompt(sessionNotesState?.notes);
+    const shouldInjectSessionNotes =
+      !!notesPrompt ||
+      sessionNotesState?.tokenEstimate > 0 ||
+      !!sessionNotesState?.summaryUpToMessageId;
+
+    if (shouldInjectSessionNotes) {
+      if (canShapeRequestWithSessionNotes) {
+        requestMessages =
+          recentTurnMessages.length > 0 ? recentTurnMessages : requestMessages;
+      }
+      if (notesPrompt) {
+        composedSystemPrompt = [composedSystemPrompt, notesPrompt]
+          .filter(Boolean)
+          .join("\n\n");
+      }
+      await upsertSessionNotes({
+        userId: storageUserId,
+        sessionId,
+        notes: sessionNotesState?.notes,
+        recentTurns: buildSessionRecentTurnsFromMessages(requestMessages),
+        summaryUpToMessageId: sessionNotesState?.summaryUpToMessageId || "",
+      });
+      sessionNotesState = await readSessionNotes({
+        userId: storageUserId,
+        sessionId,
+      });
+    }
+  }
   if (
     shouldUsePersistentFileContext &&
     effectiveVolcengineFileRefs.length > 0
@@ -4332,7 +5111,7 @@ async function streamAgentResponse({
 
   let packyContextCompressionMeta = null;
   let packyContextSummaryMessage = null;
-  if (isPackyTokenBudgetRuntime(provider, model)) {
+  if (isPackyTokenBudgetRuntime(provider, model) && !shouldUseSessionNotesRuntime) {
     try {
       const compressionResult = await maybeApplyPackyContextCompression({
         sessionId,
@@ -4355,6 +5134,42 @@ async function streamAgentResponse({
           error?.message || error
         }`,
       );
+    }
+  }
+  if (sessionNotesCompressionMeta) {
+    packyContextCompressionMeta = sessionNotesCompressionMeta;
+  }
+
+  let requestRuntimeConfig = config;
+  if (isPackyTokenBudgetRuntime(provider, model)) {
+    const estimatedInputTokens = estimatePackyChatInputTokens({
+      messages: requestMessages,
+      systemPrompt: composedSystemPrompt,
+    });
+    const requestedMaxOutputTokens = resolvePackyRequestedMaxOutputTokens(config);
+    const safeMaxOutputTokens = computePackySafeMaxOutputTokens({
+      estimatedInputTokens,
+      requestedMaxOutputTokens,
+      contextWindowTokens: PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
+    });
+    requestRuntimeConfig = {
+      ...config,
+      maxOutputTokens: safeMaxOutputTokens,
+    };
+    if (
+      estimatedInputTokens +
+        safeMaxOutputTokens +
+        SESSION_NOTES_CONTEXT_SAFETY_MARGIN_TOKENS >=
+      PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS &&
+      safeMaxOutputTokens <= 64
+    ) {
+      ensureSseHeaders(res);
+      writeEvent(res, "error", {
+        message:
+          "当前会话背景信息仍然过长，已无法在安全预算内继续压缩。请新建一个对话后继续。",
+      });
+      res.end();
+      return;
     }
   }
 
@@ -4407,7 +5222,7 @@ async function streamAgentResponse({
         model,
         messages: providerMessages,
         instructions: composedSystemPrompt,
-        config,
+        config: requestRuntimeConfig,
         thinkingEnabled: reasoning.enabled,
         webSearchRuntime,
         previousResponseId: smartContextRuntime.previousResponseId,
@@ -4420,7 +5235,7 @@ async function streamAgentResponse({
         model,
         messages: providerMessages,
         systemPrompt: composedSystemPrompt,
-        config,
+        config: requestRuntimeConfig,
         thinkingEnabled: reasoning.enabled,
         webSearchRuntime,
         temperature: aliyunSharedSampling?.temperature,
@@ -4431,7 +5246,7 @@ async function streamAgentResponse({
         model,
         messages: providerMessages,
         systemPrompt: composedSystemPrompt,
-        config,
+        config: requestRuntimeConfig,
         thinkingEnabled: reasoning.enabled,
         webSearchRuntime,
         temperature: aliyunSharedSampling?.temperature,
@@ -4445,7 +5260,7 @@ async function streamAgentResponse({
       model,
       messages: providerMessages,
       instructions: composedSystemPrompt,
-      config,
+      config: requestRuntimeConfig,
       thinkingEnabled,
       reasoning,
       webSearchRuntime,
@@ -4458,7 +5273,7 @@ async function streamAgentResponse({
       messages: providerMessages,
       systemPrompt: composedSystemPrompt,
       provider,
-      config,
+      config: requestRuntimeConfig,
       reasoning,
     });
   }
@@ -4486,10 +5301,7 @@ async function streamAgentResponse({
     return;
   }
 
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders?.();
+  ensureSseHeaders(res);
   const safeMetaExtras =
     metaExtras && typeof metaExtras === "object" ? metaExtras : {};
   writeEvent(res, "meta", {
@@ -4669,6 +5481,42 @@ async function streamAgentResponse({
       body: JSON.stringify(payload),
       provider,
       protocol,
+      onRetry:
+        provider === "packycode" && protocol === "chat"
+          ? ({ retryAttempt, totalRetries, delayMs }) => {
+              writeEvent(res, "upstream_reconnecting", {
+                phase: "retrying",
+                retryAttempt,
+                totalRetries,
+                delayMs,
+                delaySeconds: Math.ceil(delayMs / 1000),
+                message: `网络连接波动，正在重新连接 ${retryAttempt}/${totalRetries}…`,
+              });
+            }
+          : null,
+      onRecovered:
+        provider === "packycode" && protocol === "chat"
+          ? ({ retryAttemptsUsed, totalRetries }) => {
+              writeEvent(res, "upstream_reconnecting", {
+                phase: "recovered",
+                retryAttempt: retryAttemptsUsed,
+                totalRetries,
+                message: "连接已恢复。",
+              });
+            }
+          : null,
+      onFailed:
+        provider === "packycode" && protocol === "chat"
+          ? ({ retryAttemptsUsed, totalRetries }) => {
+              if (retryAttemptsUsed <= 0) return;
+              writeEvent(res, "upstream_reconnecting", {
+                phase: "failed",
+                retryAttempt: retryAttemptsUsed,
+                totalRetries,
+                message: "重连失败，连接已断开。",
+              });
+            }
+          : null,
     });
   } catch (error) {
     console.error(`[${provider}/${protocol}] request failed:`, error);
@@ -8202,6 +9050,14 @@ function writeEvent(res, event, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
+function ensureSseHeaders(res) {
+  if (res.headersSent) return;
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+}
+
 async function safeReadText(response) {
   try {
     return await response.text();
@@ -9858,6 +10714,86 @@ function estimatePackyChatInputTokens({ messages = [], systemPrompt = "" } = {})
   }
 }
 
+function resolvePackyRequestedMaxOutputTokens(config) {
+  return sanitizeRuntimeInteger(
+    config?.maxOutputTokens,
+    PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
+    64,
+    PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
+  );
+}
+
+function computePackySafeMaxOutputTokens({
+  estimatedInputTokens = 0,
+  requestedMaxOutputTokens = PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
+  contextWindowTokens = PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
+}) {
+  const safeInput = Math.max(0, Number(estimatedInputTokens) || 0);
+  const safeRequested = Math.max(64, Number(requestedMaxOutputTokens) || 64);
+  const safeWindow = Math.max(1024, Number(contextWindowTokens) || 1024);
+  const remaining =
+    safeWindow - safeInput - SESSION_NOTES_CONTEXT_SAFETY_MARGIN_TOKENS;
+  if (!Number.isFinite(remaining) || remaining <= 64) return 64;
+  return Math.max(64, Math.min(safeRequested, Math.floor(remaining)));
+}
+
+function shouldCompactSessionNotesContext({
+  estimatedInputTokens = 0,
+  requestedMaxOutputTokens = PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
+  contextWindowTokens = PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
+}) {
+  const safeInput = Math.max(0, Number(estimatedInputTokens) || 0);
+  const safeRequested = Math.max(64, Number(requestedMaxOutputTokens) || 64);
+  const safeWindow = Math.max(1024, Number(contextWindowTokens) || 1024);
+  return (
+    safeInput + safeRequested + SESSION_NOTES_CONTEXT_SAFETY_MARGIN_TOKENS >=
+    safeWindow
+  );
+}
+
+function hasUnsummarizedOlderMessages(messages, summaryUpToMessageId = "") {
+  const safeMessages = Array.isArray(messages) ? messages : [];
+  if (safeMessages.length === 0) return false;
+  const cutoffId = sanitizeId(summaryUpToMessageId, "");
+  if (!cutoffId) return safeMessages.some((message) => !message?.hidden);
+  let found = false;
+  for (let index = 0; index < safeMessages.length; index += 1) {
+    const messageId = sanitizeId(safeMessages[index]?.id, "");
+    if (!found) {
+      if (messageId === cutoffId) {
+        found = true;
+      }
+      continue;
+    }
+    if (!safeMessages[index]?.hidden) return true;
+  }
+  return false;
+}
+
+function extractUnsummarizedMessages(messages, summaryUpToMessageId = "") {
+  const safeMessages = Array.isArray(messages) ? messages : [];
+  if (safeMessages.length === 0) return [];
+  const cutoffId = sanitizeId(summaryUpToMessageId, "");
+  if (!cutoffId) {
+    return safeMessages.filter((message) => !message?.hidden);
+  }
+
+  let foundCutoff = false;
+  const next = [];
+  safeMessages.forEach((message) => {
+    if (message?.hidden) return;
+    const messageId = sanitizeId(message?.id, "");
+    if (!foundCutoff) {
+      if (messageId === cutoffId) {
+        foundCutoff = true;
+      }
+      return;
+    }
+    next.push(message);
+  });
+  return next;
+}
+
 function clipPackySummaryText(value, maxChars = 6000) {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -10024,6 +10960,234 @@ async function summarizePackyContextBlock({
   }
 
   return sanitizeText(text, "", 24000);
+}
+
+function mergeSessionNotesFileSummaryLists(existingList, incomingList) {
+  const map = new Map();
+  sanitizeSessionNotesFileSummaries(existingList).forEach((item) => {
+    const key = String(item.filename || item.summary || "")
+      .trim()
+      .toLowerCase();
+    if (!key) return;
+    map.set(key, item);
+  });
+  sanitizeSessionNotesFileSummaries(incomingList).forEach((item) => {
+    const key = String(item.filename || item.summary || "")
+      .trim()
+      .toLowerCase();
+    if (!key) return;
+    const previous = map.get(key);
+    if (!previous) {
+      map.set(key, item);
+      return;
+    }
+    map.set(key, {
+      filename: item.filename || previous.filename,
+      summary: item.summary || previous.summary,
+      keyPoints: sanitizeSessionNotesList([
+        ...(Array.isArray(previous.keyPoints) ? previous.keyPoints : []),
+        ...(Array.isArray(item.keyPoints) ? item.keyPoints : []),
+      ], 6),
+    });
+  });
+  return Array.from(map.values()).slice(0, SESSION_NOTES_MAX_FILE_SUMMARIES);
+}
+
+function mergeSessionNotes(baseNotes, patchNotes) {
+  const base = sanitizeSessionNotesPayload(baseNotes);
+  const patch = sanitizeSessionNotesPayload(patchNotes);
+  return {
+    goal: patch.goal || base.goal,
+    facts: sanitizeSessionNotesList([...base.facts, ...patch.facts]),
+    preferences: sanitizeSessionNotesList([
+      ...base.preferences,
+      ...patch.preferences,
+    ]),
+    completed: sanitizeSessionNotesList([...base.completed, ...patch.completed]),
+    pending: sanitizeSessionNotesList([...base.pending, ...patch.pending]),
+    openQuestions: sanitizeSessionNotesList([
+      ...base.openQuestions,
+      ...patch.openQuestions,
+    ]),
+    fileSummaries: mergeSessionNotesFileSummaryLists(
+      base.fileSummaries,
+      patch.fileSummaries,
+    ),
+    doNotRepeat: sanitizeSessionNotesList([
+      ...base.doNotRepeat,
+      ...patch.doNotRepeat,
+    ]),
+  };
+}
+
+function buildSessionNotesSummarizerSchemaHint() {
+  return JSON.stringify(
+    {
+      goal: "",
+      facts: [],
+      preferences: [],
+      completed: [],
+      pending: [],
+      openQuestions: [],
+      fileSummaries: [
+        {
+          filename: "",
+          summary: "",
+          keyPoints: [],
+        },
+      ],
+      doNotRepeat: [],
+    },
+    null,
+    2,
+  );
+}
+
+function buildLocalFallbackSessionNotesFromTranscript({
+  existingNotes,
+  transcript = "",
+  fileEntries = [],
+}) {
+  const merged = mergeSessionNotes(existingNotes, {
+    facts: transcript ? [clipPackySummaryText(transcript, 1200)] : [],
+    fileSummaries: fileEntries,
+  });
+  return sanitizeSessionNotesPayload(merged);
+}
+
+function extractSessionNoteFileEntriesFromContent(content) {
+  const normalized = normalizeMessageContent(content);
+  const entries = [];
+  if (!Array.isArray(normalized)) return entries;
+
+  normalized.forEach((part) => {
+    if (!isPackyAttachmentMemoryTextPart(part)) return;
+    const text = String(part?.text || "").trim();
+    if (!text) return;
+    const filenameMatch = /^\[附件:\s*(.+?)\]\s*$/m.exec(text);
+    const filename = sanitizeText(filenameMatch?.[1] || "", "附件", 180);
+    const previewIndex = text.indexOf("内容预览:\n");
+    const preview =
+      previewIndex >= 0
+        ? text.slice(previewIndex + "内容预览:\n".length).trim()
+        : text;
+    const sentences = preview
+      .split(/[\n。！？!?]/)
+      .map((item) => sanitizeText(item, "", 240))
+      .filter(Boolean);
+    entries.push({
+      filename,
+      summary: clipPackySummaryText(preview, 360),
+      keyPoints: sanitizeSessionNotesList(sentences, 4),
+    });
+  });
+
+  return sanitizeSessionNotesFileSummaries(entries);
+}
+
+async function summarizeSessionNotesBlock({
+  provider = "",
+  protocol = "",
+  providerConfig = null,
+  model = PACKYCODE_DEFAULT_MODEL,
+  thinkingEffort = "medium",
+  existingNotes = null,
+  transcript = "",
+  fileEntries = [],
+}) {
+  const safeExisting = sanitizeSessionNotesPayload(existingNotes);
+  const safeFileEntries = sanitizeSessionNotesFileSummaries(fileEntries);
+  const safeTranscript = sanitizeText(transcript, "", 24000);
+
+  if (
+    provider !== "packycode" ||
+    protocol !== "chat" ||
+    !providerConfig?.chatEndpoint ||
+    !providerConfig?.apiKey ||
+    (!safeTranscript && safeFileEntries.length === 0)
+  ) {
+    return buildLocalFallbackSessionNotesFromTranscript({
+      existingNotes: safeExisting,
+      transcript: safeTranscript,
+      fileEntries: safeFileEntries,
+    });
+  }
+
+  const prompt = [
+    "你负责维护一个长期可复用的 session notes。请将已有笔记与新增历史融合，输出紧凑、去重、可延续的 JSON。",
+    "要求：",
+    "1. 保留任务目标、已确认事实、用户偏好、已完成事项、待办、未决问题、失败尝试。",
+    "2. 如果有文件内容，只保留文件摘要与关键点，绝不保留大段原文、base64、整页 PDF 文本。",
+    `3. 输出必须符合以下 JSON 结构：\n${buildSessionNotesSummarizerSchemaHint()}`,
+    "4. 控制总信息量，避免冗余；如有重复内容，合并成更短、更准确的表述。",
+    `现有 notes：\n${JSON.stringify(safeExisting, null, 2)}`,
+    safeFileEntries.length > 0
+      ? `新增文件摘要候选：\n${JSON.stringify(safeFileEntries, null, 2)}`
+      : "新增文件摘要候选：无",
+    safeTranscript ? `新增对话历史：\n${safeTranscript}` : "新增对话历史：无",
+  ].join("\n\n");
+
+  const payload = {
+    model,
+    stream: false,
+    response_format: { type: "json_object" },
+    max_tokens: 4096,
+    messages: [
+      {
+        role: "system",
+        content:
+          "你是会话记忆整理器。只输出一个 JSON 对象，不要输出解释文本，不要使用 Markdown。",
+      },
+      {
+        role: "user",
+        content: prompt,
+      },
+    ],
+    reasoning: {
+      effort: sanitizeReasoningEffort(thinkingEffort, "medium"),
+    },
+  };
+
+  try {
+    const response = await fetch(providerConfig.chatEndpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${providerConfig.apiKey}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const detail = await safeReadText(response);
+    if (!response.ok) {
+      throw new Error(
+        formatProviderUpstreamError("packycode", "chat", response.status, detail),
+      );
+    }
+    const json = JSON.parse(detail || "{}");
+    const text = extractChatCompletionOutputText(json);
+    if (!text.trim()) {
+      return buildLocalFallbackSessionNotesFromTranscript({
+        existingNotes: safeExisting,
+        transcript: safeTranscript,
+        fileEntries: safeFileEntries,
+      });
+    }
+    const parsed = JSON.parse(text);
+    return mergeSessionNotes(
+      safeExisting,
+      sanitizeSessionNotesPayload(parsed),
+    );
+  } catch (error) {
+    console.warn(
+      `[session-notes] summarize failed: ${error?.message || error}`,
+    );
+    return buildLocalFallbackSessionNotesFromTranscript({
+      existingNotes: safeExisting,
+      transcript: safeTranscript,
+      fileEntries: safeFileEntries,
+    });
+  }
 }
 
 function buildPackyCompressedRequestMessages(messages, summaryMessage) {
@@ -10506,29 +11670,111 @@ function formatProviderRequestFailure(provider, protocol, endpoint, error) {
   return `${safeProvider}/${safeProtocol} request failed: ${baseMessage}${detailText}`;
 }
 
+function resolveProviderRequestRetryPolicy(provider, protocol) {
+  const safeProvider = normalizeProvider(provider);
+  const safeProtocol = sanitizeRuntimeProtocol(protocol);
+
+  if (safeProvider === "packycode" && safeProtocol === "chat") {
+    return {
+      maxAttempts: 1 + PACKYCODE_REQUEST_RECONNECT_RETRIES,
+      totalRetries: PACKYCODE_REQUEST_RECONNECT_RETRIES,
+      getDelayMs: () => PACKYCODE_REQUEST_RECONNECT_DELAY_MS,
+    };
+  }
+
+  if (safeProvider === "aliyun" && safeProtocol === "dashscope") {
+    return {
+      maxAttempts: 2,
+      totalRetries: 1,
+      getDelayMs: (retryAttempt = 1) => 250 * Math.max(1, retryAttempt),
+    };
+  }
+
+  return {
+    maxAttempts: 1,
+    totalRetries: 0,
+    getDelayMs: () => 0,
+  };
+}
+
 async function sendProviderRequestWithRetry({
   endpoint,
   headers,
   body,
   provider,
   protocol,
+  onRetry = null,
+  onRecovered = null,
+  onFailed = null,
 }) {
-  const maxAttempts = provider === "aliyun" && protocol === "dashscope" ? 2 : 1;
+  const retryPolicy = resolveProviderRequestRetryPolicy(provider, protocol);
+  const maxAttempts = sanitizeRuntimeInteger(
+    retryPolicy?.maxAttempts,
+    1,
+    1,
+    12,
+  );
+  const totalRetries = sanitizeRuntimeInteger(
+    retryPolicy?.totalRetries,
+    Math.max(0, maxAttempts - 1),
+    0,
+    10,
+  );
   let lastError = null;
+  let retryAttemptsUsed = 0;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      return await fetch(endpoint, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers,
         body,
       });
+      if (retryAttemptsUsed > 0) {
+        await onRecovered?.({
+          retryAttemptsUsed,
+          totalRetries,
+          provider,
+          protocol,
+          endpoint,
+        });
+      }
+      return response;
     } catch (error) {
       lastError = error;
       if (attempt >= maxAttempts || !isRetryableRequestFailure(error)) {
+        await onFailed?.({
+          retryAttemptsUsed,
+          totalRetries,
+          provider,
+          protocol,
+          endpoint,
+          error,
+        });
         throw error;
       }
-      await sleepMs(250 * attempt);
+      retryAttemptsUsed += 1;
+      const delayMs = Math.max(
+        0,
+        sanitizeRuntimeInteger(
+          retryPolicy?.getDelayMs?.(retryAttemptsUsed),
+          0,
+          0,
+          60 * 1000,
+        ),
+      );
+      await onRetry?.({
+        retryAttempt: retryAttemptsUsed,
+        totalRetries,
+        delayMs,
+        provider,
+        protocol,
+        endpoint,
+        error,
+      });
+      if (delayMs > 0) {
+        await sleepMs(delayMs);
+      }
     }
   }
 
@@ -11253,6 +12499,137 @@ function sanitizeSessionMessages(input, sessions) {
   return normalized;
 }
 
+function isLegacyChatSessionId(value) {
+  return /^s\d+$/.test(String(value || "").trim());
+}
+
+function createChatSessionId(nowMs = Date.now()) {
+  const safeNowMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  return `s${safeNowMs}-${crypto.randomBytes(3).toString("hex")}`;
+}
+
+function remapSessionIdKeyedObject(source, idMap) {
+  const safeSource = source && typeof source === "object" ? source : {};
+  const next = {};
+
+  Object.entries(safeSource).forEach(([rawKey, value]) => {
+    const safeKey = sanitizeId(rawKey, "");
+    if (!safeKey) return;
+    next[idMap[safeKey] || safeKey] = value;
+  });
+
+  return next;
+}
+
+function remapSmartContextEnabledMapKeys(source, idMap) {
+  const safeSource = source && typeof source === "object" ? source : {};
+  const next = {};
+
+  Object.entries(safeSource).forEach(([rawKey, rawValue]) => {
+    const parts = String(rawKey || "").split("::");
+    const safeSessionId = sanitizeId(parts[0], "");
+    const safeAgentId = sanitizeSmartContextMapAgentId(parts[1]);
+    if (!safeSessionId || !safeAgentId) return;
+    const nextSessionId = idMap[safeSessionId] || safeSessionId;
+    next[buildSmartContextEnabledMapKey(nextSessionId, safeAgentId)] = !!rawValue;
+  });
+
+  return next;
+}
+
+function migrateLegacyChatStateSessionIds(rawState, { nowMs = Date.now() } = {}) {
+  const scoped = readChatStateShape(rawState);
+  if (!scoped) {
+    return {
+      changed: false,
+      state: null,
+      sessionIdMap: {},
+    };
+  }
+
+  const sanitizedState = sanitizeChatStatePayload({
+    activeId: scoped.activeId,
+    groups: scoped.groups,
+    sessions: scoped.sessions,
+    sessionMessages: scoped.sessionMessages,
+    settings: scoped.settings,
+  });
+  const currentRefs =
+    scoped.sessionContextRefs && typeof scoped.sessionContextRefs === "object"
+      ? scoped.sessionContextRefs
+      : {};
+  const usedIds = new Set(
+    sanitizedState.sessions
+      .map((session) => sanitizeId(session?.id, ""))
+      .filter(Boolean),
+  );
+  const sessionIdMap = {};
+
+  sanitizedState.sessions.forEach((session, index) => {
+    const safeId = sanitizeId(session?.id, "");
+    if (!isLegacyChatSessionId(safeId)) return;
+    usedIds.delete(safeId);
+    let nextId = "";
+    let attempt = 0;
+    while (!nextId || usedIds.has(nextId)) {
+      nextId = createChatSessionId(Number(nowMs) + index + attempt);
+      attempt += 1;
+    }
+    usedIds.add(nextId);
+    sessionIdMap[safeId] = nextId;
+  });
+
+  if (Object.keys(sessionIdMap).length === 0) {
+    return {
+      changed: false,
+      state: {
+        ...sanitizedState,
+        sessionContextRefs: currentRefs,
+      },
+      sessionIdMap,
+    };
+  }
+
+  const sessions = sanitizedState.sessions.map((session) => {
+    const safeId = sanitizeId(session?.id, "");
+    return {
+      ...session,
+      id: sessionIdMap[safeId] || safeId,
+    };
+  });
+  const sessionMessages = remapSessionIdKeyedObject(
+    sanitizedState.sessionMessages,
+    sessionIdMap,
+  );
+  const sessionContextRefs = remapSessionIdKeyedObject(currentRefs, sessionIdMap);
+  const settings = {
+    ...sanitizedState.settings,
+    agentBySession: remapSessionIdKeyedObject(
+      sanitizedState.settings?.agentBySession,
+      sessionIdMap,
+    ),
+    smartContextEnabledBySessionAgent: remapSmartContextEnabledMapKeys(
+      sanitizedState.settings?.smartContextEnabledBySessionAgent,
+      sessionIdMap,
+    ),
+  };
+
+  return {
+    changed: true,
+    sessionIdMap,
+    state: {
+      activeId:
+        sessionIdMap[sanitizeId(sanitizedState.activeId, "")] ||
+        sanitizedState.activeId,
+      groups: sanitizedState.groups,
+      sessions,
+      sessionMessages,
+      sessionContextRefs,
+      settings,
+    },
+  };
+}
+
 function scoreSanitizedChatMessage(message) {
   if (!message || typeof message !== "object") return 0;
   const contentLength = String(message.content || "").trim().length;
@@ -11269,6 +12646,57 @@ function scoreSanitizedChatMessageList(list) {
     (total, message) => total + scoreSanitizedChatMessage(message),
     0,
   );
+}
+
+function mergeSanitizedChatMessageAttachments(existingAttachments, incomingAttachments) {
+  const safeExisting = Array.isArray(existingAttachments) ? existingAttachments : [];
+  const safeIncoming = Array.isArray(incomingAttachments) ? incomingAttachments : [];
+  if (safeIncoming.length === 0) return safeExisting;
+  if (safeExisting.length === 0) return safeIncoming;
+
+  return safeIncoming.map((attachment, index) => {
+    const existing = safeExisting[index];
+    if (!existing || typeof existing !== "object") return attachment;
+    return {
+      ...existing,
+      ...attachment,
+      url: String(attachment?.url || existing?.url || "").trim() || undefined,
+      thumbnailUrl:
+        String(
+          attachment?.thumbnailUrl || existing?.thumbnailUrl || "",
+        ).trim() || undefined,
+      ossKey:
+        String(attachment?.ossKey || existing?.ossKey || "").trim() || undefined,
+    };
+  });
+}
+
+function mergeSanitizedChatMessages(existingMessage, incomingMessage) {
+  if (!existingMessage || typeof existingMessage !== "object") {
+    return incomingMessage;
+  }
+  if (!incomingMessage || typeof incomingMessage !== "object") {
+    return existingMessage;
+  }
+
+  return {
+    ...existingMessage,
+    ...incomingMessage,
+    attachments: mergeSanitizedChatMessageAttachments(
+      existingMessage.attachments,
+      incomingMessage.attachments,
+    ),
+    runtime:
+      incomingMessage.runtime && typeof incomingMessage.runtime === "object"
+        ? {
+            ...(existingMessage.runtime &&
+            typeof existingMessage.runtime === "object"
+              ? existingMessage.runtime
+              : {}),
+            ...incomingMessage.runtime,
+          }
+        : existingMessage.runtime,
+  };
 }
 
 function mergeSanitizedChatMessageLists(primaryList, secondaryList, limit = 400) {
@@ -11299,12 +12727,10 @@ function mergeSanitizedChatMessageLists(primaryList, secondaryList, limit = 400)
       next.push(message);
       return;
     }
-    if (
-      scoreSanitizedChatMessage(message) >
-      scoreSanitizedChatMessage(next[existingIndex])
-    ) {
-      next[existingIndex] = message;
-    }
+    next[existingIndex] = mergeSanitizedChatMessages(
+      next[existingIndex],
+      message,
+    );
   });
 
   return next;
@@ -14486,6 +15912,12 @@ async function startServer() {
 }
 
 async function runStartupMaintenanceTasks() {
+  await ensureSessionNotesIndexes().catch((error) => {
+    console.warn(
+      "Failed to ensure session notes indexes:",
+      error?.message || error,
+    );
+  });
   await ensureUploadedFileContextIndexes().catch((error) => {
     console.warn(
       "Failed to ensure uploaded file context indexes:",
@@ -14547,6 +15979,36 @@ async function ensureUploadedFileContextIndexes() {
   }
 
   await ensureUploadedFileContextTtlIndex(collection, existingIndexes);
+}
+
+async function ensureSessionNotesIndexes() {
+  const collection = SessionNotes.collection;
+  let existingIndexes = await readCollectionIndexesSafe(collection);
+
+  const needUniqueIndex = !hasEquivalentMongoIndex(existingIndexes, {
+    key: { userId: 1, sessionId: 1 },
+    unique: true,
+  });
+  if (needUniqueIndex) {
+    await collection.createIndex(
+      { userId: 1, sessionId: 1 },
+      {
+        unique: true,
+        name: "ux_session_notes_user_session",
+      },
+    );
+    existingIndexes = await readCollectionIndexesSafe(collection);
+  }
+
+  const needLockIndex = !hasEquivalentMongoIndex(existingIndexes, {
+    key: { compressionLockUntil: 1 },
+  });
+  if (needLockIndex) {
+    await collection.createIndex(
+      { compressionLockUntil: 1 },
+      { name: "ix_session_notes_compression_lock_until" },
+    );
+  }
 }
 
 async function ensureGeneratedImageHistoryIndexes() {
@@ -15873,6 +17335,7 @@ export {
   mapVolcengineImageGenerationEventError,
   buildImageGenerationHeaders,
   getVolcengineImageGenerationConfig,
+  SESSION_NOTES_MAX_ESTIMATED_TOKENS,
   buildChatRequestPayload,
   buildOpenRouterPlugins,
   buildResponsesRequestPayload,
@@ -15900,6 +17363,18 @@ export {
   extractSmartContextIncrementalMessages,
   isPromptLeakProbeRequest,
   extractMessagePlainText,
+  sanitizeSessionNotesPayload,
+  fitSessionNotesToTokenBudget,
+  estimateSessionNotesTokens,
+  buildSessionNotesPrompt,
+  buildSessionRecentTurnsFromMessages,
+  buildMessagesBeforeRecentTurns,
+  hasUnsummarizedOlderMessages,
+  extractUnsummarizedMessages,
+  extractSessionNoteFileEntriesFromContent,
+  resolvePackyRequestedMaxOutputTokens,
+  computePackySafeMaxOutputTokens,
+  shouldCompactSessionNotesContext,
   resolveSmartContextRuntime,
   readSessionContextRef,
   saveSessionContextRef,
@@ -16045,8 +17520,12 @@ export {
   readTeacherScopedSessionContextRefs,
   sanitizeChatStatePayload,
   sanitizeChatStateMetaPayload,
+  mergeSanitizedChatMessageLists,
   mergeChatStateSessionMessagesPreservingCompleteness,
   sanitizeSessionMessageUpsertsPayload,
+  isLegacyChatSessionId,
+  createChatSessionId,
+  migrateLegacyChatStateSessionIds,
   sanitizeSmartContextMapAgentId,
   buildSmartContextEnabledMapKey,
   sanitizeSmartContextEnabledBySessionAgent,
@@ -16194,6 +17673,7 @@ export {
   broadcastGroupChatMemberJoined,
   startServer,
   runStartupMaintenanceTasks,
+  ensureSessionNotesIndexes,
   ensureUploadedFileContextIndexes,
   ensureGeneratedImageHistoryIndexes,
   ensureGroupChatStoredFileIndexes,

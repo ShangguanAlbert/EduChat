@@ -14,8 +14,8 @@ const AGENT_C_FIXED_MODEL = "doubao-seed-2-0-pro-260215";
 const AGENT_C_FIXED_PROTOCOL = "responses";
 const AGENT_C_FIXED_MAX_OUTPUT_TOKENS = 131072;
 const AGENT_C_FIXED_THINKING_EFFORT = "medium";
-const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 512000;
-const RUNTIME_MAX_INPUT_TOKENS = 512000;
+const RUNTIME_MAX_CONTEXT_WINDOW_TOKENS = 1000000;
+const RUNTIME_MAX_INPUT_TOKENS = 1000000;
 const RUNTIME_MAX_OUTPUT_TOKENS = 1048576;
 const RUNTIME_MAX_REASONING_TOKENS = 128000;
 const ALIYUN_SEARCH_STRATEGY_OPTIONS = new Set([
@@ -50,8 +50,8 @@ const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
   {
     id: "gpt-5.4",
     aliases: ["gpt-5.4"],
-    contextWindowTokens: 256000,
-    maxInputTokens: 256000,
+    contextWindowTokens: 1000000,
+    maxInputTokens: 1000000,
     maxOutputTokens: 256000,
     maxReasoningTokens: RUNTIME_MAX_REASONING_TOKENS,
   },
@@ -395,8 +395,8 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
 export const PACKYCODE_PROVIDER = "packycode";
 export const PACKYCODE_DEFAULT_MODEL = "gpt-5.4";
 export const PACKYCODE_DEFAULT_THINKING_EFFORT = "medium";
-export const PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS = 256000;
-export const PACKYCODE_GPT54_MAX_INPUT_TOKENS = 256000;
+export const PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS = 1000000;
+export const PACKYCODE_GPT54_MAX_INPUT_TOKENS = 1000000;
 export const PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS = 256000;
 const AGENT_C_ALWAYS_ON_WEB_SEARCH_MODEL_ALIASES = new Set([
   "doubao-seed-2-0-pro-260215",
@@ -417,9 +417,9 @@ const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
     provider: AGENT_A_FIXED_PROVIDER,
     model: AGENT_A_FIXED_MODEL,
     protocol: AGENT_A_FIXED_PROTOCOL,
-    contextWindowTokens: 256000,
-    maxInputTokens: 256000,
-    maxOutputTokens: 256000,
+    contextWindowTokens: PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
+    maxInputTokens: PACKYCODE_GPT54_MAX_INPUT_TOKENS,
+    maxOutputTokens: PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
     maxReasoningTokens: RUNTIME_MAX_REASONING_TOKENS,
     thinkingEffort: AGENT_A_FIXED_THINKING_EFFORT,
     enableWebSearch: false,

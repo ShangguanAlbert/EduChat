@@ -305,7 +305,6 @@ export default function LoginPage() {
           <div className="login-logo">元</div>
           <div>
             <div className="login-title">元协坊</div>
-            <div className="login-subtitle">以更柔和的节奏进入课堂与协作</div>
           </div>
         </div>
 

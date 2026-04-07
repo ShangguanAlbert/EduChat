@@ -1,10 +1,12 @@
 import {
   Copy,
+  Download,
   Forward,
   RotateCcw,
   Sparkles,
   ThumbsDown,
   ThumbsUp,
+  X,
 } from "lucide-react";
 import {
   Children,
@@ -20,6 +22,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -96,21 +99,88 @@ function withTypography(TagName) {
   };
 }
 
-const MARKDOWN_COMPONENTS = {
-  a: ({ node, ...props }) => {
-    void node;
-    return <a {...props} target="_blank" rel="noopener noreferrer" />;
-  },
-  p: withTypography("p"),
-  h1: withTypography("h1"),
-  h2: withTypography("h2"),
-  h3: withTypography("h3"),
-  h4: withTypography("h4"),
-  li: withTypography("li"),
-  blockquote: withTypography("blockquote"),
-  td: withTypography("td"),
-  th: withTypography("th"),
-};
+function createMarkdownComponents(onImagePreview) {
+  return {
+    a: ({ node, ...props }) => {
+      void node;
+      return <a {...props} target="_blank" rel="noopener noreferrer" />;
+    },
+    img: ({
+      node,
+      src,
+      alt,
+      title,
+      className,
+      loading,
+      decoding,
+      ...props
+    }) => {
+      void node;
+      const imageSrc = String(src || "").trim();
+      const imageAlt = String(alt || title || "图片").trim();
+      const imageName = imageAlt || getImageNameFromUrl(imageSrc) || "图片";
+      const imageClassName = ["markdown-image-preview-img", className]
+        .filter(Boolean)
+        .join(" ");
+
+      if (!imageSrc || typeof onImagePreview !== "function") {
+        return (
+          <img
+            {...props}
+            src={src}
+            alt={alt || ""}
+            title={title}
+            className={className}
+            loading={loading || "lazy"}
+            decoding={decoding || "async"}
+          />
+        );
+      }
+
+      return (
+        <button
+          type="button"
+          className="markdown-image-preview-btn"
+          aria-label={`预览图片：${imageName}`}
+          title="点击预览图片"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onImagePreview({
+              src: imageSrc,
+              alt: imageAlt || "图片",
+              name: imageName,
+              attachment: null,
+              attachmentIndex: -1,
+              canResolveDownload: true,
+            });
+          }}
+        >
+          <img
+            {...props}
+            src={imageSrc}
+            alt={imageAlt || "图片"}
+            title={title}
+            className={imageClassName}
+            loading={loading || "lazy"}
+            decoding={decoding || "async"}
+          />
+        </button>
+      );
+    },
+    p: withTypography("p"),
+    h1: withTypography("h1"),
+    h2: withTypography("h2"),
+    h3: withTypography("h3"),
+    h4: withTypography("h4"),
+    li: withTypography("li"),
+    blockquote: withTypography("blockquote"),
+    td: withTypography("td"),
+    th: withTypography("th"),
+  };
+}
+
+const MARKDOWN_COMPONENTS = createMarkdownComponents();
 
 function normalizeRenderedMarkdown(value) {
   const text = String(value || "");
@@ -149,8 +219,10 @@ const MessageList = forwardRef(function MessageList({
   activeSessionId = "",
   messages,
   isStreaming = false,
+  streamingStatusText = "正在回答中...",
   focusMessageId = "",
   bottomInset = 0,
+  onDownloadAttachment,
   onAssistantFeedback,
   onAssistantRegenerate,
   onAssistantForward,
@@ -373,7 +445,9 @@ const MessageList = forwardRef(function MessageList({
       return (
         <MessageItem
           m={m}
+          onDownloadAttachment={onDownloadAttachment}
           isStreaming={isStreaming}
+          streamingStatusText={streamingStatusText}
           onAssistantFeedback={onAssistantFeedback}
           onAssistantRegenerate={onAssistantRegenerate}
           onAssistantForward={onAssistantForward}
@@ -386,6 +460,8 @@ const MessageList = forwardRef(function MessageList({
     },
     [
       isStreaming,
+      streamingStatusText,
+      onDownloadAttachment,
       onAssistantFeedback,
       onAssistantRegenerate,
       onAssistantForward,
@@ -721,6 +797,7 @@ export default MessageList;
 const ReasoningDisclosure = memo(function ReasoningDisclosure({
   reasoningMarkdown,
   onReasoningToggle,
+  markdownComponents = MARKDOWN_COMPONENTS,
 }) {
   const [open, setOpen] = useState(false);
   const [contentHeight, setContentHeight] = useState(0);
@@ -773,7 +850,7 @@ const ReasoningDisclosure = memo(function ReasoningDisclosure({
           <ReactMarkdown
             remarkPlugins={MARKDOWN_REMARK_PLUGINS}
             rehypePlugins={[rehypeRaw]}
-            components={MARKDOWN_COMPONENTS}
+            components={markdownComponents}
           >
             {reasoningMarkdown}
           </ReactMarkdown>
@@ -785,7 +862,9 @@ const ReasoningDisclosure = memo(function ReasoningDisclosure({
 
 const MessageItem = memo(function MessageItem({
   m,
+  onDownloadAttachment,
   isStreaming,
+  streamingStatusText = "正在回答中...",
   onAssistantFeedback,
   onAssistantRegenerate,
   onAssistantForward,
@@ -795,6 +874,8 @@ const MessageItem = memo(function MessageItem({
   disableAssistantCopy,
 }) {
   const [copyStatus, setCopyStatus] = useState("idle");
+  const [previewImage, setPreviewImage] = useState(null);
+  const [previewDownloadPending, setPreviewDownloadPending] = useState(false);
   const reasoningMarkdown = normalizeRenderedMarkdown(m.reasoning);
   const contentMarkdown = normalizeRenderedMarkdown(m.content);
   const runtime = normalizeRuntimeSnapshot(m.runtime);
@@ -805,6 +886,28 @@ const MessageItem = memo(function MessageItem({
     runtime?.usage &&
     Number.isFinite(runtime.usage.total_tokens);
   const showMessageFooter = showAssistantActionRow || showRuntimeDebug;
+  const openImagePreview = useCallback((image) => {
+    const imageSrc = String(image?.src || "").trim();
+    if (!imageSrc) return;
+    setPreviewImage({
+      src: imageSrc,
+      alt: String(image?.alt || image?.name || "图片").trim() || "图片",
+      name:
+        String(image?.name || image?.alt || "").trim() ||
+        getImageNameFromUrl(imageSrc) ||
+        "图片",
+      attachment: image?.attachment || null,
+      attachmentIndex: Number.isInteger(image?.attachmentIndex)
+        ? image.attachmentIndex
+        : -1,
+      canResolveDownload: Boolean(image?.canResolveDownload || imageSrc),
+      isLoadingOriginal: Boolean(image?.isLoadingOriginal),
+    });
+  }, []);
+  const markdownComponents = useMemo(
+    () => createMarkdownComponents(openImagePreview),
+    [openImagePreview],
+  );
 
   useEffect(() => {
     if (copyStatus === "idle") return undefined;
@@ -813,6 +916,23 @@ const MessageItem = memo(function MessageItem({
     }, 1500);
     return () => window.clearTimeout(timer);
   }, [copyStatus]);
+
+  useEffect(() => {
+    if (!previewImage) return undefined;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setPreviewImage(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [previewImage]);
 
   async function copyContent() {
     const text = m.content?.trim() || "";
@@ -850,21 +970,22 @@ const MessageItem = memo(function MessageItem({
     }
   }
 
-  async function downloadAttachment(url, filename) {
-    if (!url) return;
+  async function downloadResolvedUrl(resolvedUrl, resolvedFilename) {
+    if (!resolvedUrl) return;
 
     const triggerDownload = (href, suggestedName = "") => {
       const link = document.createElement("a");
       link.href = href;
       if (suggestedName) link.download = suggestedName;
       link.rel = "noopener noreferrer";
+      link.target = "_blank";
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
     };
 
     try {
-      const response = await fetch(url, {
+      const response = await fetch(resolvedUrl, {
         credentials: "include",
       });
       if (!response.ok) {
@@ -872,22 +993,124 @@ const MessageItem = memo(function MessageItem({
       }
       const blob = await response.blob();
       const objectUrl = URL.createObjectURL(blob);
-      triggerDownload(objectUrl, String(filename || "").trim());
+      triggerDownload(objectUrl, resolvedFilename);
       window.setTimeout(() => {
         URL.revokeObjectURL(objectUrl);
       }, 1000);
     } catch {
-      triggerDownload(url, String(filename || "").trim());
+      triggerDownload(resolvedUrl, resolvedFilename);
     }
   }
 
+  async function resolveAttachmentTarget(attachment, attachmentIndex) {
+    const fallbackUrl = readAttachmentUrl(attachment);
+    const fallbackFilename = String(attachment?.name || "").trim();
+    let resolvedUrl = fallbackUrl;
+    let resolvedFilename = fallbackFilename;
+
+    if (typeof onDownloadAttachment === "function") {
+      try {
+        const result = await onDownloadAttachment(m, attachment, attachmentIndex);
+        const nextUrl = String(result?.downloadUrl || result?.url || "").trim();
+        const nextFilename = String(
+          result?.fileName || result?.filename || fallbackFilename,
+        ).trim();
+        if (nextUrl) {
+          resolvedUrl = nextUrl;
+        }
+        if (nextFilename) {
+          resolvedFilename = nextFilename;
+        }
+      } catch (error) {
+        void error;
+      }
+    }
+
+    if (!resolvedUrl) return null;
+    return {
+      url: resolvedUrl,
+      filename: resolvedFilename,
+    };
+  }
+
+  async function downloadAttachment(attachment, attachmentIndex) {
+    const target = await resolveAttachmentTarget(attachment, attachmentIndex);
+    if (!target?.url) return;
+    await downloadResolvedUrl(target.url, target.filename);
+  }
+
+  async function handlePreviewDownload() {
+    if (!previewImage || previewDownloadPending) return;
+    setPreviewDownloadPending(true);
+    try {
+      if (previewImage.attachment) {
+        await downloadAttachment(previewImage.attachment, previewImage.attachmentIndex);
+      } else {
+        await downloadResolvedUrl(previewImage.src, previewImage.name);
+      }
+    } finally {
+      setPreviewDownloadPending(false);
+    }
+  }
+
+  async function handleAttachmentImagePreview(
+    event,
+    attachment,
+    attachmentIndex,
+    fallbackSrc,
+    canResolveDownload,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const fallbackUrl = String(fallbackSrc || "").trim();
+    const directUrl = readAttachmentUrl(attachment);
+    const previewName = String(attachment?.name || "图片附件").trim() || "图片附件";
+    const shouldResolveOriginal =
+      typeof onDownloadAttachment === "function" && canResolveDownload;
+    openImagePreview({
+      src: directUrl || fallbackUrl,
+      alt: previewName,
+      name: previewName,
+      attachment,
+      attachmentIndex,
+      canResolveDownload,
+      isLoadingOriginal: shouldResolveOriginal,
+    });
+
+    if (!shouldResolveOriginal) return;
+
+    const target = await resolveAttachmentTarget(attachment, attachmentIndex);
+    setPreviewImage((current) => {
+      if (
+        !current ||
+        current.attachment !== attachment ||
+        current.attachmentIndex !== attachmentIndex
+      ) {
+        return current;
+      }
+      if (!target?.url) {
+        return { ...current, isLoadingOriginal: false };
+      }
+      return {
+        ...current,
+        src: target.url,
+        name: target.filename || current.name,
+        isLoadingOriginal: false,
+        canResolveDownload: true,
+      };
+    });
+  }
+
   return (
-    <div className={`msg ${m.role}`}>
-      <div className={`msg-bubble ${m.role}`}>
+    <>
+      <div className={`msg ${m.role}`}>
+        <div className={`msg-bubble ${m.role}`}>
         {reasoningMarkdown.trim() && (
           <ReasoningDisclosure
             reasoningMarkdown={reasoningMarkdown}
             onReasoningToggle={onReasoningToggle}
+            markdownComponents={markdownComponents}
           />
         )}
 
@@ -895,45 +1118,62 @@ const MessageItem = memo(function MessageItem({
           <div className="msg-attachments">
             {m.attachments.map((a, idx) => {
               const attachmentUrl = readAttachmentUrl(a);
+              const canResolveDownload =
+                !!attachmentUrl ||
+                !!String(a?.ossKey || "").trim() ||
+                typeof onDownloadAttachment === "function";
               const imageAttachment = isImageAttachment(a);
               const attachmentKey = `${a?.name || "file"}-${idx}`;
               const attachmentThumbnailUrl = readAttachmentThumbnailUrl(a);
               const imageSrc = attachmentThumbnailUrl || attachmentUrl;
+              const attachmentKind = getAttachmentKind(a);
+              const attachmentTypeLabel = getAttachmentTypeLabel(attachmentKind);
+              const attachmentSizeLabel =
+                typeof a?.size === "number" ? formatBytes(a.size) : "";
+              const attachmentMetaLabel = [attachmentTypeLabel, attachmentSizeLabel]
+                .filter(Boolean)
+                .join(" · ");
+              const cardClassName = [
+                "file-card",
+                `file-card-${attachmentKind}`,
+                imageAttachment ? "file-card-image" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
               if (imageAttachment && imageSrc) {
                 return (
-                  <div className="file-card file-card-image" key={attachmentKey}>
-                    {attachmentUrl ? (
-                      <a
-                        href={attachmentUrl}
-                        className="file-image-btn"
-                        aria-label="下载图片附件"
-                        title="点击下载图片"
-                        download={a?.name || true}
-                        onClick={(event) => {
-                          event.preventDefault();
-                          downloadAttachment(attachmentUrl, a?.name);
-                        }}
-                      >
-                        <img
-                          src={imageSrc}
-                          alt={a?.name || "图片附件"}
-                          className="file-image-thumb"
-                          loading="eager"
-                          decoding="async"
-                        />
-                      </a>
-                    ) : (
-                      <div className="file-image-btn" aria-hidden="true">
-                        <img
-                          src={imageSrc}
-                          alt={a?.name || "图片附件"}
-                          className="file-image-thumb"
-                          loading="eager"
-                          decoding="async"
-                        />
+                  <button
+                    type="button"
+                    key={attachmentKey}
+                    className={`${cardClassName} file-card-button file-image-btn file-image-preview-btn`}
+                    aria-label="预览图片附件"
+                    title="点击预览图片"
+                    onClick={(event) => {
+                      void handleAttachmentImagePreview(
+                        event,
+                        a,
+                        idx,
+                        imageSrc,
+                        canResolveDownload,
+                      );
+                    }}
+                  >
+                    <div className="file-thumb-shell">
+                      <img
+                        src={imageSrc}
+                        alt={a?.name || "图片附件"}
+                        className="file-image-thumb"
+                        loading="eager"
+                        decoding="async"
+                      />
+                    </div>
+                    <div className="file-meta">
+                      <div className="file-name" title={a?.name}>
+                        {a?.name}
                       </div>
-                    )}
-                  </div>
+                      <div className="file-sub">{attachmentMetaLabel || "图片"}</div>
+                    </div>
+                  </button>
                 );
               }
 
@@ -941,22 +1181,27 @@ const MessageItem = memo(function MessageItem({
                 <a
                   key={attachmentKey}
                   href={attachmentUrl || undefined}
-                  className={`file-card ${attachmentUrl ? "file-card-link" : "file-card-static"}`}
-                  aria-disabled={!attachmentUrl}
+                  className={`${cardClassName} ${canResolveDownload ? "file-card-link" : "file-card-static"}`}
+                  aria-disabled={!canResolveDownload}
                   onClick={(event) => {
                     event.preventDefault();
-                    if (!attachmentUrl) return;
-                    downloadAttachment(attachmentUrl, a?.name);
+                    if (!canResolveDownload) return;
+                    void downloadAttachment(a, idx);
                   }}
                 >
-                  <div className="file-icon">📄</div>
+                  <div className="file-thumb-shell">
+                    <div className="file-icon" aria-hidden="true">
+                      <span className="file-icon-sheet" />
+                      <span className="file-icon-label">
+                        {getAttachmentBadgeLabel(a, attachmentKind)}
+                      </span>
+                    </div>
+                  </div>
                   <div className="file-meta">
                     <div className="file-name" title={a?.name}>
                       {a?.name}
                     </div>
-                    <div className="file-sub">
-                      {typeof a?.size === "number" ? formatBytes(a.size) : "文件"}
-                    </div>
+                    <div className="file-sub">{attachmentMetaLabel || "文件"}</div>
                   </div>
                 </a>
               );
@@ -969,13 +1214,15 @@ const MessageItem = memo(function MessageItem({
             <ReactMarkdown
               remarkPlugins={MARKDOWN_REMARK_PLUGINS}
               rehypePlugins={[rehypeRaw]}
-              components={MARKDOWN_COMPONENTS}
+              components={markdownComponents}
             >
               {contentMarkdown}
             </ReactMarkdown>
           </div>
         ) : m.streaming ? (
-          <div className="streaming-placeholder">正在回答中...</div>
+          <div className="streaming-placeholder">
+            {String(streamingStatusText || "正在回答中...").trim() || "正在回答中..."}
+          </div>
         ) : null}
 
         {showMessageFooter && (
@@ -1059,7 +1306,64 @@ const MessageItem = memo(function MessageItem({
           </div>
         )}
       </div>
-    </div>
+      </div>
+      {previewImage && typeof document !== "undefined" ? createPortal(
+        <div
+          className="chat-image-preview-overlay"
+          role="presentation"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div
+            className="chat-image-preview-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={previewImage.name || "图片预览"}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="chat-image-preview-stage">
+              <div className="chat-image-preview-media">
+                <img
+                  src={previewImage.src}
+                  alt={previewImage.alt}
+                  className="chat-image-preview-image"
+                  loading="eager"
+                  decoding="async"
+                />
+                <div className="chat-image-preview-actions">
+                  <button
+                    type="button"
+                    className="chat-image-preview-btn secondary icon-only"
+                    aria-label="关闭"
+                    title="关闭"
+                    onClick={() => setPreviewImage(null)}
+                  >
+                    <X size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-image-preview-btn primary icon-only"
+                    aria-label={previewDownloadPending ? "下载中" : "下载"}
+                    title={previewDownloadPending ? "下载中" : "下载"}
+                    onClick={() => {
+                      void handlePreviewDownload();
+                    }}
+                    disabled={!previewImage.canResolveDownload || previewDownloadPending}
+                  >
+                    <Download size={14} />
+                  </button>
+                </div>
+              </div>
+              {previewImage.isLoadingOriginal ? (
+                <div className="chat-image-preview-loading" role="status">
+                  正在加载原图...
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      ) : null}
+    </>
   );
 });
 
@@ -1117,6 +1421,20 @@ function readAttachmentThumbnailUrl(attachment) {
   ).trim();
 }
 
+function getImageNameFromUrl(src) {
+  const value = String(src || "").trim();
+  if (!value) return "";
+  try {
+    const baseUrl =
+      typeof window !== "undefined" ? window.location.href : "http://localhost/";
+    const url = new URL(value, baseUrl);
+    const pathname = decodeURIComponent(url.pathname || "");
+    return pathname.split("/").filter(Boolean).pop() || "";
+  } catch {
+    return value.split(/[/?#]/).filter(Boolean).pop() || "";
+  }
+}
+
 function isImageAttachment(attachment) {
   const type = String(attachment?.type || "")
     .trim()
@@ -1126,4 +1444,77 @@ function isImageAttachment(attachment) {
     .trim()
     .toLowerCase();
   return /\.(png|jpg|jpeg|gif|webp|bmp|svg|heic|avif)$/i.test(name);
+}
+
+function getAttachmentExtension(attachment) {
+  const name = String(attachment?.name || "").trim().toLowerCase();
+  const match = name.match(/\.([a-z0-9]+)$/i);
+  return match?.[1] || "";
+}
+
+function getAttachmentKind(attachment) {
+  if (isImageAttachment(attachment)) return "image";
+
+  const type = String(attachment?.type || "")
+    .trim()
+    .toLowerCase();
+  const ext = getAttachmentExtension(attachment);
+
+  if (
+    type.includes("word") ||
+    ["doc", "docx", "rtf"].includes(ext)
+  ) {
+    return "word";
+  }
+
+  if (
+    type.includes("excel") ||
+    type.includes("spreadsheet") ||
+    ["xls", "xlsx", "csv"].includes(ext)
+  ) {
+    return "excel";
+  }
+
+  if (
+    type.includes("presentation") ||
+    type.includes("powerpoint") ||
+    ["ppt", "pptx", "key"].includes(ext)
+  ) {
+    return "ppt";
+  }
+
+  if (type === "application/pdf" || ext === "pdf") {
+    return "pdf";
+  }
+
+  return "file";
+}
+
+function getAttachmentTypeLabel(kind) {
+  switch (kind) {
+    case "image":
+      return "图片";
+    case "word":
+      return "Word";
+    case "excel":
+      return "Excel";
+    case "ppt":
+      return "PPT";
+    case "pdf":
+      return "PDF";
+    default:
+      return "文件";
+  }
+}
+
+function getAttachmentBadgeLabel(attachment, kind) {
+  if (kind === "word") return "DOC";
+  if (kind === "excel") return "XLS";
+  if (kind === "ppt") return "PPT";
+  if (kind === "pdf") return "PDF";
+  if (kind === "image") return "IMG";
+
+  const ext = getAttachmentExtension(attachment).toUpperCase();
+  if (!ext) return "FILE";
+  return ext.slice(0, 4);
 }

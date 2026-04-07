@@ -2867,7 +2867,7 @@ export default function AdminSettingsPage() {
                         id="admin-runtime-context-window-tokens-chat"
                         value={selectedRuntime.contextWindowTokens}
                         min={1024}
-                        max={512000}
+                        max={1000000}
                         step={1024}
                         onChange={(next) => updateRuntimeField("contextWindowTokens", next)}
                         disabled={loading}
@@ -2885,7 +2885,7 @@ export default function AdminSettingsPage() {
                         id="admin-runtime-max-input-tokens-chat"
                         value={selectedRuntime.maxInputTokens}
                         min={1024}
-                        max={512000}
+                        max={1000000}
                         step={1024}
                         onChange={(next) => updateRuntimeField("maxInputTokens", next)}
                         disabled={loading}

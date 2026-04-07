@@ -218,4 +218,33 @@ runCase("前端传空消息列表时，服务端仍保留已有历史", () => {
   assert.deepEqual(result.preservedSessionIds, ["s1"]);
 });
 
+runCase("前端只更新 session 元数据时，服务端仍保留已有历史", () => {
+  const result = runRouteLikeMerge({
+    currentStateDoc: {
+      activeId: "s1",
+      groups: [{ id: "g1", name: "旧分组", description: "" }],
+      sessions: [{ id: "s1", title: "旧标题", groupId: "g1", pinned: false }],
+      sessionMessages: {
+        s1: [
+          createMessage("m1", "user", "旧消息 1"),
+          createMessage("m2", "assistant", "旧消息 2"),
+        ],
+      },
+      settings: {},
+    },
+    nextPayload: {
+      activeId: "s1",
+      groups: [{ id: "g1", name: "新分组", description: "" }],
+      sessions: [{ id: "s1", title: "新标题", groupId: "g1", pinned: true }],
+      settings: {},
+    },
+  });
+
+  assert.deepEqual(
+    result.sessionMessages.s1.map((item) => item.id),
+    ["m1", "m2"],
+  );
+  assert.deepEqual(result.preservedSessionIds, ["s1"]);
+});
+
 console.log("\n全部通过：聊天历史保护脚本未发现“残缺状态覆盖完整历史”的回归。");

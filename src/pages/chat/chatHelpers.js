@@ -26,6 +26,10 @@ export async function readSseStream(response, handlers) {
         handlers.onSearchUsage?.(evt.data || {});
       } else if (evt.event === "meta") {
         handlers.onMeta?.(evt.data || {});
+      } else if (evt.event === "context_compacting") {
+        handlers.onContextCompacting?.(evt.data || {});
+      } else if (evt.event === "upstream_reconnecting") {
+        handlers.onUpstreamReconnecting?.(evt.data || {});
       } else if (evt.event === "error") {
         handlers.onError?.(evt.data?.message || "unknown error");
       }

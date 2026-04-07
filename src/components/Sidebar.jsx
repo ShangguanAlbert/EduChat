@@ -562,7 +562,7 @@ export default function Sidebar({
               disabled={isExiting || sessionActionsDisabled}
               onClick={(e) => toggleChatMenu(session.id, e.currentTarget)}
             >
-              ⋯
+              <MoreHorizontal size={16} />
             </button>
 
             {isRenderedMenu &&
@@ -876,9 +876,6 @@ export default function Sidebar({
                       type="button"
                       onClick={() => toggleProjectCollapse(g.id)}
                     >
-                      <span className="sidebar-project-chevron" aria-hidden="true">
-                        {isCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
-                      </span>
                       <span className="sidebar-project-icon" aria-hidden="true">
                         {isCollapsed ? <Folder size={17} /> : <FolderOpen size={17} />}
                       </span>

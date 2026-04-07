@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import { clearUserAuthSession, withAuthSlot } from "../app/authStorage.js";
-import { writeChatBootstrapPrefetch } from "./chat/bootstrapPrefetch.js";
 import { fetchChatBootstrap } from "./chat/stateApi.js";
 import {
   loadImageReturnContext,
@@ -70,7 +69,6 @@ export default function ChatEntryPage() {
             : "") ||
           sanitizeChatRouteSessionId(sessions[0]?.id);
 
-        writeChatBootstrapPrefetch(data, location.search);
         navigate(buildCanonicalChatHref(targetSessionId, location.search), {
           replace: true,
           state: location.state,
