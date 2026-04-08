@@ -1,5 +1,4 @@
-import fontkit from "@pdf-lib/fontkit";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { pathToFileURL } from "node:url";
 
 export function registerChatAndImageRoutes(app, deps) {
   const {
@@ -17,9 +16,6 @@ export function registerChatAndImageRoutes(app, deps) {
     path,
     tmpdir,
     crypto,
-    execFile,
-    promisify,
-    mammoth,
     XLSX,
     PDFParse,
     mongoose,
@@ -681,157 +677,162 @@ export function registerChatAndImageRoutes(app, deps) {
   } = deps;
 
   const SESSION_TITLE_MODEL_AGENT_ID = "C";
-  const DOCUMENT_PREVIEW_PDF_PAGE = Object.freeze({
-    width: 595.28,
-    height: 841.89,
-    margin: 48,
-    titleSize: 18,
-    bodySize: 12,
-    metaSize: 10,
-    lineGap: 6,
-  });
+  const DOCUMENT_PREVIEW_CONVERT_TIMEOUT_MS = 45_000;
+  const DOCUMENT_PREVIEW_CONVERT_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
 
-  function listDocumentPreviewFontCandidates() {
-    const candidates = [
-      process.env.EDUCHAT_PREVIEW_FONT_PATH,
-      process.env.CHAT_PREVIEW_FONT_PATH,
-      process.env.PDF_PREVIEW_FONT_PATH,
-      process.env.HOME
-        ? path.join(process.env.HOME, "Library/Fonts/SimSun.ttf")
-        : "",
-      process.env.HOME
-        ? path.join(process.env.HOME, ".fonts/NotoSansCJK-Regular.ttc")
-        : "",
-      "/System/Library/Fonts/Hiragino Sans GB.ttc",
-      "/System/Library/Fonts/STHeiti Medium.ttc",
-      "/System/Library/Fonts/Supplemental/Songti.ttc",
-      "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-      "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
-      "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-      "C:\\Windows\\Fonts\\simsun.ttc",
-      "C:\\Windows\\Fonts\\msyh.ttc",
-      "C:\\Windows\\Fonts\\simhei.ttf",
-    ];
-    return Array.from(new Set(candidates.filter(Boolean)));
-  }
-
-  async function embedPreviewPdfFont(pdfDoc) {
-    pdfDoc.registerFontkit(fontkit);
-    const candidates = listDocumentPreviewFontCandidates();
-    for (let index = 0; index < candidates.length; index += 1) {
-      const candidatePath = candidates[index];
-      if (!candidatePath || !existsSync(candidatePath)) continue;
-      try {
-        const fontBytes = await readFileAsync(candidatePath);
-        const font = await pdfDoc.embedFont(fontBytes, { subset: true });
-        return font;
-      } catch {
-        // Ignore invalid or unsupported font candidates.
-      }
-    }
-    return pdfDoc.embedFont(StandardFonts.Helvetica);
-  }
-
-  function normalizeDocumentPreviewText(value) {
-    const text = String(value || "")
-      .replace(/\r\n?/g, "\n")
-      .replace(/\u00a0/g, " ")
-      .replace(/\t/g, "  ");
-    return text.trim();
-  }
-
-  function wrapPreviewPdfLine(text, font, fontSize, maxWidth) {
-    const chars = Array.from(String(text || ""));
-    if (chars.length === 0) return [""];
-    const lines = [];
-    let current = "";
-
-    for (let index = 0; index < chars.length; index += 1) {
-      const char = chars[index];
-      const next = current + char;
-      if (
-        current &&
-        font.widthOfTextAtSize(next, fontSize) > maxWidth
-      ) {
-        lines.push(current.replace(/\s+$/g, ""));
-        current = char.trim() ? char : "";
-        continue;
-      }
-      current = next;
-    }
-
-    if (current || lines.length === 0) {
-      lines.push(current.replace(/\s+$/g, ""));
-    }
-    return lines;
-  }
-
-  async function buildDocumentPreviewPdfBuffer({
-    fileName = "",
-    sourceLabel = "文档预览",
-    text = "",
-  } = {}) {
-    const pdfDoc = await PDFDocument.create();
-    const font = await embedPreviewPdfFont(pdfDoc);
-    const safeText =
-      normalizeDocumentPreviewText(text) || "文档中没有可供预览的文本内容。";
-    const safeFileName = sanitizeText(fileName, "document.docx", 180);
-    const pageConfig = DOCUMENT_PREVIEW_PDF_PAGE;
-    const maxWidth = pageConfig.width - pageConfig.margin * 2;
-    const titleLines = wrapPreviewPdfLine(
-      safeFileName,
-      font,
-      pageConfig.titleSize,
-      maxWidth,
+  function isMarkdownDocumentPreview(ext, mime) {
+    const lowerExt = String(ext || "").toLowerCase();
+    const lowerMime = sanitizeGroupChatFileMimeType(mime);
+    return (
+      lowerMime.includes("markdown") ||
+      lowerMime.includes("mdx") ||
+      lowerExt === "md" ||
+      lowerExt === "markdown" ||
+      lowerExt === "mdown" ||
+      lowerExt === "mkd"
     );
-    const bodyParagraphs = safeText.split(/\n{2,}/).map((item) => item.trim());
-    const metaLine = `${sourceLabel} · 文本转 PDF 预览`;
+  }
 
-    let page = pdfDoc.addPage([pageConfig.width, pageConfig.height]);
-    let cursorY = pageConfig.height - pageConfig.margin;
+  function isHtmlDocumentPreview(ext, mime) {
+    const lowerExt = String(ext || "").toLowerCase();
+    const lowerMime = sanitizeGroupChatFileMimeType(mime);
+    return lowerMime.includes("html") || lowerExt === "html" || lowerExt === "htm";
+  }
 
-    const ensureSpace = (requiredHeight) => {
-      if (cursorY - requiredHeight >= pageConfig.margin) return;
-      page = pdfDoc.addPage([pageConfig.width, pageConfig.height]);
-      cursorY = pageConfig.height - pageConfig.margin;
-    };
+  function isPlainTextDocumentPreview(ext, mime, buffer) {
+    if (isHtmlDocumentPreview(ext, mime) || isMarkdownDocumentPreview(ext, mime)) {
+      return false;
+    }
+    return isTextLikeFile(ext, sanitizeGroupChatFileMimeType(mime), buffer);
+  }
 
-    const drawLine = (line, size, options = {}) => {
-      ensureSpace(size + pageConfig.lineGap);
-      page.drawText(line, {
-        x: pageConfig.margin,
-        y: cursorY - size,
-        size,
-        font,
-        color: options.color || rgb(0.24, 0.22, 0.16),
-      });
-      cursorY -= size + pageConfig.lineGap;
-    };
-
-    titleLines.forEach((line) => {
-      drawLine(line, pageConfig.titleSize, { color: rgb(0.18, 0.16, 0.12) });
-    });
-    cursorY -= 2;
-    drawLine(metaLine, pageConfig.metaSize, { color: rgb(0.45, 0.42, 0.35) });
-    cursorY -= 8;
-
-    bodyParagraphs.forEach((paragraph, paragraphIndex) => {
-      const lines = wrapPreviewPdfLine(
-        paragraph || "",
-        font,
-        pageConfig.bodySize,
-        maxWidth,
+  function sendDocumentPreviewTextResponse(res, fileBuffer, contentType = "text/plain; charset=utf-8", fileName = "") {
+    const decoded = decodeTextFile(fileBuffer);
+    res.setHeader("Content-Type", contentType);
+    if (fileName) {
+      res.setHeader(
+        "Content-Disposition",
+        buildAttachmentContentDisposition(fileName),
       );
-      lines.forEach((line) => {
-        drawLine(line || " ", pageConfig.bodySize);
-      });
-      if (paragraphIndex < bodyParagraphs.length - 1) {
-        cursorY -= pageConfig.bodySize * 0.65;
-      }
-    });
+    }
+    res.setHeader("Cache-Control", "private, no-store");
+    res.send(decoded);
+  }
 
-    const pdfBytes = await pdfDoc.save();
-    return Buffer.from(pdfBytes);
+  function listDocumentPreviewSofficeCandidates() {
+    const candidates = [
+      process.env.EDUCHAT_DOCUMENT_PREVIEW_SOFFICE_PATH,
+      process.env.SOFFICE_PATH,
+      process.env.LIBREOFFICE_PATH,
+      "soffice",
+      "libreoffice",
+      "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+      "/Applications/OpenOffice.app/Contents/MacOS/soffice",
+      "/opt/homebrew/bin/soffice",
+      "/usr/local/bin/soffice",
+      "/usr/bin/soffice",
+      "/snap/bin/libreoffice",
+      "C:\\Program Files\\LibreOffice\\program\\soffice.exe",
+      "C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe",
+    ];
+    return Array.from(
+      new Set(candidates.map((item) => String(item || "").trim()).filter(Boolean)),
+    );
+  }
+
+  function isExplicitBinaryPath(value) {
+    const text = String(value || "");
+    return (
+      text.includes("/") ||
+      text.includes("\\") ||
+      /^[A-Za-z]:[\\/]/.test(text)
+    );
+  }
+
+  function buildDocumentPreviewConverterUnavailableError() {
+    return new Error(
+      "服务器未检测到 LibreOffice，当前无法生成完整 Word 预览。请安装 LibreOffice，或通过 EDUCHAT_DOCUMENT_PREVIEW_SOFFICE_PATH / SOFFICE_PATH 指定 soffice 路径。",
+    );
+  }
+
+  function extractDocumentPreviewConverterErrorMessage(error) {
+    const stderr = sanitizeText(error?.stderr, "", 400);
+    const stdout = sanitizeText(error?.stdout, "", 400);
+    const message = sanitizeText(error?.message, "", 400);
+    return stderr || stdout || message || "未知错误";
+  }
+
+  async function convertWordDocumentToPreviewPdfBuffer({
+    fileName = "",
+    buffer,
+  } = {}) {
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+      throw new Error("Word 文件内容为空，无法生成预览。");
+    }
+
+    const safeFileName = sanitizeGroupChatFileName(fileName || "document.docx");
+    const ext = getFileExtension(safeFileName) || "docx";
+    const tempDir = await mkdtemp(path.join(tmpdir(), "educhat-word-preview-"));
+    const outputDir = path.join(tempDir, "output");
+    const profileDir = path.join(tempDir, "profile");
+    const inputPath = path.join(tempDir, `source.${ext}`);
+    const outputPath = path.join(outputDir, "source.pdf");
+    const sofficeCandidates = listDocumentPreviewSofficeCandidates();
+    const errors = [];
+    let attempted = false;
+
+    try {
+      await mkdir(outputDir, { recursive: true });
+      await mkdir(profileDir, { recursive: true });
+      await writeFileAsync(inputPath, buffer);
+
+      for (let index = 0; index < sofficeCandidates.length; index += 1) {
+        const binary = sofficeCandidates[index];
+        if (isExplicitBinaryPath(binary) && !existsSync(binary)) continue;
+
+        attempted = true;
+        try {
+          await execFileAsync(
+            binary,
+            [
+              "--headless",
+              `-env:UserInstallation=${pathToFileURL(profileDir).href}`,
+              "--convert-to",
+              "pdf:writer_pdf_Export",
+              "--outdir",
+              outputDir,
+              inputPath,
+            ],
+            {
+              timeout: DOCUMENT_PREVIEW_CONVERT_TIMEOUT_MS,
+              maxBuffer: DOCUMENT_PREVIEW_CONVERT_MAX_BUFFER_BYTES,
+            },
+          );
+
+          if (!existsSync(outputPath)) {
+            throw new Error("转换已执行，但未生成 PDF 文件。");
+          }
+
+          const pdfBuffer = await readFileAsync(outputPath);
+          if (!Buffer.isBuffer(pdfBuffer) || pdfBuffer.length === 0) {
+            throw new Error("生成的 PDF 文件为空。");
+          }
+          return pdfBuffer;
+        } catch (error) {
+          errors.push(`${binary}: ${extractDocumentPreviewConverterErrorMessage(error)}`);
+        }
+      }
+
+      if (!attempted) {
+        throw buildDocumentPreviewConverterUnavailableError();
+      }
+
+      throw new Error(
+        `Word 转 PDF 失败：${errors.map((item) => sanitizeText(item, "", 240)).filter(Boolean).join("；") || "请检查 LibreOffice 转换能力。"}`,
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   function resolveChatAttachmentLinkFromOssFiles(
@@ -1489,15 +1490,9 @@ export function registerChatAndImageRoutes(app, deps) {
       const safeFileName = sanitizeGroupChatFileName(file?.originalname || "document.pdf");
       const previewFileName = safeFileName.replace(/\.[a-z0-9]+$/i, "") || "document";
       const lowerExt = String(ext || "").toLowerCase();
-      const isHtmlPreview =
-        mime.includes("html") || lowerExt === "html" || lowerExt === "htm";
-      const isMarkdownPreview =
-        mime.includes("markdown") ||
-        mime.includes("mdx") ||
-        lowerExt === "md" ||
-        lowerExt === "markdown" ||
-        lowerExt === "mdown" ||
-        lowerExt === "mkd";
+      const isHtmlPreview = isHtmlDocumentPreview(ext, mime);
+      const isMarkdownPreview = isMarkdownDocumentPreview(ext, mime);
+      const isPlainTextPreview = isPlainTextDocumentPreview(ext, mime, file.buffer);
 
       if (!Buffer.isBuffer(file?.buffer) || file.buffer.length === 0) {
         res.status(400).json({ error: "文件内容为空，无法生成预览。" });
@@ -1510,33 +1505,24 @@ export function registerChatAndImageRoutes(app, deps) {
         if (isPdfFile(ext, mime)) {
           pdfBuffer = file.buffer;
         } else if (isWordFile(ext, mime)) {
-          if (String(ext || "").toLowerCase() === "doc") {
-            res.status(400).json({
-              error: "暂不支持旧版 .doc 生成预览，请先另存为 .docx 后重试。",
-            });
-            return;
-          }
-
-          const extracted = await mammoth.extractRawText({ buffer: file.buffer });
-          pdfBuffer = await buildDocumentPreviewPdfBuffer({
+          pdfBuffer = await convertWordDocumentToPreviewPdfBuffer({
             fileName: safeFileName,
-            sourceLabel: "Word 文档",
-            text: extracted?.value || "",
+            buffer: file.buffer,
           });
-        } else if (isHtmlPreview || isMarkdownPreview) {
-          res.setHeader(
-            "Content-Type",
-            isHtmlPreview ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8",
+        } else if (isHtmlPreview || isMarkdownPreview || isPlainTextPreview) {
+          sendDocumentPreviewTextResponse(
+            res,
+            file.buffer,
+            isHtmlPreview
+              ? "text/html; charset=utf-8"
+              : isMarkdownPreview
+                ? "text/markdown; charset=utf-8"
+                : "text/plain; charset=utf-8",
+            safeFileName,
           );
-          res.setHeader(
-            "Content-Disposition",
-            buildAttachmentContentDisposition(safeFileName),
-          );
-          res.setHeader("Cache-Control", "private, no-store");
-          res.send(file.buffer);
           return;
         } else {
-          res.status(400).json({ error: "仅支持 PDF、Word、HTML 或 Markdown 文档预览。" });
+          res.status(400).json({ error: "仅支持 PDF、Word、HTML、Markdown 或文本代码文件预览。" });
           return;
         }
 
@@ -1631,16 +1617,8 @@ export function registerChatAndImageRoutes(app, deps) {
       }
 
       const ext = getFileExtension(fileName);
-      const lowerExt = String(ext || "").toLowerCase();
-      const isHtmlPreview =
-        mimeType.includes("html") || lowerExt === "html" || lowerExt === "htm";
-      const isMarkdownPreview =
-        mimeType.includes("markdown") ||
-        mimeType.includes("mdx") ||
-        lowerExt === "md" ||
-        lowerExt === "markdown" ||
-        lowerExt === "mdown" ||
-        lowerExt === "mkd";
+      const isHtmlPreview = isHtmlDocumentPreview(ext, mimeType);
+      const isMarkdownPreview = isMarkdownDocumentPreview(ext, mimeType);
 
       const downloadUrl =
         (ossKey
@@ -1666,6 +1644,7 @@ export function registerChatAndImageRoutes(app, deps) {
         if (!fileBuffer.length) {
           throw new Error("附件内容为空，无法预览。");
         }
+        const isPlainTextPreview = isPlainTextDocumentPreview(ext, mimeType, fileBuffer);
 
         if (isPdfFile(ext, mimeType)) {
           res.setHeader("Content-Type", "application/pdf");
@@ -1679,17 +1658,9 @@ export function registerChatAndImageRoutes(app, deps) {
         }
 
         if (isWordFile(ext, mimeType)) {
-          if (String(ext || "").toLowerCase() === "doc") {
-            res.status(400).json({
-              error: "暂不支持旧版 .doc 生成预览，请先另存为 .docx 后重试。",
-            });
-            return;
-          }
-          const extracted = await mammoth.extractRawText({ buffer: fileBuffer });
-          const previewPdf = await buildDocumentPreviewPdfBuffer({
+          const previewPdf = await convertWordDocumentToPreviewPdfBuffer({
             fileName,
-            sourceLabel: "Word 文档",
-            text: extracted?.value || "",
+            buffer: fileBuffer,
           });
           res.setHeader("Content-Type", "application/pdf");
           res.setHeader(
@@ -1701,13 +1672,16 @@ export function registerChatAndImageRoutes(app, deps) {
           return;
         }
 
-        if (isHtmlPreview || isMarkdownPreview) {
-          res.setHeader(
-            "Content-Type",
-            isHtmlPreview ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8",
+        if (isHtmlPreview || isMarkdownPreview || isPlainTextPreview) {
+          sendDocumentPreviewTextResponse(
+            res,
+            fileBuffer,
+            isHtmlPreview
+              ? "text/html; charset=utf-8"
+              : isMarkdownPreview
+                ? "text/markdown; charset=utf-8"
+                : "text/plain; charset=utf-8",
           );
-          res.setHeader("Cache-Control", "private, no-store");
-          res.send(fileBuffer);
           return;
         }
 

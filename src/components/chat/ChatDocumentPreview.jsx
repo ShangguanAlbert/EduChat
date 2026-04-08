@@ -2,8 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   Download,
   LoaderCircle,
   Minus,
@@ -11,6 +9,7 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
+import hljs from "highlight.js/lib/common";
 import { Document, Page, pdfjs } from "react-pdf";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
@@ -40,13 +39,14 @@ export default function ChatDocumentPreview({
   const viewportRef = useRef(null);
   const objectUrlRef = useRef("");
   const titleMenuRef = useRef(null);
+  const pdfPageRefs = useRef(new Map());
   const [documentUrl, setDocumentUrl] = useState("");
   const [documentText, setDocumentText] = useState("");
   const [documentMode, setDocumentMode] = useState("");
   const [loadError, setLoadError] = useState("");
   const [loading, setLoading] = useState(false);
   const [pageCount, setPageCount] = useState(0);
-  const [pageNumber, setPageNumber] = useState(1);
+  const [currentPdfPage, setCurrentPdfPage] = useState(1);
   const [scale, setScale] = useState(1);
   const [viewportWidth, setViewportWidth] = useState(0);
   const [downloadPending, setDownloadPending] = useState(false);
@@ -60,6 +60,39 @@ export default function ChatDocumentPreview({
   const canSwitchDocuments = documents.length > 1;
   const isSessionDocument = activeDocument?.source === "session";
   const isSelectedForContext = activeDocument ? selectedKeySet.has(activeDocument.key) : false;
+  const activeDocumentLoadKey = useMemo(() => {
+    if (!activeDocument) return "";
+
+    if (activeDocument.source === "composer") {
+      const file = activeDocument.file;
+      return [
+        "composer",
+        activeDocument.key,
+        activeDocument.kind,
+        file instanceof File ? file.name : "",
+        file instanceof File ? Number(file.size || 0) : 0,
+        file instanceof File ? Number(file.lastModified || 0) : 0,
+        file instanceof File ? String(file.type || "") : "",
+      ].join("::");
+    }
+
+    const attachment = activeDocument.attachment || {};
+    return [
+      "session",
+      activeDocument.key,
+      activeDocument.kind,
+      activeDocument.sessionId,
+      activeDocument.messageId,
+      Number(activeDocument.attachmentIndex ?? -1),
+      String(attachment?.ossKey || ""),
+      String(attachment?.url || attachment?.fileUrl || ""),
+      String(attachment?.name || attachment?.fileName || activeDocument.name || ""),
+      String(attachment?.type || attachment?.mimeType || activeDocument.mimeType || ""),
+      Number(attachment?.size || activeDocument.size || 0),
+    ].join("::");
+  }, [
+    activeDocument,
+  ]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -113,7 +146,7 @@ export default function ChatDocumentPreview({
 
   useEffect(() => {
     setPageCount(0);
-    setPageNumber(1);
+    setCurrentPdfPage(1);
     setScale(1);
     setLoadError("");
     setDownloadError("");
@@ -150,9 +183,9 @@ export default function ChatDocumentPreview({
           }
 
           if (activeDocument.kind === "html") {
-            const nextUrl = URL.createObjectURL(activeDocument.file);
-            objectUrlRef.current = nextUrl;
-            setDocumentUrl(nextUrl);
+            const nextText = await activeDocument.file.text();
+            if (abortController.signal.aborted) return;
+            setDocumentText(nextText);
             setDocumentMode("html");
             setLoading(false);
             return;
@@ -163,6 +196,15 @@ export default function ChatDocumentPreview({
             if (abortController.signal.aborted) return;
             setDocumentText(nextText);
             setDocumentMode("markdown");
+            setLoading(false);
+            return;
+          }
+
+          if (activeDocument.kind === "text") {
+            const nextText = await activeDocument.file.text();
+            if (abortController.signal.aborted) return;
+            setDocumentText(nextText);
+            setDocumentMode("text");
             setLoading(false);
             return;
           }
@@ -192,6 +234,24 @@ export default function ChatDocumentPreview({
           return;
         }
 
+        if (activeDocument.kind === "html") {
+          const nextText = await blob.text();
+          if (abortController.signal.aborted) return;
+          setDocumentText(nextText);
+          setDocumentMode("html");
+          setLoading(false);
+          return;
+        }
+
+        if (activeDocument.kind === "text") {
+          const nextText = await blob.text();
+          if (abortController.signal.aborted) return;
+          setDocumentText(nextText);
+          setDocumentMode("text");
+          setLoading(false);
+          return;
+        }
+
         const nextUrl = URL.createObjectURL(blob);
         objectUrlRef.current = nextUrl;
         setDocumentUrl(nextUrl);
@@ -213,14 +273,89 @@ export default function ChatDocumentPreview({
         objectUrlRef.current = "";
       }
     };
-  }, [activeDocument]);
+  }, [activeDocumentLoadKey]);
 
-  const renderedPageWidth = Math.max(360, Math.floor(Math.max(420, viewportWidth - 40)));
+  const renderedPageWidth = Math.max(320, Math.floor(Math.max(320, viewportWidth - 40)));
   const isPdfReady = documentMode === "pdf" && !!documentUrl && !loading && !loadError;
-  const isHtmlReady = documentMode === "html" && !!documentUrl && !loading && !loadError;
+  const isHtmlReady = documentMode === "html" && !loading && !loadError;
   const isMarkdownReady = documentMode === "markdown" && !loading && !loadError;
+  const isTextReady = documentMode === "text" && !loading && !loadError;
   const canRenderDocument = Boolean(activeDocument);
   const showPdfToolbar = isPdfReady;
+  const pdfPageNumbers = useMemo(
+    () => Array.from({ length: pageCount }, (_, index) => index + 1),
+    [pageCount],
+  );
+  const htmlPreviewSrcDoc = useMemo(
+    () => buildHtmlPreviewSrcDoc(documentText, activeDocument?.name || "HTML 预览"),
+    [activeDocument?.name, documentText],
+  );
+  const codeLanguage = useMemo(
+    () => resolveCodeHighlightLanguage(activeDocument?.name, activeDocument?.mimeType),
+    [activeDocument?.mimeType, activeDocument?.name],
+  );
+  const highlightedCodeMarkup = useMemo(() => {
+    const source = String(documentText || "");
+    if (!source) return "";
+    try {
+      if (codeLanguage && hljs.getLanguage(codeLanguage)) {
+        return hljs.highlight(source, {
+          language: codeLanguage,
+          ignoreIllegals: true,
+        }).value;
+      }
+      return hljs.highlightAuto(source).value;
+    } catch {
+      return escapeHtml(source);
+    }
+  }, [codeLanguage, documentText]);
+  const codeLineNumbers = useMemo(() => {
+    const source = String(documentText || "");
+    return Math.max(1, source.split("\n").length);
+  }, [documentText]);
+
+  useEffect(() => {
+    if (!isPdfReady) return undefined;
+    const viewport = viewportRef.current;
+    if (!viewport) return undefined;
+
+    let frameId = 0;
+    const updateCurrentPdfPage = () => {
+      frameId = 0;
+      const viewportRect = viewport.getBoundingClientRect();
+      const probeY = viewportRect.top + viewport.clientHeight * 0.35;
+      let bestPage = 1;
+      let bestDistance = Number.POSITIVE_INFINITY;
+
+      pdfPageNumbers.forEach((page) => {
+        const node = pdfPageRefs.current.get(page);
+        if (!node) return;
+        const rect = node.getBoundingClientRect();
+        const pageCenter = rect.top + rect.height / 2;
+        const distance = Math.abs(pageCenter - probeY);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestPage = page;
+        }
+      });
+
+      setCurrentPdfPage((current) => (current === bestPage ? current : bestPage));
+    };
+
+    const scheduleUpdate = () => {
+      if (frameId) return;
+      frameId = window.requestAnimationFrame(updateCurrentPdfPage);
+    };
+
+    scheduleUpdate();
+    viewport.addEventListener("scroll", scheduleUpdate, { passive: true });
+    window.addEventListener("resize", scheduleUpdate);
+    return () => {
+      viewport.removeEventListener("scroll", scheduleUpdate);
+      window.removeEventListener("resize", scheduleUpdate);
+      if (frameId) window.cancelAnimationFrame(frameId);
+    };
+  }, [isPdfReady, pdfPageNumbers, scale, renderedPageWidth]);
 
   async function handleDownloadClick() {
     if (!activeDocument || typeof onDownloadDocument !== "function" || downloadPending) return;
@@ -390,22 +525,33 @@ export default function ChatDocumentPreview({
               error="PDF 渲染失败，请重新上传后重试。"
               onLoadSuccess={({ numPages }) => {
                 setPageCount(numPages);
-                setPageNumber((current) => Math.min(Math.max(1, current), numPages));
               }}
               onLoadError={(error) => {
                 setLoadError(error?.message || "PDF 渲染失败，请重新上传后重试。");
               }}
             >
-              <Page
-                key={`${activeDocument?.key || "doc"}-${pageNumber}-${scale}`}
-                pageNumber={pageNumber}
-                width={renderedPageWidth}
-                scale={scale}
-                className="chat-document-preview-page"
-                loading=""
-                renderAnnotationLayer
-                renderTextLayer
-              />
+              <div className="chat-document-preview-pdf-stack">
+                {pdfPageNumbers.map((page) => (
+                  <div
+                    key={`${activeDocumentLoadKey || "doc"}-${page}-${scale}`}
+                    ref={(node) => {
+                      if (node) pdfPageRefs.current.set(page, node);
+                      else pdfPageRefs.current.delete(page);
+                    }}
+                    className="chat-document-preview-page-shell"
+                  >
+                    <Page
+                      pageNumber={page}
+                      width={renderedPageWidth}
+                      scale={scale}
+                      className="chat-document-preview-page"
+                      loading=""
+                      renderAnnotationLayer
+                      renderTextLayer
+                    />
+                  </div>
+                ))}
+              </div>
             </Document>
           </div>
         ) : null}
@@ -413,8 +559,8 @@ export default function ChatDocumentPreview({
         {isHtmlReady ? (
           <div className="chat-document-preview-rich-shell html">
             <iframe
-              key={activeDocument?.key || "html-preview"}
-              src={documentUrl}
+              key={activeDocumentLoadKey || "html-preview"}
+              srcDoc={htmlPreviewSrcDoc}
               title={activeDocument?.name || "HTML 预览"}
               className="chat-document-preview-html-frame"
               sandbox=""
@@ -431,73 +577,72 @@ export default function ChatDocumentPreview({
             </div>
           </div>
         ) : null}
+
+        {isTextReady ? (
+          <div className="chat-document-preview-rich-shell text">
+            <div className="chat-document-preview-code-shell">
+              <div className="chat-document-preview-code-gutter" aria-hidden="true">
+                {Array.from({ length: codeLineNumbers }, (_, index) => (
+                  <span key={`line-${index + 1}`}>{index + 1}</span>
+                ))}
+              </div>
+              <pre className="chat-document-preview-text-block">
+                <code
+                  className={`hljs${codeLanguage ? ` language-${codeLanguage}` : ""}`}
+                  dangerouslySetInnerHTML={{ __html: highlightedCodeMarkup || "&nbsp;" }}
+                />
+              </pre>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {showPdfToolbar ? (
         <div className="chat-document-preview-toolbar">
-        <div className="chat-document-preview-toolbar-group">
-          <button
-            type="button"
-            className="chat-document-preview-action"
-            onClick={() => setPageNumber((current) => Math.max(1, current - 1))}
-            disabled={!isPdfReady || pageNumber <= 1}
-            aria-label="上一页"
-            title="上一页"
-          >
-            <ChevronLeft size={16} />
-          </button>
-          <span className="chat-document-preview-status">
-            {pageCount > 0 ? `${pageNumber} / ${pageCount}` : "等待加载"}
-          </span>
-          <button
-            type="button"
-            className="chat-document-preview-action"
-            onClick={() =>
-              setPageNumber((current) =>
-                pageCount > 0 ? Math.min(pageCount, current + 1) : current,
-              )
-            }
-            disabled={!isPdfReady || pageCount <= 0 || pageNumber >= pageCount}
-            aria-label="下一页"
-            title="下一页"
-          >
-            <ChevronRight size={16} />
-          </button>
-        </div>
+          <div className="chat-document-preview-toolbar-group">
+            <span className="chat-document-preview-status">
+              {pageCount > 0 ? `共 ${pageCount} 页` : "等待加载"}
+            </span>
+            {pageCount > 0 ? (
+              <span className="chat-document-preview-status">
+                {`第 ${Math.min(currentPdfPage, pageCount)} 页`}
+              </span>
+            ) : null}
+          </div>
 
-        <div className="chat-document-preview-toolbar-group">
-          <button
-            type="button"
-            className="chat-document-preview-action"
-            onClick={() => setScale((current) => clampScale(current - SCALE_STEP))}
-            disabled={!isPdfReady || scale <= MIN_SCALE}
-            aria-label="缩小"
-            title="缩小"
-          >
-            <Minus size={16} />
-          </button>
-          <span className="chat-document-preview-status">{Math.round(scale * 100)}%</span>
-          <button
-            type="button"
-            className="chat-document-preview-action"
-            onClick={() => setScale((current) => clampScale(current + SCALE_STEP))}
-            disabled={!isPdfReady || scale >= MAX_SCALE}
-            aria-label="放大"
-            title="放大"
-          >
-            <Plus size={16} />
-          </button>
-          <button
-            type="button"
-            className="chat-document-preview-action"
-            onClick={() => setScale(1)}
-            disabled={!isPdfReady || scale === 1}
-            aria-label="恢复默认缩放"
-            title="恢复默认缩放"
-          >
-            <RefreshCw size={15} />
-          </button>
-        </div>
+          <div className="chat-document-preview-toolbar-group">
+            <button
+              type="button"
+              className="chat-document-preview-action"
+              onClick={() => setScale((current) => clampScale(current - SCALE_STEP))}
+              disabled={!isPdfReady || scale <= MIN_SCALE}
+              aria-label="缩小"
+              title="缩小"
+            >
+              <Minus size={16} />
+            </button>
+            <span className="chat-document-preview-status">{Math.round(scale * 100)}%</span>
+            <button
+              type="button"
+              className="chat-document-preview-action"
+              onClick={() => setScale((current) => clampScale(current + SCALE_STEP))}
+              disabled={!isPdfReady || scale >= MAX_SCALE}
+              aria-label="放大"
+              title="放大"
+            >
+              <Plus size={16} />
+            </button>
+            <button
+              type="button"
+              className="chat-document-preview-action"
+              onClick={() => setScale(1)}
+              disabled={!isPdfReady || scale === 1}
+              aria-label="恢复默认缩放"
+              title="恢复默认缩放"
+            >
+              <RefreshCw size={15} />
+            </button>
+          </div>
         </div>
       ) : null}
     </aside>
@@ -510,10 +655,91 @@ function clampScale(value) {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, Number(numeric.toFixed(2))));
 }
 
+function resolveDocumentExtension(name = "") {
+  const match = String(name || "")
+    .trim()
+    .toLowerCase()
+    .match(/\.([a-z0-9]+)$/i);
+  return match?.[1] || "";
+}
+
+function resolveCodeHighlightLanguage(name = "", mimeType = "") {
+  const ext = resolveDocumentExtension(name);
+  const mime = String(mimeType || "").trim().toLowerCase();
+  if (ext === "js" || ext === "jsx" || mime.includes("javascript")) return "javascript";
+  if (ext === "ts" || ext === "tsx" || mime.includes("typescript")) return "typescript";
+  if (ext === "py" || ext === "python" || mime.includes("python")) return "python";
+  if (ext === "java" || mime.includes("java")) return "java";
+  if (ext === "go" || mime.includes("x-go")) return "go";
+  if (ext === "rs" || mime.includes("rust")) return "rust";
+  if (ext === "rb" || mime.includes("ruby")) return "ruby";
+  if (ext === "php" || mime.includes("php")) return "php";
+  if (ext === "swift" || mime.includes("swift")) return "swift";
+  if (ext === "kt" || ext === "kts" || mime.includes("kotlin")) return "kotlin";
+  if (ext === "sql" || mime.includes("sql")) return "sql";
+  if (ext === "json" || mime.includes("json")) return "json";
+  if (ext === "yaml" || ext === "yml" || mime.includes("yaml")) return "yaml";
+  if (ext === "xml" || ext === "html" || ext === "htm" || ext === "vue" || ext === "svelte" || mime.includes("xml") || mime.includes("html")) return "xml";
+  if (ext === "css" || ext === "scss" || ext === "less" || mime.includes("css")) return "css";
+  if (ext === "sh" || ext === "bash" || ext === "zsh" || mime.includes("shell")) return "bash";
+  if (ext === "c" || ext === "h") return "c";
+  if (["cc", "hh", "cpp", "hpp", "cxx", "hxx", "m", "mm"].includes(ext)) return "cpp";
+  if (ext === "md" || ext === "markdown") return "markdown";
+  return "";
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function buildHtmlPreviewSrcDoc(content = "", title = "HTML 预览") {
+  const safeTitle = escapeHtml(title || "HTML 预览");
+  const source = String(content || "");
+  const injectStyle = `
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        min-height: 100%;
+        background: #ffffff;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+      body::-webkit-scrollbar {
+        display: none;
+        width: 0;
+        height: 0;
+      }
+    </style>
+  `;
+
+  if (/<html[\s>]/i.test(source)) {
+    if (/<head[\s>]/i.test(source)) {
+      return source.replace(/<head(\s[^>]*)?>/i, (match) => `${match}${injectStyle}`);
+    }
+    return source.replace(/<html(\s[^>]*)?>/i, (match) => `${match}<head>${injectStyle}</head>`);
+  }
+
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${safeTitle}</title>
+    ${injectStyle}
+  </head>
+  <body>${source}</body>
+</html>`;
+}
+
 function readDocumentKindLabel(kind) {
   if (kind === "word") return "Word";
   if (kind === "html") return "HTML";
   if (kind === "markdown") return "Markdown";
+  if (kind === "text") return "Code";
   return "PDF";
 }
 

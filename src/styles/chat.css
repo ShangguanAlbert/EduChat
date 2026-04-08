@@ -1165,13 +1165,16 @@ select.group-modal-input {
 }
 
 .chat-main.has-document-preview .chat-thread-pane {
+  flex: 1 1 50%;
+  width: 50%;
+  min-width: 0;
   border-right: 1px solid var(--border);
 }
 
 .chat-document-pane {
-  flex: 0 0 min(52vw, 760px);
-  width: min(52vw, 760px);
-  min-width: 420px;
+  flex: 1 1 50%;
+  width: 50%;
+  min-width: 0;
   min-height: 0;
   background: #f7f4ee;
   opacity: 0;
@@ -1573,6 +1576,8 @@ select.group-modal-input {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   overscroll-behavior-x: none;
   overflow-anchor: none;
   padding: 0 24px;
@@ -1583,6 +1588,12 @@ select.group-modal-input {
   transition:
     opacity 300ms var(--motion-smooth-out),
     transform 420ms var(--motion-spring-out);
+}
+
+.messages::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .chat-main.is-home-stage .messages {
@@ -2543,10 +2554,18 @@ select.group-modal-input {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
   padding: 18px 12px 12px;
   display: flex;
   align-items: flex-start;
   justify-content: center;
+}
+
+.chat-document-preview-viewport::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .chat-document-preview-canvas {
@@ -2554,6 +2573,16 @@ select.group-modal-input {
   min-width: 100%;
   display: flex;
   justify-content: center;
+}
+
+.chat-document-preview-pdf-stack {
+  width: fit-content;
+  min-width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding-bottom: 10px;
 }
 
 .chat-document-preview-rich-shell {
@@ -2568,6 +2597,11 @@ select.group-modal-input {
 
 .chat-document-preview-rich-shell.html {
   width: min(100%, 1080px);
+}
+
+.chat-document-preview-rich-shell.text {
+  width: min(100%, 1080px);
+  background: #0f172a;
 }
 
 .chat-document-preview-html-frame {
@@ -2588,6 +2622,102 @@ select.group-modal-input {
   max-width: 100%;
   height: auto;
   border-radius: 14px;
+}
+
+.chat-document-preview-text-block {
+  margin: 0;
+  min-height: 100%;
+  padding: 28px 32px 40px 0;
+  overflow: auto;
+  flex: 1 1 auto;
+  background: #0f172a;
+  color: #e5eefc;
+  font-size: 13px;
+  line-height: 1.65;
+  font-family: "SFMono-Regular", "SF Mono", "JetBrains Mono", "Fira Code", "Menlo", "Consolas", monospace;
+  white-space: pre;
+  word-break: normal;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.chat-document-preview-text-block::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.chat-document-preview-text-block code {
+  display: block;
+  min-width: 100%;
+  padding-right: 32px;
+  font: inherit;
+  color: inherit;
+}
+
+.chat-document-preview-code-shell {
+  display: flex;
+  align-items: stretch;
+  min-height: 100%;
+  background: #0f172a;
+}
+
+.chat-document-preview-code-gutter {
+  flex: 0 0 auto;
+  min-width: 56px;
+  padding: 28px 12px 40px 18px;
+  border-right: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.96);
+  color: #64748b;
+  text-align: right;
+  font-size: 12px;
+  line-height: 1.65;
+  font-family: "SFMono-Regular", "SF Mono", "JetBrains Mono", "Fira Code", "Menlo", "Consolas", monospace;
+  user-select: none;
+}
+
+.chat-document-preview-code-gutter span {
+  display: block;
+}
+
+.chat-document-preview-text-block .hljs-keyword,
+.chat-document-preview-text-block .hljs-selector-tag,
+.chat-document-preview-text-block .hljs-literal,
+.chat-document-preview-text-block .hljs-section,
+.chat-document-preview-text-block .hljs-link {
+  color: #c084fc;
+}
+
+.chat-document-preview-text-block .hljs-string,
+.chat-document-preview-text-block .hljs-attr,
+.chat-document-preview-text-block .hljs-template-tag,
+.chat-document-preview-text-block .hljs-template-variable {
+  color: #86efac;
+}
+
+.chat-document-preview-text-block .hljs-number,
+.chat-document-preview-text-block .hljs-symbol,
+.chat-document-preview-text-block .hljs-bullet,
+.chat-document-preview-text-block .hljs-variable,
+.chat-document-preview-text-block .hljs-params {
+  color: #fbbf24;
+}
+
+.chat-document-preview-text-block .hljs-title,
+.chat-document-preview-text-block .hljs-title.class_,
+.chat-document-preview-text-block .hljs-title.function_ {
+  color: #7dd3fc;
+}
+
+.chat-document-preview-text-block .hljs-comment,
+.chat-document-preview-text-block .hljs-quote {
+  color: #94a3b8;
+}
+
+.chat-document-preview-text-block .hljs-meta,
+.chat-document-preview-text-block .hljs-built_in,
+.chat-document-preview-text-block .hljs-type {
+  color: #fda4af;
 }
 
 .chat-document-preview-page {
@@ -2655,9 +2785,9 @@ select.group-modal-input {
 
 @media (max-width: 1380px) {
   .chat-document-pane {
-    flex-basis: min(46vw, 680px);
-    width: min(46vw, 680px);
-    min-width: 360px;
+    flex-basis: 50%;
+    width: 50%;
+    min-width: 0;
   }
 
   .chat-main.has-document-preview .chat-session-title {

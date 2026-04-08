@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Plus, ArrowUp, Square, X, Image as ImageIcon } from "lucide-react";
 
 const ACCEPT_UPLOAD_TYPES = [
@@ -91,7 +91,7 @@ export default function MessageInput({
   const [imagePreviewUrlsByIndex, setImagePreviewUrlsByIndex] = useState({});
   const [preparingFiles, setPreparingFiles] = useState(false);
   const [prepareError, setPrepareError] = useState("");
-  const [isFocused, setIsFocused] = useState(false);
+  const [hasWrappedText, setHasWrappedText] = useState(false);
   const fileRef = useRef(null);
   const textRef = useRef(null);
 
@@ -108,8 +108,7 @@ export default function MessageInput({
   }, [text, files, hasQuote]);
   const isHomeLayout = layoutMode === "home";
   const hasComposerExtras = hasQuote || files.length > 0 || preparingFiles || !!prepareError;
-  const isComposerExpanded =
-    hasComposerExtras || text.includes("\n") || text.length > 72;
+  const isComposerExpanded = hasComposerExtras || hasWrappedText;
   const isComposerCompact = !isComposerExpanded;
 
   function submit() {
@@ -121,10 +120,33 @@ export default function MessageInput({
     setText("");
     setFiles([]);
     setPrepareError("");
-    setIsFocused(false);
+    setHasWrappedText(false);
     onConsumeQuote?.();
     if (fileRef.current) fileRef.current.value = "";
   }
+
+  const resizeTextarea = useCallback(() => {
+    const textarea = textRef.current;
+    if (!textarea) return;
+
+    const compactMinHeight = 38;
+    const expandedMinHeight = isHomeLayout ? 38 : 30;
+    const maxHeight = 132;
+
+    textarea.style.height = "auto";
+    const scrollHeight = textarea.scrollHeight || compactMinHeight;
+    const nextHasWrappedText = scrollHeight > compactMinHeight + 2;
+    const minHeight =
+      isHomeLayout || hasComposerExtras || nextHasWrappedText
+        ? expandedMinHeight
+        : compactMinHeight;
+    const nextHeight = Math.min(maxHeight, Math.max(minHeight, scrollHeight));
+
+    textarea.style.height = `${nextHeight}px`;
+    setHasWrappedText((current) =>
+      current === nextHasWrappedText ? current : nextHasWrappedText,
+    );
+  }, [hasComposerExtras, isHomeLayout]);
 
   async function appendPickedFiles(pickedFiles) {
     const picked = Array.isArray(pickedFiles) ? pickedFiles.filter(Boolean) : [];
@@ -172,24 +194,39 @@ export default function MessageInput({
     setFiles((prev) => prev.filter((_, i) => i !== idx));
   }
 
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const textarea = textRef.current;
+    if (!textarea || typeof ResizeObserver !== "function") return undefined;
+
+    const host =
+      textarea.closest(".composer") ||
+      textarea.parentElement ||
+      textarea;
+    let frameId = 0;
+    const scheduleResize = () => {
+      if (frameId) window.cancelAnimationFrame(frameId);
+      frameId = window.requestAnimationFrame(() => {
+        frameId = 0;
+        resizeTextarea();
+      });
+    };
+
+    const observer = new ResizeObserver(() => {
+      scheduleResize();
+    });
+    observer.observe(host);
+    window.addEventListener("resize", scheduleResize);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", scheduleResize);
+      if (frameId) window.cancelAnimationFrame(frameId);
+    };
+  }, [resizeTextarea]);
+
   useLayoutEffect(() => {
-    if (!textRef.current) return;
-
-    if (isHomeLayout && isComposerCompact) {
-      textRef.current.style.height = "38px";
-      return;
-    }
-
-    const minHeight = isHomeLayout ? 38 : isComposerCompact ? 38 : 30;
-    const maxHeight = 132;
-
-    textRef.current.style.height = "auto";
-    const next = Math.min(
-      maxHeight,
-      Math.max(minHeight, textRef.current.scrollHeight),
-    );
-    textRef.current.style.height = `${next}px`;
-  }, [isComposerCompact, isHomeLayout, text]);
+    resizeTextarea();
+  }, [resizeTextarea, text, files.length, quotePreviewText, preparingFiles, prepareError]);
 
   useEffect(() => {
     if (files.length === 0) {
@@ -328,8 +365,6 @@ export default function MessageInput({
           placeholder="有问题，尽管问"
           value={text}
           disabled={inputDisabled}
-          onFocus={() => setIsFocused(true)}
-          onBlur={() => setIsFocused(false)}
           onChange={(e) => setText(e.target.value)}
           onPaste={onComposerPaste}
           onKeyDown={(e) => {

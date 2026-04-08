@@ -100,6 +100,52 @@ const VIDEO_EXTENSIONS = new Set(["mp4", "avi", "mov"]);
 const WORD_PREVIEW_EXTENSIONS = new Set(["doc", "docx"]);
 const HTML_PREVIEW_EXTENSIONS = new Set(["html", "htm"]);
 const MARKDOWN_PREVIEW_EXTENSIONS = new Set(["md", "markdown", "mdown", "mkd"]);
+const TEXT_PREVIEW_EXTENSIONS = new Set([
+  "txt",
+  "c",
+  "h",
+  "cc",
+  "hh",
+  "cpp",
+  "hpp",
+  "cxx",
+  "hxx",
+  "py",
+  "python",
+  "xml",
+  "json",
+  "yaml",
+  "yml",
+  "js",
+  "jsx",
+  "ts",
+  "tsx",
+  "java",
+  "go",
+  "rs",
+  "sh",
+  "bash",
+  "zsh",
+  "sql",
+  "css",
+  "scss",
+  "less",
+  "csv",
+  "tsv",
+  "toml",
+  "ini",
+  "log",
+  "tex",
+  "r",
+  "rb",
+  "php",
+  "swift",
+  "kt",
+  "m",
+  "mm",
+  "vue",
+  "svelte",
+]);
 const CHAT_AGENT_IDS = Object.freeze(["A", "B", "C", "D", "E"]);
 const DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   A: "volcengine",
@@ -213,6 +259,18 @@ function classifyUploadPreviewKind(item) {
   }
   if (mime.includes("markdown") || mime === "text/x-markdown" || MARKDOWN_PREVIEW_EXTENSIONS.has(extension)) {
     return "markdown";
+  }
+  if (
+    TEXT_PREVIEW_EXTENSIONS.has(extension) ||
+    mime.startsWith("text/") ||
+    mime.includes("json") ||
+    mime.includes("xml") ||
+    mime.includes("javascript") ||
+    mime.includes("typescript") ||
+    mime.includes("x-python") ||
+    mime.includes("x-c")
+  ) {
+    return "text";
   }
   return "";
 }
