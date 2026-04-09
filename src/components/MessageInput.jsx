@@ -334,7 +334,7 @@ export default function MessageInput({
         </div>
       )}
 
-      {preparingFiles && <p className="composer-file-status">文件上传中，请稍后</p>}
+      {preparingFiles && <p className="composer-file-status">文件解析中，请稍后</p>}
       {prepareError && <p className="composer-file-status error">{prepareError}</p>}
 
       <div className="composer-row">

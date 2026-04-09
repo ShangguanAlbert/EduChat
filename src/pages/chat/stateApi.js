@@ -129,6 +129,32 @@ export async function prepareChatAttachments({
   return data;
 }
 
+export async function stageChatPreviewAttachments({
+  files = [],
+  sessionId = "",
+} = {}) {
+  const safeFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  const formData = new FormData();
+  safeFiles.forEach((file) => {
+    formData.append("files", file);
+  });
+  if (String(sessionId || "").trim()) {
+    formData.append("sessionId", String(sessionId).trim());
+  }
+
+  const resp = await fetch("/api/chat/attachments/stage-preview", {
+    method: "POST",
+    headers: authHeaders(),
+    body: formData,
+  });
+  const data = await readJson(resp);
+  if (!resp.ok) {
+    const message = data?.error || data?.message || `请求失败（${resp.status}）`;
+    throw new Error(message);
+  }
+  return data;
+}
+
 export async function fetchChatDocumentPreviewBlob({ file, signal } = {}) {
   if (!(file instanceof File)) {
     throw new Error("缺少可预览的文档文件。");

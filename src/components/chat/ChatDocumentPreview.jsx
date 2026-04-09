@@ -21,12 +21,22 @@ import {
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
 
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.min.mjs",
+  import.meta.url,
+).toString();
 
 const MIN_SCALE = 0.8;
 const MAX_SCALE = 2.4;
 const SCALE_STEP = 0.2;
 const PREVIEW_RESIZE_SETTLE_MS = 180;
+const PDFJS_ASSET_BASE = buildPdfjsAssetBaseUrl();
+const PDF_DOCUMENT_OPTIONS = {
+  cMapUrl: `${PDFJS_ASSET_BASE}cmaps/`,
+  cMapPacked: true,
+  standardFontDataUrl: `${PDFJS_ASSET_BASE}standard_fonts/`,
+  wasmUrl: `${PDFJS_ASSET_BASE}wasm/`,
+};
 
 export default function ChatDocumentPreview({
   document: activeDocument,
@@ -53,6 +63,8 @@ export default function ChatDocumentPreview({
   const [downloadPending, setDownloadPending] = useState(false);
   const [downloadError, setDownloadError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [useNativePdfFallback, setUseNativePdfFallback] = useState(false);
+  const [nativePdfFallbackMessage, setNativePdfFallbackMessage] = useState("");
 
   const selectedKeySet = useMemo(
     () => new Set(Array.isArray(selectedContextDocumentKeys) ? selectedContextDocumentKeys : []),
@@ -74,6 +86,8 @@ export default function ChatDocumentPreview({
         file instanceof File ? Number(file.size || 0) : 0,
         file instanceof File ? Number(file.lastModified || 0) : 0,
         file instanceof File ? String(file.type || "") : "",
+        String(activeDocument.previewOssKey || ""),
+        String(activeDocument.previewUrl || ""),
       ].join("::");
     }
 
@@ -171,6 +185,8 @@ export default function ChatDocumentPreview({
     setDownloadError("");
     setDocumentText("");
     setDocumentMode("");
+    setUseNativePdfFallback(false);
+    setNativePdfFallbackMessage("");
 
     if (objectUrlRef.current) {
       URL.revokeObjectURL(objectUrlRef.current);
@@ -192,6 +208,56 @@ export default function ChatDocumentPreview({
         setDocumentText("");
 
         if (activeDocument.source === "composer") {
+          const previewOssKey = String(activeDocument.previewOssKey || "").trim();
+          const previewUrl = String(activeDocument.previewUrl || "").trim();
+          if (previewOssKey || previewUrl) {
+            const remoteBlob = await fetchChatAttachmentDocumentPreviewBlob({
+              attachment: {
+                ossKey: previewOssKey,
+                url: previewUrl,
+                name: activeDocument.name,
+                mimeType: activeDocument.mimeType,
+                type: activeDocument.mimeType,
+              },
+              signal: abortController.signal,
+            });
+            if (abortController.signal.aborted) return;
+
+            if (activeDocument.kind === "markdown") {
+              const nextText = await remoteBlob.text();
+              if (abortController.signal.aborted) return;
+              setDocumentText(nextText);
+              setDocumentMode("markdown");
+              setLoading(false);
+              return;
+            }
+
+            if (activeDocument.kind === "html") {
+              const nextText = await remoteBlob.text();
+              if (abortController.signal.aborted) return;
+              setDocumentText(nextText);
+              setDocumentMode("html");
+              setLoading(false);
+              return;
+            }
+
+            if (activeDocument.kind === "text") {
+              const nextText = await remoteBlob.text();
+              if (abortController.signal.aborted) return;
+              setDocumentText(nextText);
+              setDocumentMode("text");
+              setLoading(false);
+              return;
+            }
+
+            const nextUrl = URL.createObjectURL(remoteBlob);
+            objectUrlRef.current = nextUrl;
+            setDocumentUrl(nextUrl);
+            setDocumentMode("pdf");
+            setLoading(false);
+            return;
+          }
+
           if (activeDocument.kind === "pdf") {
             const nextUrl = URL.createObjectURL(activeDocument.file);
             objectUrlRef.current = nextUrl;
@@ -300,7 +366,7 @@ export default function ChatDocumentPreview({
   const isMarkdownReady = documentMode === "markdown" && !loading && !loadError;
   const isTextReady = documentMode === "text" && !loading && !loadError;
   const canRenderDocument = Boolean(activeDocument);
-  const showPdfToolbar = isPdfReady;
+  const showPdfToolbar = isPdfReady && !useNativePdfFallback;
   const pdfPageNumbers = useMemo(
     () => Array.from({ length: pageCount }, (_, index) => index + 1),
     [pageCount],
@@ -387,6 +453,15 @@ export default function ChatDocumentPreview({
     } finally {
       setDownloadPending(false);
     }
+  }
+
+  function activateNativePdfFallback(message = "") {
+    if (!documentUrl) return;
+    setUseNativePdfFallback(true);
+    setNativePdfFallbackMessage(
+      String(message || "").trim() || "当前文档已自动切换为原生 PDF 预览。",
+    );
+    setLoadError("");
   }
 
   return (
@@ -510,6 +585,11 @@ export default function ChatDocumentPreview({
           {downloadError}
         </div>
       ) : null}
+      {nativePdfFallbackMessage ? (
+        <div className="chat-document-preview-inline-note" role="status">
+          {nativePdfFallbackMessage}
+        </div>
+      ) : null}
 
       <div className="chat-document-preview-viewport" ref={viewportRef}>
         {!canRenderDocument ? (
@@ -531,10 +611,21 @@ export default function ChatDocumentPreview({
           </div>
         ) : null}
 
-        {isPdfReady ? (
+        {isPdfReady && useNativePdfFallback ? (
+          <div className="chat-document-preview-rich-shell pdf-native">
+            <iframe
+              src={documentUrl}
+              title={activeDocument?.name || "PDF 预览"}
+              className="chat-document-preview-pdf-native-frame"
+            />
+          </div>
+        ) : null}
+
+        {isPdfReady && !useNativePdfFallback ? (
           <div className="chat-document-preview-canvas">
             <Document
               file={documentUrl}
+              options={PDF_DOCUMENT_OPTIONS}
               loading={
                 <div className="chat-document-preview-placeholder" role="status">
                   <LoaderCircle size={18} className="chat-document-preview-spinner" />
@@ -546,7 +637,12 @@ export default function ChatDocumentPreview({
                 setPageCount(numPages);
               }}
               onLoadError={(error) => {
-                setLoadError(error?.message || "PDF 渲染失败，请重新上传后重试。");
+                const message = error?.message || "PDF 渲染失败，请重新上传后重试。";
+                if (documentUrl) {
+                  activateNativePdfFallback(message);
+                  return;
+                }
+                setLoadError(message);
               }}
             >
               <div className="chat-document-preview-pdf-stack">
@@ -567,6 +663,11 @@ export default function ChatDocumentPreview({
                       loading=""
                       renderAnnotationLayer
                       renderTextLayer
+                      onRenderError={(error) => {
+                        activateNativePdfFallback(
+                          error?.message || "PDF 页面渲染失败，已切换为原生预览。",
+                        );
+                      }}
                     />
                   </div>
                 ))}
@@ -672,6 +773,12 @@ function clampScale(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return 1;
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, Number(numeric.toFixed(2))));
+}
+
+function buildPdfjsAssetBaseUrl() {
+  const basePath = String(import.meta.env.BASE_URL || "/");
+  const normalizedBase = basePath.endsWith("/") ? basePath : `${basePath}/`;
+  return `${normalizedBase}pdfjs/`;
 }
 
 function resolveDocumentExtension(name = "") {

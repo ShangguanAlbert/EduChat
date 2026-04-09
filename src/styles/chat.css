@@ -2522,6 +2522,13 @@ select.group-modal-input {
   color: #b04f3d;
 }
 
+.chat-document-preview-inline-note {
+  padding: 8px 16px 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-soft);
+}
+
 .chat-document-preview-context-button {
   height: 32px;
   padding: 0 8px;
@@ -2675,12 +2682,24 @@ select.group-modal-input {
   width: min(100%, 1080px);
 }
 
+.chat-document-preview-rich-shell.pdf-native {
+  width: min(100%, 1080px);
+}
+
 .chat-document-preview-rich-shell.text {
   width: min(100%, 1080px);
   background: #0f172a;
 }
 
 .chat-document-preview-html-frame {
+  display: block;
+  width: 100%;
+  min-height: max(720px, calc(100vh - 220px));
+  border: 0;
+  background: #fff;
+}
+
+.chat-document-preview-pdf-native-frame {
   display: block;
   width: 100%;
   min-height: max(720px, calc(100vh - 220px));

@@ -21,6 +21,27 @@ function sanitizeTags(value) {
   );
 }
 
+function sanitizeReasoningEffort(value, fallback = "medium") {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (key === "none" || key === "low" || key === "medium" || key === "high") {
+    return key;
+  }
+  const safeFallback = String(fallback || "")
+    .trim()
+    .toLowerCase();
+  if (
+    safeFallback === "none" ||
+    safeFallback === "low" ||
+    safeFallback === "medium" ||
+    safeFallback === "high"
+  ) {
+    return safeFallback;
+  }
+  return "medium";
+}
+
 function extractChatLikeText(data) {
   const choice = data?.choices?.[0] || {};
   const content = choice?.message?.content;
@@ -218,8 +239,6 @@ export async function generateNoteAiDraft(
     payload = {
       model,
       stream: false,
-      temperature: 0.2,
-      top_p: 0.9,
       max_tokens: 1600,
       response_format: { type: "json_object" },
       messages: [
@@ -227,6 +246,16 @@ export async function generateNoteAiDraft(
         { role: "user", content: userPrompt },
       ],
     };
+    if (provider === "packycode") {
+      if (runtimeConfig?.enableThinking !== false) {
+        payload.reasoning = {
+          effort: sanitizeReasoningEffort(runtimeConfig?.thinkingEffort, "medium"),
+        };
+      }
+    } else {
+      payload.temperature = 0.2;
+      payload.top_p = 0.9;
+    }
   }
 
   const upstream = await sendProviderRequestWithRetry({

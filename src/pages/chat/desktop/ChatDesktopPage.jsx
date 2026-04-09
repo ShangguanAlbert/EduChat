@@ -71,6 +71,7 @@ import {
   fetchChatBootstrap,
   getAuthTokenHeader,
   prepareChatAttachments,
+  stageChatPreviewAttachments,
   reportChatClientDebug,
   saveChatSessionMessages,
   saveChatState,
@@ -294,6 +295,8 @@ function createDocumentPreviewDescriptor(item) {
 
   const name = readUploadItemName(item) || "文档";
   const mimeType = readUploadItemMimeType(item);
+  const previewUrl = String(item?.url || item?.fileUrl || "").trim();
+  const previewOssKey = String(item?.ossKey || "").trim();
   return {
     key: [
       "composer",
@@ -302,6 +305,8 @@ function createDocumentPreviewDescriptor(item) {
       Number(file.size || 0),
       Number(file.lastModified || 0),
       mimeType,
+      previewOssKey,
+      previewUrl,
     ].join("::"),
     source: "composer",
     kind,
@@ -309,6 +314,8 @@ function createDocumentPreviewDescriptor(item) {
     file,
     mimeType,
     size: Number(file.size || 0),
+    previewUrl,
+    previewOssKey,
   };
 }
 
@@ -816,6 +823,11 @@ function mergeAttachmentsWithUploadedLinks(attachments, rawLinks) {
 
   const nextLinks = [...links];
   return list.map((attachment) => {
+    const existingUrl = String(attachment?.url || attachment?.fileUrl || "").trim();
+    const existingOssKey = String(attachment?.ossKey || "").trim();
+    if (existingUrl || existingOssKey) {
+      return attachment;
+    }
     const normalizedName = String(attachment?.name || "").trim();
     const normalizedType = String(attachment?.type || "")
       .trim()
@@ -840,6 +852,22 @@ function mergeAttachmentsWithUploadedLinks(attachments, rawLinks) {
       ossKey: matched.ossKey || attachment?.ossKey || "",
     };
   });
+}
+
+function buildStagedPreviewItem(file, ref = {}) {
+  return {
+    kind: "staged_ref",
+    file,
+    name: String(file?.name || ref?.fileName || ""),
+    size: Number(ref?.size || file?.size || 0),
+    type: String(ref?.mimeType || file?.type || ""),
+    mimeType: String(ref?.mimeType || file?.type || ""),
+    url: String(ref?.url || "").trim(),
+    ossKey: String(ref?.ossKey || "").trim(),
+    stagedToken: String(ref?.token || "").trim(),
+    thumbnailUrl: "",
+    previewStage: "ready",
+  };
 }
 
 function getSmartContextDefaultEnabled(agentId) {
@@ -2935,6 +2963,53 @@ export default function ChatDesktopPage() {
     return mime.includes("pdf") || ext === "pdf";
   }
 
+  function isPreviewableUploadFile(file) {
+    return !!classifyUploadPreviewKind(file);
+  }
+
+  async function buildPreviewAwareLocalItems(indexedItems) {
+    const safeIndexedItems = Array.isArray(indexedItems)
+      ? indexedItems.filter(Boolean)
+      : [];
+    const previewableCandidates = safeIndexedItems.filter((item) =>
+      isPreviewableUploadFile(item.file),
+    );
+    const plainLocalCandidates = safeIndexedItems.filter(
+      (item) => !isPreviewableUploadFile(item.file),
+    );
+    const localItems = await Promise.all(
+      plainLocalCandidates.map(async (item) => ({
+        index: item.index,
+        kind: "local",
+        file: item.file,
+        name: String(item.file?.name || ""),
+        size: Number(item.file?.size || 0),
+        type: String(item.file?.type || ""),
+        thumbnailUrl: await buildImageThumbnailDataUrl(item.file),
+      })),
+    );
+    const stagedPreviewItems = [];
+    if (previewableCandidates.length > 0) {
+      const stagedResult = await stageChatPreviewAttachments({
+        files: previewableCandidates.map((item) => item.file),
+        sessionId: activeId,
+      });
+      const stagedRefs = Array.isArray(stagedResult?.files)
+        ? stagedResult.files
+        : [];
+      if (stagedRefs.length !== previewableCandidates.length) {
+        throw new Error("文档预览暂存结果异常，请重新上传。");
+      }
+      stagedRefs.forEach((ref, idx) => {
+        stagedPreviewItems.push({
+          index: previewableCandidates[idx].index,
+          ...buildStagedPreviewItem(previewableCandidates[idx].file, ref),
+        });
+      });
+    }
+    return [...localItems, ...stagedPreviewItems];
+  }
+
   function shouldUseAliyunPdfPreprocess(runtimeConfig, currentAgent) {
     const provider = resolveAgentProvider(
       currentAgent,
@@ -2964,18 +3039,8 @@ export default function ChatDesktopPage() {
         isPdf: isPdfUploadFile(file),
       }));
       const pdfCandidates = indexedPicked.filter((item) => item.isPdf);
-      const localItems = await Promise.all(
-        indexedPicked
-          .filter((item) => !item.isPdf)
-          .map(async (item) => ({
-            index: item.index,
-            kind: "local",
-            file: item.file,
-            name: String(item.file?.name || ""),
-            size: Number(item.file?.size || 0),
-            type: String(item.file?.type || ""),
-            thumbnailUrl: await buildImageThumbnailDataUrl(item.file),
-          })),
+      const localItems = await buildPreviewAwareLocalItems(
+        indexedPicked.filter((item) => !item.isPdf),
       );
 
       if (pdfCandidates.length > 0) {
@@ -3031,16 +3096,19 @@ export default function ChatDesktopPage() {
     }
 
     if (!shouldUseVolcengineFilesApi(runtimeConfig)) {
-      return Promise.all(
-        safePicked.map(async (file) => ({
-          kind: "local",
-          file,
-          name: String(file?.name || ""),
-          size: Number(file?.size || 0),
-          type: String(file?.type || ""),
-          thumbnailUrl: await buildImageThumbnailDataUrl(file),
-        })),
-      );
+      const indexedPicked = safePicked.map((file, index) => ({
+        index,
+        file,
+      }));
+      const localItems = await buildPreviewAwareLocalItems(indexedPicked);
+
+      return localItems
+        .sort((a, b) => a.index - b.index)
+        .map((item) => {
+          const nextItem = { ...item };
+          delete nextItem.index;
+          return nextItem;
+        });
     }
 
     const indexedPicked = safePicked.map((file, index) => ({
@@ -3050,17 +3118,7 @@ export default function ChatDesktopPage() {
     }));
     const remoteCandidates = indexedPicked.filter((item) => !!item.inputType);
     const localCandidates = indexedPicked.filter((item) => !item.inputType);
-    const localItems = await Promise.all(
-      localCandidates.map(async (item) => ({
-        index: item.index,
-        kind: "local",
-        file: item.file,
-        name: String(item.file?.name || ""),
-        size: Number(item.file?.size || 0),
-        type: String(item.file?.type || ""),
-        thumbnailUrl: await buildImageThumbnailDataUrl(item.file),
-      })),
-    );
+    const localItems = await buildPreviewAwareLocalItems(localCandidates);
 
     if (remoteCandidates.length === 0) {
       return localItems.sort((a, b) => a.index - b.index);
@@ -3125,6 +3183,7 @@ export default function ChatDesktopPage() {
     const localFiles = [];
     const volcengineFileRefs = [];
     const preparedAttachmentRefs = [];
+    const stagedAttachmentRefs = [];
     const attachments = fileItems.map((item) => {
       if (item?.kind === "prepared_ref") {
         const preparedToken = String(item?.preparedToken || "").trim();
@@ -3135,6 +3194,27 @@ export default function ChatDesktopPage() {
             mimeType: String(item?.mimeType || item?.type || ""),
             size: Number(item?.size || 0),
           });
+        }
+        return {
+          name: String(item?.name || "文件"),
+          size: Number(item?.size || 0),
+          type: String(item?.mimeType || item?.type || ""),
+          url: String(item?.url || "").trim(),
+          ossKey: String(item?.ossKey || "").trim(),
+          thumbnailUrl: String(item?.thumbnailUrl || "").trim(),
+        };
+      }
+      if (item?.kind === "staged_ref") {
+        const stagedToken = String(item?.stagedToken || "").trim();
+        if (stagedToken) {
+          stagedAttachmentRefs.push({
+            token: stagedToken,
+            fileName: String(item?.name || ""),
+            mimeType: String(item?.mimeType || item?.type || ""),
+            size: Number(item?.size || 0),
+          });
+        } else if (item?.file instanceof File) {
+          localFiles.push(item.file);
         }
         return {
           name: String(item?.name || "文件"),
@@ -3183,6 +3263,8 @@ export default function ChatDesktopPage() {
           name: rawFile.name,
           size: rawFile.size,
           type: rawFile.type,
+          url: String(item?.url || "").trim(),
+          ossKey: String(item?.ossKey || "").trim(),
           thumbnailUrl: String(item?.thumbnailUrl || "").trim(),
         };
       }
@@ -3289,6 +3371,12 @@ export default function ChatDesktopPage() {
       formData.append(
         "preparedAttachmentRefs",
         JSON.stringify(preparedAttachmentRefs),
+      );
+    }
+    if (stagedAttachmentRefs.length > 0) {
+      formData.append(
+        "stagedAttachmentRefs",
+        JSON.stringify(stagedAttachmentRefs),
       );
     }
     if (selectedContextDocuments.length > 0) {

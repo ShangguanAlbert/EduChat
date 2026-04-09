@@ -249,6 +249,7 @@ export function registerChatAndImageRoutes(app, deps) {
     trimChatPreparedAttachmentCache,
     createChatPreparedAttachmentToken,
     savePreparedAttachmentToCache,
+    saveStagedAttachmentToCache,
     resolvePreparedAttachmentRefsFromCache,
     attachVolcengineFileRefsToLatestUserMessage,
     attachPreparedAttachmentPartsToLatestUserMessage,
@@ -468,6 +469,7 @@ export function registerChatAndImageRoutes(app, deps) {
     readRequestMessages,
     readRequestVolcengineFileRefs,
     readRequestPreparedAttachmentRefs,
+    readRequestStagedAttachmentRefs,
     defaultChatState,
     readChatStateShape,
     readTeacherScopedChatStateRaw,
@@ -1189,6 +1191,9 @@ export function registerChatAndImageRoutes(app, deps) {
       const preparedAttachmentRefs = readRequestPreparedAttachmentRefs(
         req.body?.preparedAttachmentRefs,
       );
+      const stagedAttachmentRefs = readRequestStagedAttachmentRefs(
+        req.body?.stagedAttachmentRefs,
+      );
 
       await streamAgentResponse({
         res,
@@ -1197,10 +1202,14 @@ export function registerChatAndImageRoutes(app, deps) {
         files,
         volcengineFileRefs,
         preparedAttachmentRefs,
+        stagedAttachmentRefs,
         runtimeConfig,
         chatUserId: adminUserId,
         sessionId,
-        attachUploadedFiles: files.length > 0 || preparedAttachmentRefs.length > 0,
+        attachUploadedFiles:
+          files.length > 0 ||
+          preparedAttachmentRefs.length > 0 ||
+          stagedAttachmentRefs.length > 0,
       });
     },
   );
@@ -1221,16 +1230,23 @@ export function registerChatAndImageRoutes(app, deps) {
       const preparedAttachmentRefs = readRequestPreparedAttachmentRefs(
         req.body?.preparedAttachmentRefs,
       );
+      const stagedAttachmentRefs = readRequestStagedAttachmentRefs(
+        req.body?.stagedAttachmentRefs,
+      );
       await streamAgentEResponse({
         res,
         messages,
         files,
         volcengineFileRefs,
         preparedAttachmentRefs,
+        stagedAttachmentRefs,
         runtimeOverride,
         chatUserId: adminUserId,
         sessionId,
-        attachUploadedFiles: files.length > 0 || preparedAttachmentRefs.length > 0,
+        attachUploadedFiles:
+          files.length > 0 ||
+          preparedAttachmentRefs.length > 0 ||
+          stagedAttachmentRefs.length > 0,
       });
     },
   );
@@ -1777,6 +1793,106 @@ export function registerChatAndImageRoutes(app, deps) {
   );
 
   app.post(
+    "/api/chat/attachments/stage-preview",
+    requireChatAuth,
+    upload.array("files", MAX_FILES),
+    async (req, res) => {
+      if ((await assertPartyAgentPanelRoomAccess(req, res)) === false) return;
+      const files = Array.isArray(req.files) ? req.files.filter(Boolean) : [];
+      if (files.length === 0) {
+        res.json({ ok: true, files: [] });
+        return;
+      }
+      if (!groupChatOssClient) {
+        res.status(500).json({ error: "附件预览需要先备份上传到阿里云 OSS，当前 OSS 未配置。" });
+        return;
+      }
+
+      try {
+        const userId = String(req.authStorageUserId || req.authUser?._id || "");
+        const sessionId = sanitizeId(req.body?.sessionId, "");
+        const uploadedToOss = await uploadChatAttachmentsToOss({
+          files,
+          userId,
+          sessionId,
+          source: "chat-preview-stage",
+          stopOnError: true,
+        });
+        if (uploadedToOss.length !== files.length) {
+          throw new Error("附件预览暂存结果不完整，请稍后重试。");
+        }
+
+        const stagedFiles = await Promise.all(
+          files.map(async (file, idx) => {
+            const uploaded = uploadedToOss[idx] || null;
+            const fileName = sanitizeGroupChatFileName(file?.originalname || "document.bin");
+            const ossKey = sanitizeGroupChatOssObjectKey(uploaded?.ossKey);
+            const directUrl = sanitizeGroupChatHttpUrl(uploaded?.fileUrl);
+            const signedUrl = ossKey
+              ? await buildGroupChatFileSignedDownloadUrl({
+                  ossKey,
+                  fileName,
+                })
+              : "";
+            const token = saveStagedAttachmentToCache({
+              userId,
+              sessionId,
+              fileName,
+              mimeType: sanitizeGroupChatFileMimeType(file?.mimetype),
+              size: sanitizeRuntimeInteger(
+                file?.size,
+                file?.buffer?.length,
+                0,
+                GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+              ),
+              ossFiles: [
+                {
+                  fileName,
+                  mimeType: sanitizeGroupChatFileMimeType(file?.mimetype),
+                  size: sanitizeRuntimeInteger(
+                    file?.size,
+                    file?.buffer?.length,
+                    0,
+                    GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+                  ),
+                  source: "chat-preview-stage",
+                  ossKey,
+                  fileUrl: directUrl,
+                },
+              ],
+            });
+            if (!token) {
+              throw new Error("附件预览暂存 token 生成失败，请稍后重试。");
+            }
+            return {
+              token,
+              fileName,
+              mimeType: sanitizeGroupChatFileMimeType(file?.mimetype),
+              size: sanitizeRuntimeInteger(
+                file?.size,
+                file?.buffer?.length,
+                0,
+                GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+              ),
+              ossKey,
+              url: sanitizeGroupChatHttpUrl(signedUrl || directUrl),
+            };
+          }),
+        );
+
+        res.json({
+          ok: true,
+          files: stagedFiles,
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "附件预览暂存失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
+  app.post(
     "/api/chat/attachments/prepare",
     requireChatAuth,
     upload.array("files", MAX_FILES),
@@ -1937,6 +2053,9 @@ export function registerChatAndImageRoutes(app, deps) {
       const preparedAttachmentRefs = readRequestPreparedAttachmentRefs(
         req.body?.preparedAttachmentRefs,
       );
+      const stagedAttachmentRefs = readRequestStagedAttachmentRefs(
+        req.body?.stagedAttachmentRefs,
+      );
       const selectedContextFiles = sanitizeSelectedContextFiles(
         req.body?.selectedContextFiles,
       );
@@ -1980,6 +2099,7 @@ export function registerChatAndImageRoutes(app, deps) {
         attachUploadedFiles: true,
         volcengineFileRefs,
         preparedAttachmentRefs,
+        stagedAttachmentRefs,
       });
     },
   );
@@ -2005,6 +2125,9 @@ export function registerChatAndImageRoutes(app, deps) {
       );
       const preparedAttachmentRefs = readRequestPreparedAttachmentRefs(
         req.body?.preparedAttachmentRefs,
+      );
+      const stagedAttachmentRefs = readRequestStagedAttachmentRefs(
+        req.body?.stagedAttachmentRefs,
       );
       const selectedContextFiles = sanitizeSelectedContextFiles(
         req.body?.selectedContextFiles,
@@ -2048,6 +2171,7 @@ export function registerChatAndImageRoutes(app, deps) {
         attachUploadedFiles: true,
         volcengineFileRefs,
         preparedAttachmentRefs,
+        stagedAttachmentRefs,
       });
     },
   );

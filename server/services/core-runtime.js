@@ -84,6 +84,7 @@ const groupChatWsMetaBySocket = new Map();
 const groupChatWsOnlineCountsByRoom = new Map();
 const userOnlinePresenceByUserId = new Map();
 const chatPreparedAttachmentCache = new Map();
+const chatStagedAttachmentCache = new Map();
 let groupChatExpiredFileCleanupTimer = null;
 let generatedImageExpiredCleanupTimer = null;
 const port = process.env.PORT || 8787;
@@ -2137,8 +2138,31 @@ function resolveUploadedContextOssFileForInputFile(file, ossFiles = []) {
   const fallbackSize = Number(file?.size || 0);
   const fallbackMime = sanitizeGroupChatFileMimeType(file?.mimetype || "");
 
-  return (
-    safeList.find((item) => {
+  const matchedIndex = safeList.findIndex((item) => {
+    const sameName =
+      sanitizeGroupChatFileName(item?.fileName) === fallbackName && !!fallbackName;
+    const sameSize =
+      Number(item?.size || 0) === fallbackSize && Number.isFinite(fallbackSize);
+    const sameMime =
+      sanitizeGroupChatFileMimeType(item?.mimeType || "") === fallbackMime &&
+      !!fallbackMime;
+    return sameName || (sameSize && sameMime);
+  });
+  if (matchedIndex < 0) return null;
+  return safeList[matchedIndex] || null;
+}
+
+function splitMultipartFilesByExistingOss(files, ossFiles = []) {
+  const safeFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  let remainingOssFiles = normalizeUploadedFileContextOssFiles(ossFiles);
+  const matchedOssFiles = [];
+  const pendingFiles = [];
+
+  safeFiles.forEach((file) => {
+    const fallbackName = sanitizeGroupChatFileName(file?.originalname);
+    const fallbackSize = Number(file?.size || 0);
+    const fallbackMime = sanitizeGroupChatFileMimeType(file?.mimetype || "");
+    const matchedIndex = remainingOssFiles.findIndex((item) => {
       const sameName =
         sanitizeGroupChatFileName(item?.fileName) === fallbackName &&
         !!fallbackName;
@@ -2149,8 +2173,21 @@ function resolveUploadedContextOssFileForInputFile(file, ossFiles = []) {
         sanitizeGroupChatFileMimeType(item?.mimeType || "") === fallbackMime &&
         !!fallbackMime;
       return sameName || (sameSize && sameMime);
-    }) || null
-  );
+    });
+    if (matchedIndex < 0) {
+      pendingFiles.push(file);
+      return;
+    }
+    const matched = remainingOssFiles[matchedIndex];
+    if (matched) matchedOssFiles.push(matched);
+    remainingOssFiles.splice(matchedIndex, 1);
+  });
+
+  return {
+    matchedOssFiles,
+    pendingFiles,
+    remainingOssFiles,
+  };
 }
 
 function dedupeUploadedFileContextOssFiles(value) {
@@ -2202,6 +2239,134 @@ async function buildUploadedAttachmentLinksForClient(ossFiles = []) {
     });
   }
   return links;
+}
+
+async function readBinaryContentAsBuffer(value) {
+  if (Buffer.isBuffer(value)) return value;
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  if (value instanceof ArrayBuffer) return Buffer.from(value);
+  if (typeof Blob !== "undefined" && value instanceof Blob) {
+    return Buffer.from(await value.arrayBuffer());
+  }
+  if (value && typeof value.arrayBuffer === "function") {
+    return Buffer.from(await value.arrayBuffer());
+  }
+  if (typeof value === "string") return Buffer.from(value);
+  return Buffer.alloc(0);
+}
+
+async function downloadUploadedContextOssFileBuffer(
+  ossFile,
+  { fallbackFileName = "" } = {},
+) {
+  const normalizedOssFile =
+    normalizeUploadedFileContextOssFiles([ossFile])[0] || null;
+  if (!normalizedOssFile) return Buffer.alloc(0);
+
+  const ossKey = sanitizeGroupChatOssObjectKey(normalizedOssFile?.ossKey);
+  const safeFileName = sanitizeGroupChatFileName(
+    normalizedOssFile?.fileName || fallbackFileName,
+  );
+
+  if (ossKey && groupChatOssClient) {
+    try {
+      const result = await callGroupChatOssWithTimeoutFallback(
+        `get(${ossKey})`,
+        async (client) => client.get(ossKey),
+        async (client) => client.get(ossKey),
+      );
+      const buffer = await readBinaryContentAsBuffer(
+        result?.content ?? result?.data ?? result?.res?.data ?? null,
+      );
+      if (buffer.length > 0) return buffer;
+    } catch (error) {
+      console.warn(
+        `[chat-file-storage] 从 OSS 读取暂存附件失败（${ossKey}）：`,
+        error?.message || error,
+      );
+    }
+  }
+
+  const fallbackUrl =
+    (await resolveAliyunDashScopeAttachmentUrl({
+      ossFile: normalizedOssFile,
+      fallbackFileName: safeFileName,
+    })) || sanitizeGroupChatHttpUrl(normalizedOssFile?.fileUrl);
+  if (!fallbackUrl || typeof fetch !== "function") {
+    return Buffer.alloc(0);
+  }
+
+  try {
+    const response = await fetch(fallbackUrl);
+    if (!response.ok) {
+      console.warn(
+        `[chat-file-storage] 拉取暂存附件直链失败（${response.status}）：${safeFileName || fallbackUrl}`,
+      );
+      return Buffer.alloc(0);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    console.warn(
+      `[chat-file-storage] 拉取暂存附件直链异常（${safeFileName || fallbackUrl}）：`,
+      error?.message || error,
+    );
+    return Buffer.alloc(0);
+  }
+}
+
+async function materializeStagedAttachmentEntriesAsMultipartFiles(entries = []) {
+  const safeEntries = Array.isArray(entries) ? entries.filter(Boolean) : [];
+  const files = [];
+  const ossFiles = [];
+  const missing = [];
+
+  for (const entry of safeEntries) {
+    const primaryOssFile =
+      normalizeUploadedFileContextOssFiles(entry?.ossFiles)[0] || null;
+    const fileName = sanitizeGroupChatFileName(
+      entry?.fileName || primaryOssFile?.fileName || "document.bin",
+    );
+    const mimeType = sanitizeGroupChatFileMimeType(
+      entry?.mimeType ||
+        primaryOssFile?.mimeType ||
+        "application/octet-stream",
+    );
+    if (!primaryOssFile) {
+      missing.push(entry);
+      continue;
+    }
+
+    const buffer = await downloadUploadedContextOssFileBuffer(primaryOssFile, {
+      fallbackFileName: fileName,
+    });
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+      missing.push(entry);
+      continue;
+    }
+
+    const size = sanitizeRuntimeInteger(
+      entry?.size || primaryOssFile?.size || buffer.length,
+      buffer.length,
+      0,
+      GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+    );
+    files.push({
+      fieldname: "files",
+      originalname: fileName,
+      encoding: "7bit",
+      mimetype: mimeType,
+      size,
+      buffer,
+    });
+    ossFiles.push({
+      ...primaryOssFile,
+      fileName,
+      mimeType,
+      size,
+    });
+  }
+
+  return { files, ossFiles, missing };
 }
 
 function createDefaultSessionNotes() {
@@ -3163,6 +3328,31 @@ function sanitizePreparedAttachmentRefsPayload(input) {
   return list;
 }
 
+function sanitizeStagedAttachmentRefsPayload(input) {
+  const source = Array.isArray(input) ? input : [];
+  const dedup = new Set();
+  const list = [];
+  source.slice(0, CHAT_PREPARED_ATTACHMENT_MAX_REFS).forEach((item) => {
+    const token = sanitizePreparedAttachmentToken(
+      item?.token || item?.stagedToken,
+    );
+    if (!token || dedup.has(token)) return;
+    dedup.add(token);
+    list.push({
+      token,
+      fileName: sanitizeGroupChatFileName(item?.fileName || item?.name),
+      mimeType: sanitizeGroupChatFileMimeType(item?.mimeType || item?.type),
+      size: sanitizeRuntimeInteger(
+        item?.size,
+        0,
+        0,
+        GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+      ),
+    });
+  });
+  return list;
+}
+
 function sanitizePreparedAttachmentTokens(
   input,
   maxCount = CHAT_PREPARED_ATTACHMENT_MAX_REFS,
@@ -3195,6 +3385,17 @@ function pruneExpiredChatPreparedAttachmentCache(now = Date.now()) {
   }
 }
 
+function pruneExpiredChatStagedAttachmentCache(now = Date.now()) {
+  const safeNow = Number.isFinite(now) ? now : Date.now();
+  if (chatStagedAttachmentCache.size === 0) return;
+
+  for (const [token, entry] of chatStagedAttachmentCache.entries()) {
+    const expireAtMs = Number(entry?.expireAtMs) || 0;
+    if (expireAtMs > safeNow) continue;
+    chatStagedAttachmentCache.delete(token);
+  }
+}
+
 function trimChatPreparedAttachmentCache(
   maxItems = CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS,
 ) {
@@ -3216,6 +3417,30 @@ function trimChatPreparedAttachmentCache(
     const token = sorted[idx]?.[0];
     if (!token) continue;
     chatPreparedAttachmentCache.delete(token);
+  }
+}
+
+function trimChatStagedAttachmentCache(
+  maxItems = CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS,
+) {
+  const safeLimit = Math.max(
+    40,
+    Number(maxItems) || CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS,
+  );
+  if (chatStagedAttachmentCache.size <= safeLimit) return;
+
+  const sorted = Array.from(chatStagedAttachmentCache.entries()).sort(
+    (a, b) => {
+      const aCreated = Number(a?.[1]?.createdAtMs) || 0;
+      const bCreated = Number(b?.[1]?.createdAtMs) || 0;
+      return aCreated - bCreated;
+    },
+  );
+  const removeCount = Math.max(0, sorted.length - safeLimit);
+  for (let idx = 0; idx < removeCount; idx += 1) {
+    const token = sorted[idx]?.[0];
+    if (!token) continue;
+    chatStagedAttachmentCache.delete(token);
   }
 }
 
@@ -3284,6 +3509,55 @@ function savePreparedAttachmentToCache({
     expireAtMs,
   });
   trimChatPreparedAttachmentCache();
+  return token;
+}
+
+function saveStagedAttachmentToCache({
+  userId = "",
+  sessionId = "",
+  fileName = "",
+  mimeType = "application/octet-stream",
+  size = 0,
+  ossFiles = [],
+}) {
+  const safeUserId = sanitizeId(userId, "");
+  if (!safeUserId) return "";
+
+  const safeOssFiles = normalizeUploadedFileContextOssFiles(ossFiles);
+  if (safeOssFiles.length === 0) return "";
+
+  pruneExpiredChatStagedAttachmentCache();
+  trimChatStagedAttachmentCache();
+
+  let token = createChatPreparedAttachmentToken();
+  for (
+    let attempt = 0;
+    attempt < 3 && (!token || chatStagedAttachmentCache.has(token));
+    attempt += 1
+  ) {
+    token = createChatPreparedAttachmentToken();
+  }
+  if (!token || chatStagedAttachmentCache.has(token)) return "";
+
+  const now = Date.now();
+  const expireAtMs = now + CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS;
+  chatStagedAttachmentCache.set(token, {
+    token,
+    userId: safeUserId,
+    sessionId: sanitizeId(sessionId, ""),
+    fileName: sanitizeGroupChatFileName(fileName),
+    mimeType: sanitizeGroupChatFileMimeType(mimeType),
+    size: sanitizeRuntimeInteger(
+      size,
+      0,
+      0,
+      GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+    ),
+    ossFiles: safeOssFiles,
+    createdAtMs: now,
+    expireAtMs,
+  });
+  trimChatStagedAttachmentCache();
   return token;
 }
 
@@ -3364,6 +3638,65 @@ function resolvePreparedAttachmentRefsFromCache({
       parts: normalizedParts,
       extra:
         cached.extra && typeof cached.extra === "object" ? cached.extra : {},
+    });
+  });
+
+  return { entries, missing, mismatched };
+}
+
+function resolveStagedAttachmentRefsFromCache({
+  refs = [],
+  userId = "",
+  sessionId = "",
+}) {
+  const safeRefs = sanitizeStagedAttachmentRefsPayload(refs);
+  if (safeRefs.length === 0) {
+    return { entries: [], missing: [], mismatched: [] };
+  }
+
+  const safeUserId = sanitizeId(userId, "");
+  const safeSessionId = sanitizeId(sessionId, "");
+  pruneExpiredChatStagedAttachmentCache();
+
+  const entries = [];
+  const missing = [];
+  const mismatched = [];
+  safeRefs.forEach((ref) => {
+    const token = sanitizePreparedAttachmentToken(ref?.token);
+    if (!token) return;
+    const cached = chatStagedAttachmentCache.get(token);
+    if (!cached) {
+      missing.push(ref);
+      return;
+    }
+
+    if (sanitizeId(cached.userId, "") !== safeUserId) {
+      mismatched.push(ref);
+      return;
+    }
+    const cachedSessionId = sanitizeId(cached.sessionId, "");
+    if (safeSessionId && cachedSessionId && cachedSessionId !== safeSessionId) {
+      mismatched.push(ref);
+      return;
+    }
+
+    const safeOssFiles = normalizeUploadedFileContextOssFiles(cached.ossFiles);
+    if (safeOssFiles.length === 0) {
+      missing.push(ref);
+      return;
+    }
+
+    entries.push({
+      token,
+      fileName: sanitizeGroupChatFileName(cached.fileName || ref?.fileName),
+      mimeType: sanitizeGroupChatFileMimeType(cached.mimeType || ref?.mimeType),
+      size: sanitizeRuntimeInteger(
+        cached.size,
+        ref?.size,
+        0,
+        GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+      ),
+      ossFiles: safeOssFiles,
     });
   });
 
@@ -4405,6 +4738,7 @@ async function streamAgentEResponse({
   files = [],
   volcengineFileRefs = [],
   preparedAttachmentRefs = [],
+  stagedAttachmentRefs = [],
   runtimeOverride = null,
   chatUserId = "",
   chatStorageUserId = "",
@@ -4449,6 +4783,7 @@ async function streamAgentEResponse({
     files,
     volcengineFileRefs,
     preparedAttachmentRefs,
+    stagedAttachmentRefs,
     runtimeConfig: runtime,
     systemPromptOverride: composedSystemPrompt,
     providerOverride: effectiveProvider,
@@ -4480,6 +4815,7 @@ async function streamAgentResponse({
   files = [],
   volcengineFileRefs = [],
   preparedAttachmentRefs = [],
+  stagedAttachmentRefs = [],
   runtimeConfig = null,
   systemPromptOverride = "",
   providerOverride = "",
@@ -4582,11 +4918,15 @@ async function streamAgentResponse({
     : null;
 
   let safeMessages = normalizeMessages(messages);
-  let filesForLocalAttach = Array.isArray(files) ? files.filter(Boolean) : [];
+  const originalLocalFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  let filesForLocalAttach = [...originalLocalFiles];
   let effectiveVolcengineFileRefs =
     sanitizeVolcengineFileRefsPayload(volcengineFileRefs);
   const effectivePreparedAttachmentRefs = sanitizePreparedAttachmentRefsPayload(
     preparedAttachmentRefs,
+  );
+  const effectiveStagedAttachmentRefs = sanitizeStagedAttachmentRefsPayload(
+    stagedAttachmentRefs,
   );
   const preparedAttachmentResolution =
     attachUploadedFiles && effectivePreparedAttachmentRefs.length > 0
@@ -4604,6 +4944,19 @@ async function streamAgentResponse({
   )
     ? preparedAttachmentResolution.entries
     : [];
+  const stagedAttachmentResolution =
+    attachUploadedFiles && effectiveStagedAttachmentRefs.length > 0
+      ? resolveStagedAttachmentRefsFromCache({
+          refs: effectiveStagedAttachmentRefs,
+          userId: storageUserId,
+          sessionId,
+        })
+      : { entries: [], missing: [], mismatched: [] };
+  const stagedAttachmentEntries = Array.isArray(
+    stagedAttachmentResolution?.entries,
+  )
+    ? stagedAttachmentResolution.entries
+    : [];
   if (
     attachUploadedFiles &&
     effectivePreparedAttachmentRefs.length > 0 &&
@@ -4617,6 +4970,44 @@ async function streamAgentResponse({
   }
   const hasPreparedAttachmentEntries = preparedAttachmentEntries.length > 0;
   if (
+    attachUploadedFiles &&
+    effectiveStagedAttachmentRefs.length > 0 &&
+    (stagedAttachmentResolution.missing.length > 0 ||
+      stagedAttachmentResolution.mismatched.length > 0)
+  ) {
+    res.status(400).json({
+      error: "附件暂存结果已失效或与当前会话不匹配，请重新添加后再发送。",
+    });
+    return;
+  }
+  const hasStagedAttachmentEntries = stagedAttachmentEntries.length > 0;
+  let stagedAttachmentOssFiles = stagedAttachmentEntries.flatMap((entry) =>
+    normalizeUploadedFileContextOssFiles(entry?.ossFiles),
+  );
+  if (attachUploadedFiles && hasStagedAttachmentEntries) {
+    const restoredStagedAttachments =
+      await materializeStagedAttachmentEntriesAsMultipartFiles(
+        stagedAttachmentEntries,
+      );
+    if (
+      restoredStagedAttachments.missing.length > 0 ||
+      restoredStagedAttachments.files.length !== stagedAttachmentEntries.length
+    ) {
+      res.status(400).json({
+        error: "附件暂存内容不可用，请重新添加后再发送。",
+      });
+      return;
+    }
+    filesForLocalAttach = [
+      ...filesForLocalAttach,
+      ...restoredStagedAttachments.files,
+    ];
+    stagedAttachmentOssFiles = [
+      ...stagedAttachmentOssFiles,
+      ...restoredStagedAttachments.ossFiles,
+    ];
+  }
+  if (
     provider === "volcengine" &&
     protocol !== "responses" &&
     attachUploadedFiles &&
@@ -4628,9 +5019,9 @@ async function streamAgentResponse({
     });
     return;
   }
-  const hasLocalFileUpload =
-    attachUploadedFiles && filesForLocalAttach.length > 0;
-  if (hasLocalFileUpload && !groupChatOssClient) {
+  const hasNewLocalFileUpload =
+    attachUploadedFiles && originalLocalFiles.length > 0;
+  if (hasNewLocalFileUpload && !groupChatOssClient) {
     res.status(500).json({
       error: "文件附件需要先备份上传到阿里云 OSS，当前 OSS 未配置。",
     });
@@ -4776,6 +5167,12 @@ async function streamAgentResponse({
       ? normalizeMessages(requestMessages)
       : [];
   let uploadedAttachmentOssFilesForMeta = [];
+  if (stagedAttachmentOssFiles.length > 0) {
+    uploadedAttachmentOssFilesForMeta = dedupeUploadedFileContextOssFiles([
+      ...uploadedAttachmentOssFilesForMeta,
+      ...stagedAttachmentOssFiles,
+    ]);
+  }
 
   if (
     attachUploadedFiles &&
@@ -4796,17 +5193,28 @@ async function streamAgentResponse({
         strictSupportedTypes: false,
       });
       filesForLocalAttach = uploadedBundle.fallbackFiles;
-      const uploadedToOss = await uploadChatAttachmentsToOss({
-        files: uploadedBundle.uploadedFiles,
-        userId: storageUserId,
-        sessionId,
-        source: "stream-volcengine-files-api",
-        stopOnError: false,
-      });
-      if (uploadedToOss.length > 0) {
+      const existingOssSplit = splitMultipartFilesByExistingOss(
+        uploadedBundle.uploadedFiles,
+        stagedAttachmentOssFiles,
+      );
+      const uploadedToOss =
+        existingOssSplit.pendingFiles.length > 0
+          ? await uploadChatAttachmentsToOss({
+              files: existingOssSplit.pendingFiles,
+              userId: storageUserId,
+              sessionId,
+              source: "stream-volcengine-files-api",
+              stopOnError: false,
+            })
+          : [];
+      const combinedUploadedOss = [
+        ...existingOssSplit.matchedOssFiles,
+        ...uploadedToOss,
+      ];
+      if (combinedUploadedOss.length > 0) {
         uploadedAttachmentOssFilesForMeta = dedupeUploadedFileContextOssFiles([
           ...uploadedAttachmentOssFilesForMeta,
-          ...uploadedToOss,
+          ...combinedUploadedOss,
         ]);
       }
       effectiveVolcengineFileRefs = sanitizeVolcengineFileRefsPayload([
@@ -4821,20 +5229,31 @@ async function streamAgentResponse({
     }
   }
 
-  let uploadedContextOssFiles = [];
+  let uploadedContextOssFiles = [...stagedAttachmentOssFiles];
   if (
     attachUploadedFiles &&
     filesForLocalAttach.length > 0 &&
     groupChatOssClient
   ) {
     try {
-      uploadedContextOssFiles = await uploadChatAttachmentsToOss({
-        files: filesForLocalAttach,
-        userId: storageUserId,
-        sessionId,
-        source: `${provider}-${protocol}-local`,
-        stopOnError: true,
-      });
+      const existingOssSplit = splitMultipartFilesByExistingOss(
+        filesForLocalAttach,
+        stagedAttachmentOssFiles,
+      );
+      const uploadedFreshOssFiles =
+        existingOssSplit.pendingFiles.length > 0
+          ? await uploadChatAttachmentsToOss({
+              files: existingOssSplit.pendingFiles,
+              userId: storageUserId,
+              sessionId,
+              source: `${provider}-${protocol}-local`,
+              stopOnError: true,
+            })
+          : [];
+      uploadedContextOssFiles = [
+        ...existingOssSplit.matchedOssFiles,
+        ...uploadedFreshOssFiles,
+      ];
     } catch (error) {
       res.status(500).json({
         error: error?.message || "附件上传到 OSS 失败，请稍后重试。",
@@ -12178,6 +12597,13 @@ function readRequestPreparedAttachmentRefs(raw) {
     : [];
 }
 
+function readRequestStagedAttachmentRefs(raw) {
+  const parsed = readJsonLikeField(raw, []);
+  return Array.isArray(parsed)
+    ? sanitizeStagedAttachmentRefsPayload(parsed)
+    : [];
+}
+
 function defaultChatState() {
   return {
     activeId: "s1",
@@ -17114,6 +17540,7 @@ export {
   groupChatWsOnlineCountsByRoom,
   userOnlinePresenceByUserId,
   chatPreparedAttachmentCache,
+  chatStagedAttachmentCache,
   groupChatExpiredFileCleanupTimer,
   generatedImageExpiredCleanupTimer,
   port,
@@ -17286,6 +17713,7 @@ export {
   sanitizeUploadedFileContextOssSource,
   normalizeUploadedFileContextOssFiles,
   resolveUploadedContextOssFileForInputFile,
+  splitMultipartFilesByExistingOss,
   dedupeUploadedFileContextOssFiles,
   buildUploadedAttachmentLinksForClient,
   saveUploadedFileContext,
@@ -17296,12 +17724,17 @@ export {
   rehydrateUploadedFileContexts,
   sanitizeVolcengineFileRefsPayload,
   sanitizePreparedAttachmentRefsPayload,
+  sanitizeStagedAttachmentRefsPayload,
   sanitizePreparedAttachmentTokens,
   pruneExpiredChatPreparedAttachmentCache,
+  pruneExpiredChatStagedAttachmentCache,
   trimChatPreparedAttachmentCache,
+  trimChatStagedAttachmentCache,
   createChatPreparedAttachmentToken,
   savePreparedAttachmentToCache,
+  saveStagedAttachmentToCache,
   resolvePreparedAttachmentRefsFromCache,
+  resolveStagedAttachmentRefsFromCache,
   attachVolcengineFileRefsToLatestUserMessage,
   attachPreparedAttachmentPartsToLatestUserMessage,
   attachFilesToLatestUserMessage,
@@ -17538,6 +17971,7 @@ export {
   readRequestMessages,
   readRequestVolcengineFileRefs,
   readRequestPreparedAttachmentRefs,
+  readRequestStagedAttachmentRefs,
   defaultChatState,
   readChatStateShape,
   readTeacherScopedChatStateRaw,
