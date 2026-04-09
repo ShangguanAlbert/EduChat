@@ -1,11 +1,11 @@
+import { resolveWebSocketUrl } from "../../app/basePath.js";
+
 const PARTY_WS_PATH = "/ws/group-chat";
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 16000;
 
 function resolvePartySocketUrl() {
-  if (typeof window === "undefined") return "";
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}${PARTY_WS_PATH}`;
+  return resolveWebSocketUrl(PARTY_WS_PATH);
 }
 
 function sanitizeRoomId(value) {

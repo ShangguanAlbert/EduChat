@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { getUserToken, withAuthSlot } from "../../../app/authStorage.js";
+import { stripAppBasePath } from "../../../app/basePath.js";
 import {
   clearImageGenerationHistory,
   deleteImageGenerationHistoryItem,
@@ -154,7 +155,7 @@ function formatHistoryTime(value) {
 function normalizePreviewUrl(value) {
   const text = String(value || "").trim();
   if (!text) return "";
-  if (/^\/api\/images\/history\/[a-z0-9]{6,64}\/content(?:\?.*)?$/i.test(text)) {
+  if (/^\/api\/images\/history\/[a-z0-9]{6,64}\/content(?:\?.*)?$/i.test(stripAppBasePath(text))) {
     return text;
   }
   if (/^https?:\/\//i.test(text)) return text;
@@ -172,7 +173,11 @@ function appendAuthTokenToHistoryImageUrl(value, token) {
   const text = String(value || "").trim();
   const safeToken = String(token || "").trim();
   if (!text || !safeToken) return text;
-  if (!/^\/api\/images\/history\/[a-z0-9]{6,64}\/content(?:\?.*)?$/i.test(text)) {
+  if (
+    !/^\/api\/images\/history\/[a-z0-9]{6,64}\/content(?:\?.*)?$/i.test(
+      stripAppBasePath(text),
+    )
+  ) {
     return text;
   }
   if (typeof window === "undefined") return text;
@@ -246,7 +251,9 @@ function buildPreviewDedupeKey(item) {
   if (!rawUrl) {
     return fallbackKey ? `key:${fallbackKey}` : "";
   }
-  const historyMatch = rawUrl.match(/\/api\/images\/history\/([a-z0-9]{6,64})\/content/i);
+  const historyMatch = stripAppBasePath(rawUrl).match(
+    /\/api\/images\/history\/([a-z0-9]{6,64})\/content/i,
+  );
   if (historyMatch?.[1]) {
     return `history:${String(historyMatch[1]).toLowerCase()}`;
   }

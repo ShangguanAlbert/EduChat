@@ -7,6 +7,8 @@ RUN npm ci
 
 FROM node:20-bookworm-slim AS build
 WORKDIR /app
+ARG EDUCHAT_BASE_PATH=/
+ENV EDUCHAT_BASE_PATH=${EDUCHAT_BASE_PATH}
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build && npm prune --omit=dev
@@ -15,6 +17,8 @@ RUN npm run build && npm prune --omit=dev
 FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+ARG EDUCHAT_BASE_PATH=/
+ENV EDUCHAT_BASE_PATH=${EDUCHAT_BASE_PATH}
 
 # 换源 + 安装，必须在同一个 RUN 层
 RUN sed -i \

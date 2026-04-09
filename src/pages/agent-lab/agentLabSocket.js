@@ -1,11 +1,11 @@
+import { resolveWebSocketUrl } from "../../app/basePath.js";
+
 const AGENT_LAB_WS_PATH = "/ws/agent-lab";
 const RECONNECT_BASE_DELAY_MS = 1000;
 const RECONNECT_MAX_DELAY_MS = 16000;
 
 function resolveSocketUrl() {
-  if (typeof window === "undefined") return "";
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}${AGENT_LAB_WS_PATH}`;
+  return resolveWebSocketUrl(AGENT_LAB_WS_PATH);
 }
 
 function sanitizeRoomId(value) {

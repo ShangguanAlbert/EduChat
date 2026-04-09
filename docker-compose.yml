@@ -26,6 +26,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        EDUCHAT_BASE_PATH: ${EDUCHAT_BASE_PATH:-/}
     image: educhat-app:latest
     container_name: educhat-app
     restart: unless-stopped
@@ -37,6 +39,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 8787
+      EDUCHAT_BASE_PATH: ${EDUCHAT_BASE_PATH:-/}
       MONGO_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME:-admin}:${MONGO_INITDB_ROOT_PASSWORD:-change_me}@mongo:27017/${MONGO_DB_NAME:-educhat}?authSource=admin
     ports:
       - "3080:8787"

@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { createAppContext } from "./app/createAppContext.js";
 import { createStartupTasks } from "./app/startup-tasks.js";
+import { resolveConfiguredBasePath, stripBasePath } from "./config/base-path.js";
 import { registerAuthUserClassroomRoutes } from "./routes/auth-user-classroom.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerChatAndImageRoutes } from "./routes/chat-and-images.js";
@@ -16,10 +17,21 @@ import { createAgentLabRealtimeHub } from "./runtime/agent-lab-realtime-hub.js";
 
 const app = express();
 const AGENT_LAB_WS_PATH = "/ws/agent-lab";
+const APP_BASE_PATH = resolveConfiguredBasePath();
 const deps = createAppContext();
 const startupTasks = createStartupTasks(deps);
 const groupChatRealtimeHub = createGroupChatRealtimeHub(deps);
 const agentLabRealtimeHub = createAgentLabRealtimeHub(deps);
+
+if (APP_BASE_PATH !== "/") {
+  app.use((req, _res, next) => {
+    const rewrittenUrl = stripBasePath(req.url || "/", APP_BASE_PATH);
+    if (rewrittenUrl !== (req.url || "/")) {
+      req.url = rewrittenUrl;
+    }
+    next();
+  });
+}
 
 registerAuthUserClassroomRoutes(app, deps);
 registerAdminRoutes(app, deps);
@@ -71,7 +83,10 @@ async function startServer() {
     server.on("upgrade", (request, socket, head) => {
       let pathname = "";
       try {
-        pathname = new URL(request.url || "", "http://localhost").pathname;
+        pathname = stripBasePath(
+          new URL(request.url || "", "http://localhost").pathname,
+          APP_BASE_PATH,
+        );
       } catch {
         pathname = "";
       }
@@ -97,6 +112,7 @@ async function startServer() {
       `Group chat websocket listening on ws://localhost:${deps.port}${deps.GROUP_CHAT_WS_PATH}`,
     );
     console.log(`Agent Lab websocket listening on ws://localhost:${deps.port}/ws/agent-lab`);
+    console.log(`Configured app base path: ${APP_BASE_PATH}`);
   });
 
   void startupTasks.run();

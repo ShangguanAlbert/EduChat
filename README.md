@@ -9,6 +9,7 @@
    - `npm install`
    - `cp .env.example .env`
    - 修改 `.env` 中的 API Key、`AUTH_SECRET`、Mongo 账号密码相关变量
+   - 如需挂在子路径下：配置 `EDUCHAT_BASE_PATH`，例如 `EDUCHAT_BASE_PATH=/hznu/metaxfang/`
    - 如需使用 PackyCode：配置 `PACKYCODE_API_KEY`；可选覆盖 `PACKYCODE_CHAT_ENDPOINT`，默认使用 `https://www.packyapi.com/v1/chat/completions`
    - 如启用文件 OSS 存储：配置 `ALIYUN_OSS_*` 与 `ALIYUN_ACCESS_KEY_*`；公共读桶请设 `ALIYUN_OSS_PUBLIC_READ=true`，私有桶保持 `false`；网络路由建议使用 `ALIYUN_OSS_NETWORK_MODE`：`public`（本地）/`internal_prefer`（ECS 生产）/`internal_only`（严格内网）。`ALIYUN_OSS_INTERNAL` 仍兼容旧配置
    - 默认启用启动自检（Bucket 可达性 + 写删探测），可通过 `ALIYUN_OSS_STARTUP_CHECK_*` 开关调整
@@ -25,6 +26,7 @@
 2. 配置环境变量：
    - `cp .env.example .env`
    - 至少配置一个 provider 的 API Key；若使用 PackyCode，请设置 `PACKYCODE_API_KEY`
+   - 如需本地模拟子路径部署，可额外设置 `EDUCHAT_BASE_PATH=/hznu/metaxfang/`
 3. 启动服务：
    - `npm run dev`
 

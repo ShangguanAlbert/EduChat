@@ -24,6 +24,7 @@ import OSS from "ali-oss";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { WebSocketServer } from "ws";
 import { countTokens, encodeChat } from "gpt-tokenizer";
+import { resolveConfiguredBasePath, withBasePath } from "../config/base-path.js";
 import { SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT } from "../prompts/leakProtectionPrompt.js";
 import { PROMPT_LEAK_PROBE_KEYWORDS } from "../prompts/leakProtectionKeywords.js";
 import {
@@ -31,6 +32,8 @@ import {
   AGENT_E_FIXED_PROVIDER,
   AGENT_E_ID,
 } from "../agent-e/constants.js";
+
+const APP_BASE_PATH = resolveConfiguredBasePath();
 import {
   buildAgentEAdminSettingsResponse,
   createAgentEConfigModel,
@@ -6435,7 +6438,10 @@ function parseGeneratedImageDataUrl(value) {
 function buildGeneratedImageHistoryContentPath(imageId) {
   const safeImageId = sanitizeId(imageId, "");
   if (!safeImageId) return "";
-  return `/api/images/history/${encodeURIComponent(safeImageId)}/content`;
+  return withBasePath(
+    `/api/images/history/${encodeURIComponent(safeImageId)}/content`,
+    APP_BASE_PATH,
+  );
 }
 
 function buildAdminGeneratedImageHistoryContentPath(
@@ -6444,14 +6450,20 @@ function buildAdminGeneratedImageHistoryContentPath(
 ) {
   const safeImageId = sanitizeId(imageId, "");
   if (!safeImageId) return "";
-  const basePath = `/api/auth/admin/images/history/${encodeURIComponent(safeImageId)}/content`;
+  const basePath = withBasePath(
+    `/api/auth/admin/images/history/${encodeURIComponent(safeImageId)}/content`,
+    APP_BASE_PATH,
+  );
   return download ? `${basePath}?download=1` : basePath;
 }
 
 function buildAdminGeneratedImageHistoryThumbnailPath(imageId) {
   const safeImageId = sanitizeId(imageId, "");
   if (!safeImageId) return "";
-  return `/api/auth/admin/images/history/${encodeURIComponent(safeImageId)}/thumbnail`;
+  return withBasePath(
+    `/api/auth/admin/images/history/${encodeURIComponent(safeImageId)}/thumbnail`,
+    APP_BASE_PATH,
+  );
 }
 
 function parseTeacherScopedStorageUserId(storageUserId) {
