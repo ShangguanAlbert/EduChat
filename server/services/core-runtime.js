@@ -7781,8 +7781,14 @@ async function resolveSmartContextRuntime({
   const sameProvider = ref.provider === provider;
   const sameProtocol = ref.protocol === protocol;
   const sameAgent = !ref.agentId || ref.agentId === sanitizeAgent(agentId);
+  const sameModel =
+    !!ref.model && !!normalizedModel && ref.model === normalizedModel;
   const canContinue =
-    safeContextMode === "append" && sameProvider && sameProtocol && sameAgent;
+    safeContextMode === "append" &&
+    sameProvider &&
+    sameProtocol &&
+    sameAgent &&
+    sameModel;
   if (!canContinue) return runtime;
 
   runtime.usePreviousResponseId = true;
