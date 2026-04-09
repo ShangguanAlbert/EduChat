@@ -92,6 +92,7 @@ export default function MessageInput({
   const [preparingFiles, setPreparingFiles] = useState(false);
   const [prepareError, setPrepareError] = useState("");
   const [hasWrappedText, setHasWrappedText] = useState(false);
+  const [hasLatchedMultiline, setHasLatchedMultiline] = useState(false);
   const fileRef = useRef(null);
   const textRef = useRef(null);
 
@@ -108,8 +109,7 @@ export default function MessageInput({
   }, [text, files, hasQuote]);
   const isHomeLayout = layoutMode === "home";
   const hasComposerExtras = hasQuote || files.length > 0 || preparingFiles || !!prepareError;
-  const isComposerExpanded = hasComposerExtras || hasWrappedText;
-  const isComposerCompact = !isComposerExpanded;
+  const isComposerExpanded = hasComposerExtras || hasWrappedText || hasLatchedMultiline;
 
   function submit() {
     if (!canSend || inputDisabled || preparingFiles) return;
@@ -121,6 +121,7 @@ export default function MessageInput({
     setFiles([]);
     setPrepareError("");
     setHasWrappedText(false);
+    setHasLatchedMultiline(false);
     onConsumeQuote?.();
     if (fileRef.current) fileRef.current.value = "";
   }
@@ -147,6 +148,16 @@ export default function MessageInput({
       current === nextHasWrappedText ? current : nextHasWrappedText,
     );
   }, [hasComposerExtras, isHomeLayout]);
+
+  useEffect(() => {
+    if (hasWrappedText) {
+      setHasLatchedMultiline(true);
+      return;
+    }
+    if (!hasText) {
+      setHasLatchedMultiline(false);
+    }
+  }, [hasText, hasWrappedText]);
 
   async function appendPickedFiles(pickedFiles) {
     const picked = Array.isArray(pickedFiles) ? pickedFiles.filter(Boolean) : [];
@@ -204,6 +215,7 @@ export default function MessageInput({
       textarea.parentElement ||
       textarea;
     let frameId = 0;
+    let lastObservedWidth = Math.round(host.getBoundingClientRect().width);
     const scheduleResize = () => {
       if (frameId) window.cancelAnimationFrame(frameId);
       frameId = window.requestAnimationFrame(() => {
@@ -212,7 +224,12 @@ export default function MessageInput({
       });
     };
 
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver((entries) => {
+      const nextWidth = Math.round(
+        entries?.[0]?.contentRect?.width || host.getBoundingClientRect().width,
+      );
+      if (nextWidth === lastObservedWidth) return;
+      lastObservedWidth = nextWidth;
       scheduleResize();
     });
     observer.observe(host);
