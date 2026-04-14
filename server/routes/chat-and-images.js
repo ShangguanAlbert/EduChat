@@ -29,16 +29,6 @@ export function registerChatAndImageRoutes(app, deps) {
     WebSocketServer,
     SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT,
     PROMPT_LEAK_PROBE_KEYWORDS,
-    AGENT_E_CONFIG_KEY,
-    AGENT_E_FIXED_PROVIDER,
-    AGENT_E_ID,
-    buildAgentEAdminSettingsResponse,
-    createAgentEConfigModel,
-    normalizeAgentEConfigDoc,
-    sanitizeAgentEConfigPayload,
-    sanitizeAgentERuntime,
-    selectAgentESkills,
-    buildAgentESystemPrompt,
     buildAliyunChatPayload,
     buildAliyunDashScopePayload,
     buildAliyunHeaders,
@@ -225,7 +215,6 @@ export function registerChatAndImageRoutes(app, deps) {
     AdminClassroomLessonFile,
     classroomHomeworkFileSchema,
     ClassroomHomeworkFile,
-    AgentEConfig,
     getDefaultRuntimeConfigByAgent,
     createDefaultAgentRuntimeConfigMap,
     normalizeMessages,
@@ -279,7 +268,6 @@ export function registerChatAndImageRoutes(app, deps) {
     attachFilesToLatestUserMessageForOpenRouter,
     attachFilesToLatestUserMessageForAliyunDashScope,
     attachFilesToLatestUserMessageByLocalParsing,
-    streamAgentEResponse,
     streamAgentResponse,
     streamSeedreamImageGeneration,
     buildSeedreamImageGenerationRequest,
@@ -393,8 +381,6 @@ export function registerChatAndImageRoutes(app, deps) {
     getResolvedAgentRuntimeConfig,
     getDefaultSystemPrompt,
     readAdminAgentConfig,
-    readAgentEConfig,
-    writeAgentEConfig,
     sanitizeAdminClassroomTaskType,
     sanitizeAdminClassroomTaskPayload,
     sanitizeAdminClassroomCourseFilePayload,
@@ -1210,43 +1196,6 @@ export function registerChatAndImageRoutes(app, deps) {
         preparedAttachmentRefs,
         stagedAttachmentRefs,
         runtimeConfig,
-        chatUserId: adminUserId,
-        sessionId,
-        attachUploadedFiles:
-          files.length > 0 ||
-          preparedAttachmentRefs.length > 0 ||
-          stagedAttachmentRefs.length > 0,
-      });
-    },
-  );
-
-  app.post(
-    "/api/auth/admin/agent-e/debug-stream",
-    requireAdminAuth,
-    upload.array("files", MAX_FILES),
-    async (req, res) => {
-      const sessionId = sanitizeId(req.body?.sessionId, "admin-debug-E");
-      const adminUserId = sanitizeId(req.authAdmin?._id, "admin");
-      const messages = readRequestMessages(req.body?.messages);
-      const files = Array.isArray(req.files) ? req.files : [];
-      const runtimeOverride = readJsonLikeField(req.body?.runtimeOverride, null);
-      const volcengineFileRefs = readRequestVolcengineFileRefs(
-        req.body?.volcengineFileRefs,
-      );
-      const preparedAttachmentRefs = readRequestPreparedAttachmentRefs(
-        req.body?.preparedAttachmentRefs,
-      );
-      const stagedAttachmentRefs = readRequestStagedAttachmentRefs(
-        req.body?.stagedAttachmentRefs,
-      );
-      await streamAgentEResponse({
-        res,
-        messages,
-        files,
-        volcengineFileRefs,
-        preparedAttachmentRefs,
-        stagedAttachmentRefs,
-        runtimeOverride,
         chatUserId: adminUserId,
         sessionId,
         attachUploadedFiles:
@@ -2094,78 +2043,6 @@ export function registerChatAndImageRoutes(app, deps) {
       await streamAgentResponse({
         res,
         agentId,
-        messages,
-        files: req.files || [],
-        chatUserId: String(req.authUser?._id || ""),
-        chatStorageUserId: String(req.authStorageUserId || ""),
-        teacherScopeKey: req.authTeacherScopeKey,
-        sessionId,
-        smartContextEnabled,
-        contextMode,
-        attachUploadedFiles: true,
-        volcengineFileRefs,
-        preparedAttachmentRefs,
-        stagedAttachmentRefs,
-      });
-    },
-  );
-
-  app.post(
-    "/api/chat/stream-e",
-    requireChatAuth,
-    upload.array("files", MAX_FILES),
-    async (req, res) => {
-      if ((await assertPartyAgentPanelRoomAccess(req, res)) === false) return;
-      const teacherScopedLockedAgentId = resolveTeacherScopedLockedAgentId(
-        req.authTeacherScopeKey,
-      );
-      if (teacherScopedLockedAgentId && teacherScopedLockedAgentId !== AGENT_E_ID) {
-        res.status(403).json({ error: "当前授课教师已锁定“远程教育”智能体。" });
-        return;
-      }
-      const sessionId = sanitizeId(req.body?.sessionId, "");
-      const smartContextEnabled = sanitizeRuntimeBoolean(req.body?.smartContextEnabled, false);
-      const contextMode = sanitizeSmartContextMode(req.body?.contextMode);
-      const volcengineFileRefs = readRequestVolcengineFileRefs(
-        req.body?.volcengineFileRefs,
-      );
-      const preparedAttachmentRefs = readRequestPreparedAttachmentRefs(
-        req.body?.preparedAttachmentRefs,
-      );
-      const stagedAttachmentRefs = readRequestStagedAttachmentRefs(
-        req.body?.stagedAttachmentRefs,
-      );
-      const selectedContextFiles = sanitizeSelectedContextFiles(
-        req.body?.selectedContextFiles,
-      );
-      let messages = [];
-      try {
-        messages = JSON.parse(req.body.messages || "[]");
-      } catch {
-        res.status(400).json({ error: "Invalid messages JSON" });
-        return;
-      }
-
-      if (selectedContextFiles.length > 0) {
-        const runtimeConfig = await getResolvedAgentRuntimeConfig(AGENT_E_ID);
-        const provider = getProviderByAgent(AGENT_E_ID, runtimeConfig);
-        const model = getModelByAgent(AGENT_E_ID, runtimeConfig);
-        const protocol = resolveRequestProtocol(
-          runtimeConfig.protocol,
-          provider,
-          model,
-        ).value;
-        await injectSelectedContextFilesIntoMessages(messages, selectedContextFiles, {
-          userId: String(req.authStorageUserId || req.authUser?._id || ""),
-          sessionId,
-          provider,
-          protocol,
-          agentId: AGENT_E_ID,
-        });
-      }
-
-      await streamAgentEResponse({
-        res,
         messages,
         files: req.files || [],
         chatUserId: String(req.authUser?._id || ""),

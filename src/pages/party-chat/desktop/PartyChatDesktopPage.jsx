@@ -71,13 +71,15 @@ const PARTY_AGENT_LOCKED_ID = PARTY_AGENT_DEFAULT_ID;
 const PARTY_AGENT_LOCKED_PROVIDER = "volcengine";
 const PARTY_AGENT_CONTEXT_USER_ROUNDS = 10;
 const PARTY_AGENT_DRAFT_PERSIST_MS = 420;
-const CHAT_AGENT_IDS = Object.freeze(["A", "B", "C", "D", "E"]);
+const CHAT_AGENT_IDS = Object.freeze(["A", "B", "C", "D"]);
+const REMOVED_PARTY_AGENT_E_ID = "E";
+const REMOVED_PARTY_AGENT_E_NOTICE =
+  "该 ChatPage 会话原绑定的 SSCI审稿人已下线，当前不可继续对话。";
 const PARTY_DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   A: "volcengine",
   B: "volcengine",
   C: "volcengine",
   D: "aliyun",
-  E: "openrouter",
 });
 const PARTY_MARKDOWN_FORWARD_PREFIX = "\u2063\u2063\u2063";
 const QUICK_REACTION_EMOJIS = Object.freeze(["👍", "👏", "🎉", "😄", "🤝"]);
@@ -355,6 +357,7 @@ export default function PartyChatDesktopPage({
     linkedChatSessionId,
     teacherLockedAgentId,
   ]);
+  const linkedChatUsesRemovedAgent = isRemovedPartyAgentId(linkedChatAgentId);
   const linkedChatSmartContextEnabled = useMemo(() => {
     if (teacherScopedAgentLocked) return true;
     return readPartyAgentSmartContextEnabledBySessionAgent(
@@ -428,7 +431,11 @@ export default function PartyChatDesktopPage({
   const partyAgentMemberEnabled = activeRoom?.partyAgentMemberEnabled !== false;
   const partyAgentAccessBlocked = !!activeRoom && !canManageActiveRoom && !partyAgentMemberEnabled;
   const partyAgentInputDisabled =
-    !linkedChatSessionId || partyAgentStreaming || !!chatBootstrapError || partyAgentAccessBlocked;
+    !linkedChatSessionId ||
+    partyAgentStreaming ||
+    !!chatBootstrapError ||
+    partyAgentAccessBlocked ||
+    linkedChatUsesRemovedAgent;
   const bannerMessage = actionError || messagesError || bootstrapError || chatBootstrapError;
   const activeReadStateMap = useMemo(() => {
     const map = new Map();
@@ -450,7 +457,8 @@ export default function PartyChatDesktopPage({
     [selectedForwardMessageIds],
   );
   const selectedForwardCount = selectedForwardMessageIds.length;
-  const canForwardToPartyAgent = !!linkedChatSessionId && !partyAgentAccessBlocked;
+  const canForwardToPartyAgent =
+    !!linkedChatSessionId && !partyAgentAccessBlocked && !linkedChatUsesRemovedAgent;
   const showSidebar = isMobileSidebarDrawer ? isSidebarDrawerOpen : isSidebarExpanded;
   const toggleSidebarPanel = useCallback(() => {
     if (isMobileSidebarDrawer) {
@@ -618,6 +626,10 @@ export default function PartyChatDesktopPage({
   const onSendAgentPanelMessage = useCallback(
     async (text, files = []) => {
       if (partyAgentAccessBlocked) return;
+      if (linkedChatUsesRemovedAgent) {
+        setPartyAgentError(REMOVED_PARTY_AGENT_E_NOTICE);
+        return;
+      }
       const sessionId = sanitizePartyAgentSessionId(linkedChatSessionId);
       if (!sessionId || partyAgentStreaming) return;
 
@@ -694,7 +706,7 @@ export default function PartyChatDesktopPage({
       agentStreamControllersRef.current.set(sessionId, controller);
 
       const formData = new FormData();
-      const streamEndpoint = linkedChatAgentId === "E" ? "/api/chat/stream-e" : "/api/chat/stream";
+      const streamEndpoint = "/api/chat/stream";
       formData.append("agentId", linkedChatAgentId);
       formData.append("temperature", String(PARTY_AGENT_PANEL_TEMPERATURE));
       formData.append("topP", String(PARTY_AGENT_PANEL_TOP_P));
@@ -849,6 +861,7 @@ export default function PartyChatDesktopPage({
       clearPartyAgentDraft,
       activeRoomId,
       linkedChatAgentId,
+      linkedChatUsesRemovedAgent,
       linkedChatMessages,
       linkedChatSessionId,
       effectiveLinkedChatSmartContextEnabled,
@@ -933,6 +946,10 @@ export default function PartyChatDesktopPage({
   const onPartyAgentRegenerate = useCallback(
     async (assistantMessageId, promptMessageId) => {
       if (partyAgentAccessBlocked) return;
+      if (linkedChatUsesRemovedAgent) {
+        setPartyAgentError(REMOVED_PARTY_AGENT_E_NOTICE);
+        return;
+      }
       const sessionId = sanitizePartyAgentSessionId(linkedChatSessionId);
       const safeAssistantMessageId = String(assistantMessageId || "").trim();
       const safePromptMessageId = String(promptMessageId || "").trim();
@@ -995,7 +1012,7 @@ export default function PartyChatDesktopPage({
       agentStreamControllersRef.current.set(sessionId, controller);
 
       const formData = new FormData();
-      const streamEndpoint = linkedChatAgentId === "E" ? "/api/chat/stream-e" : "/api/chat/stream";
+      const streamEndpoint = "/api/chat/stream";
       formData.append("agentId", linkedChatAgentId);
       formData.append("temperature", String(PARTY_AGENT_PANEL_TEMPERATURE));
       formData.append("topP", String(PARTY_AGENT_PANEL_TOP_P));
@@ -1125,6 +1142,7 @@ export default function PartyChatDesktopPage({
       activeRoomId,
       finalizePartyAgentDraft,
       linkedChatAgentId,
+      linkedChatUsesRemovedAgent,
       linkedChatSessionId,
       effectiveLinkedChatSmartContextEnabled,
       patchPartyAgentDraft,
@@ -1161,6 +1179,17 @@ export default function PartyChatDesktopPage({
     partyAgentAccessBlocked,
     selectedForwardMessageIds.length,
   ]);
+
+  useEffect(() => {
+    if (!linkedChatUsesRemovedAgent) return;
+    const sessionId = sanitizePartyAgentSessionId(linkedChatSessionId);
+    if (sessionId) {
+      const controller = agentStreamControllersRef.current.get(sessionId);
+      controller?.abort();
+    }
+    setPartyAgentSelectedAskText("");
+    setPartyAgentError(REMOVED_PARTY_AGENT_E_NOTICE);
+  }, [linkedChatSessionId, linkedChatUsesRemovedAgent]);
 
   const resizeComposeTextarea = useCallback(() => {
     const textarea = composeTextareaRef.current;
@@ -4070,15 +4099,25 @@ export default function PartyChatDesktopPage({
                 messages={linkedChatMessages}
                 isStreaming={partyAgentStreaming}
                 onAssistantFeedback={onPartyAgentFeedback}
-                onAssistantRegenerate={partyAgentAccessBlocked ? null : onPartyAgentRegenerate}
-                onAssistantForward={partyAgentAccessBlocked ? null : onPartyAgentForwardToRoom}
-                onAskSelection={partyAgentAccessBlocked ? null : onPartyAgentAskSelection}
-                showAssistantActions={!partyAgentAccessBlocked}
+                onAssistantRegenerate={
+                  partyAgentAccessBlocked || linkedChatUsesRemovedAgent ? null : onPartyAgentRegenerate
+                }
+                onAssistantForward={
+                  partyAgentAccessBlocked || linkedChatUsesRemovedAgent ? null : onPartyAgentForwardToRoom
+                }
+                onAskSelection={
+                  partyAgentAccessBlocked || linkedChatUsesRemovedAgent ? null : onPartyAgentAskSelection
+                }
+                showAssistantActions={!partyAgentAccessBlocked && !linkedChatUsesRemovedAgent}
                 disableAssistantCopy
               />
               {partyAgentAccessBlocked ? (
                 <div className="party-agent-access-note" role="status">
                   {PARTY_AGENT_ACCESS_BLOCKED_MESSAGE}
+                </div>
+              ) : linkedChatUsesRemovedAgent ? (
+                <div className="party-agent-access-note" role="status">
+                  {REMOVED_PARTY_AGENT_E_NOTICE}
                 </div>
               ) : null}
               <MessageInput
@@ -5186,6 +5225,18 @@ function sanitizePartyAgentId(value, fallback = PARTY_AGENT_DEFAULT_ID) {
   return CHAT_AGENT_IDS.includes(safeFallback) ? safeFallback : PARTY_AGENT_DEFAULT_ID;
 }
 
+function sanitizeStoredPartyAgentId(value) {
+  const id = String(value || "")
+    .trim()
+    .toUpperCase();
+  if (CHAT_AGENT_IDS.includes(id) || id === REMOVED_PARTY_AGENT_E_ID) return id;
+  return "";
+}
+
+function isRemovedPartyAgentId(value) {
+  return sanitizeStoredPartyAgentId(value) === REMOVED_PARTY_AGENT_E_ID;
+}
+
 function sanitizePartyProvider(value, fallback = "openrouter") {
   const key = String(value || "")
     .trim()
@@ -5226,7 +5277,6 @@ function sanitizePartyAgentProviderDefaults(raw) {
     B: sanitizePartyProvider(source.B, PARTY_DEFAULT_AGENT_PROVIDER_MAP.B),
     C: sanitizePartyProvider(source.C, PARTY_DEFAULT_AGENT_PROVIDER_MAP.C),
     D: sanitizePartyProvider(source.D, PARTY_DEFAULT_AGENT_PROVIDER_MAP.D),
-    E: sanitizePartyProvider(source.E, PARTY_DEFAULT_AGENT_PROVIDER_MAP.E),
   };
   next[PARTY_AGENT_LOCKED_ID] = PARTY_AGENT_LOCKED_PROVIDER;
   return next;
@@ -5257,7 +5307,9 @@ function sanitizePartyAgentBySessionMap(raw, fallback = PARTY_AGENT_DEFAULT_ID) 
     .forEach(([rawSessionId, rawAgentId]) => {
       const sessionId = sanitizePartyAgentSessionId(rawSessionId);
       if (!sessionId) return;
-      normalized[sessionId] = sanitizePartyAgentId(rawAgentId, fallback);
+      normalized[sessionId] =
+        sanitizeStoredPartyAgentId(rawAgentId) ||
+        sanitizePartyAgentId(fallback, PARTY_AGENT_DEFAULT_ID);
     });
   return normalized;
 }
@@ -5267,24 +5319,8 @@ function readPartyAgentBySession(map, sessionId, fallback = PARTY_AGENT_DEFAULT_
   const safeFallback = sanitizePartyAgentId(fallback, PARTY_AGENT_DEFAULT_ID);
   if (!safeSessionId) return safeFallback;
   const source = sanitizePartyAgentBySessionMap(map, safeFallback);
-  return sanitizePartyAgentId(source[safeSessionId], safeFallback);
-}
-
-function patchPartyAgentBySession(
-  map,
-  sessionId,
-  agentId,
-  fallback = PARTY_AGENT_DEFAULT_ID,
-) {
-  const source = sanitizePartyAgentBySessionMap(map, fallback);
-  const safeSessionId = sanitizePartyAgentSessionId(sessionId);
-  const safeAgentId = sanitizePartyAgentId(agentId, fallback);
-  if (!safeSessionId || !safeAgentId) return source;
-  if (source[safeSessionId] === safeAgentId) return source;
-  return {
-    ...source,
-    [safeSessionId]: safeAgentId,
-  };
+  const savedAgent = sanitizeStoredPartyAgentId(source[safeSessionId]);
+  return savedAgent || safeFallback;
 }
 
 function lockPartyAgentBySessionMap(

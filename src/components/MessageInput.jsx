@@ -93,12 +93,15 @@ export default function MessageInput({
   const [prepareError, setPrepareError] = useState("");
   const [hasWrappedText, setHasWrappedText] = useState(false);
   const [hasLatchedMultiline, setHasLatchedMultiline] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
   const fileRef = useRef(null);
   const textRef = useRef(null);
+  const dragDepthRef = useRef(0);
 
   const normalizedQuoteText = useMemo(() => normalizeQuoteText(quoteText), [quoteText]);
   const hasQuote = normalizedQuoteText.length > 0;
   const inputDisabled = disabled || isStreaming;
+  const placeholderText = isStreaming ? "正在回答，请稍后" : "有问题，尽管问";
   const hasText = text.length > 0;
   const quotePreviewText = useMemo(
     () => buildQuotePreviewText(normalizedQuoteText, quotePreviewMaxChars),
@@ -164,14 +167,20 @@ export default function MessageInput({
     if (!picked.length) return;
     setPrepareError("");
 
+    const dedupedPicked = dedupeIncomingFiles(picked, files);
+    if (!dedupedPicked.length) {
+      setPrepareError("这些文件已添加，无需重复上传。");
+      return;
+    }
+
     if (typeof onPrepareFiles !== "function") {
-      setFiles((prev) => [...prev, ...picked]);
+      setFiles((prev) => [...prev, ...dedupedPicked]);
       return;
     }
 
     setPreparingFiles(true);
     try {
-      const prepared = await onPrepareFiles(picked);
+      const prepared = await onPrepareFiles(dedupedPicked);
       const next = Array.isArray(prepared) ? prepared.filter(Boolean) : [];
       if (next.length > 0) {
         setFiles((prev) => [...prev, ...next]);
@@ -199,6 +208,53 @@ export default function MessageInput({
     if (imageFiles.length === 0) return;
     e.preventDefault();
     await appendPickedFiles(imageFiles);
+  }
+
+  function hasFileDrag(event) {
+    const types = Array.from(event?.dataTransfer?.types || []);
+    return types.includes("Files");
+  }
+
+  function resetDragState() {
+    dragDepthRef.current = 0;
+    setIsDragOver(false);
+  }
+
+  function onComposerDragEnter(event) {
+    if (inputDisabled || preparingFiles) return;
+    if (!hasFileDrag(event)) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDragOver(true);
+  }
+
+  function onComposerDragOver(event) {
+    if (inputDisabled || preparingFiles) return;
+    if (!hasFileDrag(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    if (!isDragOver) {
+      setIsDragOver(true);
+    }
+  }
+
+  function onComposerDragLeave(event) {
+    if (!hasFileDrag(event)) return;
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragOver(false);
+    }
+  }
+
+  async function onComposerDrop(event) {
+    if (!hasFileDrag(event)) return;
+    event.preventDefault();
+    resetDragState();
+    if (inputDisabled || preparingFiles) return;
+    const droppedFiles = Array.from(event.dataTransfer?.files || []).filter(Boolean);
+    if (droppedFiles.length === 0) return;
+    await appendPickedFiles(droppedFiles);
   }
 
   function removeFile(idx) {
@@ -283,8 +339,18 @@ export default function MessageInput({
         isHomeLayout ? " is-home-layout" : ""
       }${hasQuote ? " has-quote" : ""}${
         isComposerExpanded ? " is-expanded" : " is-compact"
+      }${isDragOver ? " is-drag-over" : ""
       }`}
+      onDragEnter={onComposerDragEnter}
+      onDragOver={onComposerDragOver}
+      onDragLeave={onComposerDragLeave}
+      onDrop={onComposerDrop}
     >
+      {isDragOver && (
+        <div className="composer-drop-hint" aria-hidden="true">
+          松开以上传文件
+        </div>
+      )}
       {hasQuote && (
         <div className="composer-quote">
           <span className="composer-quote-text" title={normalizedQuoteText}>
@@ -381,7 +447,7 @@ export default function MessageInput({
         <textarea
           ref={textRef}
           className="composer-text"
-          placeholder="有问题，尽管问"
+          placeholder={placeholderText}
           value={text}
           disabled={inputDisabled}
           onChange={(e) => setText(e.target.value)}
@@ -446,6 +512,33 @@ function isImageAttachment(item) {
   const inputType = String(item?.inputType || "").trim().toLowerCase();
   if (inputType === "input_image") return true;
   return readAttachmentMimeType(item).startsWith("image/");
+}
+
+function buildFileFingerprint(item) {
+  const file = readAttachmentFile(item);
+  const source = file || item;
+  const name = String(source?.name || source?.filename || "").trim().toLowerCase();
+  const size = Number(source?.size || 0);
+  const lastModified = Number(file?.lastModified || source?.lastModified || 0);
+  if (!name && !size && !lastModified) return "";
+  return `${name}::${size}::${lastModified}`;
+}
+
+function dedupeIncomingFiles(incomingFiles, existingFiles = []) {
+  const existingFingerprints = new Set(
+    (Array.isArray(existingFiles) ? existingFiles : [])
+      .map((item) => buildFileFingerprint(item))
+      .filter(Boolean),
+  );
+  const seenIncoming = new Set();
+  return (Array.isArray(incomingFiles) ? incomingFiles : []).filter((item) => {
+    const fingerprint = buildFileFingerprint(item);
+    if (!fingerprint) return true;
+    if (existingFingerprints.has(fingerprint)) return false;
+    if (seenIncoming.has(fingerprint)) return false;
+    seenIncoming.add(fingerprint);
+    return true;
+  });
 }
 
 function buildFinalPrompt(text, quoteText) {

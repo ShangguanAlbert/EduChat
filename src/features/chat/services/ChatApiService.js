@@ -9,9 +9,8 @@ import {
 import { readErrorMessage, readSseStream } from "../../../pages/chat/chatHelpers.js";
 
 export function buildChatStreamEndpoint(agentId) {
-  return String(agentId || "").trim().toUpperCase() === "E"
-    ? "/api/chat/stream-e"
-    : "/api/chat/stream";
+  void agentId;
+  return "/api/chat/stream";
 }
 
 export function createChatStreamFormData({

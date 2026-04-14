@@ -3,38 +3,22 @@ import { createPortal } from "react-dom";
 import {
   ArrowLeft,
   CircleAlert,
-  Download,
   Info,
   Save,
-  ShieldAlert,
-  Trash2,
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import MessageInput from "../components/MessageInput.jsx";
 import MessageList from "../components/MessageList.jsx";
 import PortalSelect from "../components/PortalSelect.jsx";
 import {
-  deleteAllUserChats,
-  exportAdminChatsTxt,
-  exportAdminChatsZip,
-  exportAdminUsersTxt,
   fetchAdminAgentSettings,
   prepareAdminDebugAttachments,
   uploadAdminVolcengineDebugFiles,
   saveAdminAgentSettings,
   streamAdminAgentDebug,
 } from "./admin/adminApi.js";
-import {
-  fetchAdminAgentESettings,
-  saveAdminAgentESettings,
-} from "./admin/agentEApi.js";
 import { clearAdminToken, getAdminToken } from "./login/adminSession.js";
 import { resolveActiveAuthSlot, withAuthSlot } from "../app/authStorage.js";
-import {
-  DEFAULT_TEACHER_SCOPE_KEY,
-  TEACHER_SCOPE_OPTIONS,
-  getTeacherScopeLabel,
-} from "../../shared/teacherScopes.js";
 import {
   AGENT_IDS,
   ALIYUN_MINIMAX_FIXED_TOP_P,
@@ -52,7 +36,6 @@ import {
   sanitizeRuntimeConfigMap,
   sanitizeSingleRuntimeConfig,
 } from "./chat/agentRuntimeConfig.js";
-import { AGENT_META, DEFAULT_SYSTEM_PROMPT } from "./chat/constants.js";
 import "../styles/chat.css";
 import "../styles/admin-settings.css";
 
@@ -60,8 +43,8 @@ const AUTO_SAVE_MS = 5 * 60 * 1000;
 const PROVIDER_OPTIONS = [
   { value: "openrouter", label: "OpenRouter" },
   { value: "packycode", label: "PackyCode" },
-  { value: "volcengine", label: "火山引擎 Ark" },
-  { value: "aliyun", label: "阿里云 DashScope" },
+  { value: "volcengine", label: "Volcengine Ark" },
+  { value: "aliyun", label: "Aliyun DashScope" },
 ];
 const KNOWN_PROVIDERS = new Set([
   "openrouter",
@@ -71,17 +54,8 @@ const KNOWN_PROVIDERS = new Set([
 ]);
 const AGENT_A_FIXED_PROVIDER = "packycode";
 const AGENT_A_FIXED_MODEL = "gpt-5.4";
-const AGENT_E_FIXED_MAX_OUTPUT_TOKENS = 131072;
 const AGENT_C_FIXED_MODEL = "doubao-seed-2-0-pro-260215";
 const AGENT_A_LOCKED_RUNTIME_FIELDS = new Set(["provider", "model"]);
-const AGENT_E_LOCKED_RUNTIME_FIELDS = new Set([
-  "provider",
-  "model",
-  "protocol",
-  "temperature",
-  "topP",
-  "maxOutputTokens",
-]);
 const AGENT_D_LOCKED_RUNTIME_FIELDS = new Set([
   "provider",
   "model",
@@ -96,36 +70,36 @@ const AGENT_C_LOCKED_RUNTIME_FIELDS = new Set([
   "thinkingEffort",
 ]);
 const OPENROUTER_PDF_ENGINE_OPTIONS = [
-  { value: "auto", label: "自动（默认）" },
-  { value: "pdf-text", label: "pdf-text（免费）" },
-  { value: "mistral-ocr", label: "mistral-ocr（OCR）" },
-  { value: "native", label: "native（模型原生）" },
+  { value: "auto", label: "Auto (default)" },
+  { value: "pdf-text", label: "pdf-text (free)" },
+  { value: "mistral-ocr", label: "mistral-ocr (OCR)" },
+  { value: "native", label: "native (model-native)" },
 ];
 const ALIYUN_PROTOCOL_OPTIONS = [
-  { value: "chat", label: "聊天接口" },
-  { value: "responses", label: "回应接口" },
-  { value: "dashscope", label: "DashScope 原生接口" },
+  { value: "chat", label: "Chat API" },
+  { value: "responses", label: "Responses API" },
+  { value: "dashscope", label: "DashScope native API" },
 ];
 const ALIYUN_FILE_PROCESS_MODE_OPTIONS = [
-  { value: "local_parse", label: "本地解析（兼容模式）" },
-  { value: "native_oss_url", label: "原生文件 URL（调试模式）" },
+  { value: "local_parse", label: "Local parse (compatibility)" },
+  { value: "native_oss_url", label: "Native file URL (debug)" },
 ];
 const ALIYUN_SEARCH_STRATEGY_OPTIONS = [
-  { value: "turbo", label: "极速（默认）" },
-  { value: "max", label: "高召回" },
-  { value: "agent", label: "多轮检索" },
-  { value: "agent_max", label: "多轮检索（含网页抓取）" },
+  { value: "turbo", label: "Turbo (default)" },
+  { value: "max", label: "Maximum recall" },
+  { value: "agent", label: "Multi-step retrieval" },
+  { value: "agent_max", label: "Multi-step + web crawl" },
 ];
 const ALIYUN_SEARCH_CITATION_FORMAT_OPTIONS = [
   { value: "[<number>]", label: "[1]" },
-  { value: "[ref_<number>]", label: "[参考1]" },
+  { value: "[ref_<number>]", label: "[ref 1]" },
 ];
 const ALIYUN_SEARCH_FRESHNESS_OPTIONS = [
-  { value: 0, label: "不限时效（默认）" },
-  { value: 7, label: "最近 7 天" },
-  { value: 30, label: "最近 30 天" },
-  { value: 180, label: "最近 180 天" },
-  { value: 365, label: "最近 365 天" },
+  { value: 0, label: "Any time (default)" },
+  { value: 7, label: "Last 7 days" },
+  { value: 30, label: "Last 30 days" },
+  { value: 180, label: "Last 180 days" },
+  { value: 365, label: "Last 365 days" },
 ];
 const DEBUG_VIDEO_EXTENSIONS = new Set(["mp4", "avi", "mov"]);
 const DEBUG_IMAGE_EXTENSIONS = new Set([
@@ -207,11 +181,31 @@ const VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES = [
   },
 ];
 const VOLCENGINE_WEB_SEARCH_SOURCE_OPTIONS = [
-  { key: "webSearchSourceDouyin", value: "douyin", label: "抖音百科（douyin）" },
-  { key: "webSearchSourceMoji", value: "moji", label: "墨迹天气（moji）" },
-  { key: "webSearchSourceToutiao", value: "toutiao", label: "头条图文（toutiao）" },
+  { key: "webSearchSourceDouyin", value: "douyin", label: "Douyin encyclopedia (douyin)" },
+  { key: "webSearchSourceMoji", value: "moji", label: "Moji weather (moji)" },
+  { key: "webSearchSourceToutiao", value: "toutiao", label: "Toutiao articles (toutiao)" },
 ];
-const ADMIN_AGENT_IDS = [...AGENT_IDS, "E"];
+const ADMIN_AGENT_META = Object.freeze({
+  A: {
+    label: "Agent A",
+    summary: "Locked to the PackyCode route for a stable flagship setup.",
+  },
+  B: {
+    label: "Agent B",
+    summary: "The most flexible sandbox for provider and model experimentation.",
+  },
+  C: {
+    label: "Remote Learning",
+    summary: "A search-heavy Volcengine profile tuned for remote education flows.",
+  },
+  D: {
+    label: "Qwen 3.5",
+    summary: "An Aliyun-native profile with provider-specific controls and search policies.",
+  },
+});
+const PROVIDER_LABEL_MAP = new Map(
+  PROVIDER_OPTIONS.map((item) => [item.value, item.label]),
+);
 
 function createDefaultAgentProviderMap() {
   return {
@@ -335,30 +329,44 @@ function formatClock(isoText) {
   if (!isoText) return "";
   const date = new Date(isoText);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString("zh-CN", { hour12: false });
-}
-
-function downloadTxt(filename, content) {
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  downloadBlob(filename, blob);
-}
-
-function downloadBlob(filename, blob) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
+  return date.toLocaleTimeString("en-GB", { hour12: false });
 }
 
 function readErrorMessage(error) {
-  return error?.message || "请求失败，请稍后再试。";
+  return error?.message || "Request failed. Please try again.";
 }
 
 function shouldRelogin(error) {
   const msg = String(error?.message || "");
-  return msg.includes("管理员身份无效") || msg.includes("仅管理员可访问");
+  return (
+    msg.includes("管理员身份无效") ||
+    msg.includes("仅管理员可访问") ||
+    msg.toLowerCase().includes("admin session is invalid") ||
+    msg.toLowerCase().includes("admin only")
+  );
+}
+
+function formatToggleState(enabled) {
+  return enabled ? "On" : "Off";
+}
+
+function getAdminAgentLabel(agentId) {
+  return ADMIN_AGENT_META[agentId]?.label || `Agent ${agentId}`;
+}
+
+function getProviderLabel(provider) {
+  return PROVIDER_LABEL_MAP.get(provider) || provider || "Provider default";
+}
+
+function getAliyunPolicyMessage(policy) {
+  switch (policy?.key) {
+    case "glm_blocked":
+      return "GLM models are disabled on the Aliyun route. Please switch to another model.";
+    case "kimi_blocked":
+      return "Aliyun currently supports only `kimi-k2.5` for Kimi. Please switch models.";
+    default:
+      return String(policy?.errorMessage || "").trim();
+  }
 }
 
 function resolveVolcengineWebSearchCapability(model) {
@@ -630,7 +638,7 @@ function NumberRuntimeInput({
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => adjustByStep(-1)}
         disabled={disabled}
-        aria-label="减少数值"
+        aria-label="Decrease value"
       >
         <StepIcon type="minus" />
       </button>
@@ -660,7 +668,7 @@ function NumberRuntimeInput({
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => adjustByStep(1)}
         disabled={disabled}
-        aria-label="增加数值"
+        aria-label="Increase value"
       >
         <StepIcon type="plus" />
       </button>
@@ -672,16 +680,13 @@ export default function AdminSettingsPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const activeSlot = resolveActiveAuthSlot(location.search);
-  const menuRef = useRef(null);
   const draftRef = useRef({
     prompts: { A: "", B: "", C: "", D: "" },
     runtimeConfigs: createDefaultAgentRuntimeConfigMap(),
-    agentEConfig: null,
   });
   const dirtyRef = useRef(false);
 
   const [adminToken, setAdminToken] = useState(() => getAdminToken());
-  const [defaultSystemPrompt, setDefaultSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
   const [prompts, setPrompts] = useState({ A: "", B: "", C: "", D: "" });
   const [runtimeConfigs, setRuntimeConfigs] = useState(
     createDefaultAgentRuntimeConfigMap(),
@@ -693,8 +698,6 @@ export default function AdminSettingsPage() {
     createDefaultAgentModelMap(),
   );
   const [selectedAgent, setSelectedAgent] = useState("A");
-  const [agentEConfig, setAgentEConfig] = useState(null);
-  const [agentEAvailableSkills, setAgentEAvailableSkills] = useState([]);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -702,17 +705,6 @@ export default function AdminSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [lastSavedAt, setLastSavedAt] = useState("");
-
-  const [showExportMenu, setShowExportMenu] = useState(false);
-  const [exportLoading, setExportLoading] = useState("");
-  const [exportError, setExportError] = useState("");
-
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleteLoading, setDeleteLoading] = useState(false);
-  const [deleteNotice, setDeleteNotice] = useState("");
-  const [selectedTeacherScopeKey, setSelectedTeacherScopeKey] = useState(
-    DEFAULT_TEACHER_SCOPE_KEY,
-  );
 
   const [debugByAgent, setDebugByAgent] = useState(createEmptyDebugState);
   const [debugLoading, setDebugLoading] = useState(false);
@@ -727,22 +719,11 @@ export default function AdminSettingsPage() {
     selectedRuntime.provider === "inherit"
       ? selectedProviderDefault
       : selectedRuntime.provider;
-  const selectedProviderName =
-    selectedProvider === "volcengine"
-      ? "火山引擎 Ark"
-      : selectedProvider === "packycode"
-        ? "PackyCode"
-      : selectedProvider === "aliyun"
-        ? "阿里云 DashScope"
-        : "OpenRouter";
   const showVolcenginePanel = selectedProvider === "volcengine";
   const showOpenRouterPanel = selectedProvider === "openrouter";
   const showAliyunPanel = selectedProvider === "aliyun";
   const showPackyCodePanel = selectedProvider === "packycode";
   const providerSupportsReasoning = true;
-  const providerReasoningHint = showPackyCodePanel
-    ? `当前服务商默认推理强度为 ${PACKYCODE_DEFAULT_THINKING_EFFORT}；关闭后会按 none 下发。`
-    : "当前服务商支持深度思考开关：关闭=none，开启=high。";
   const aliyunProtocol = useMemo(() => {
     const key = String(selectedRuntime.protocol || "")
       .trim()
@@ -805,40 +786,27 @@ export default function AdminSettingsPage() {
   const webSearchSupported = showVolcenginePanel && volcWebSearchCapability.supported;
   const webSearchSwitchDisabled = loading || !webSearchSupported;
 
-  const isAgentESelected = selectedAgent === "E";
   const isAgentASelected = selectedAgent === "A";
   const isAgentCSelected = selectedAgent === "C";
   const isAgentDSelected = selectedAgent === "D";
   const isCoreAgentSelected = AGENT_IDS.includes(selectedAgent);
-  const selectedPrompt = isAgentESelected ? "" : prompts[selectedAgent] || "";
-  const selectedAgentName = AGENT_META[selectedAgent]?.name || `智能体 ${selectedAgent}`;
-  const selectedTeacherScopeLabel = useMemo(
-    () => getTeacherScopeLabel(selectedTeacherScopeKey),
-    [selectedTeacherScopeKey],
-  );
+  const selectedPrompt = prompts[selectedAgent] || "";
+  const selectedAgentName = getAdminAgentLabel(selectedAgent);
+  const selectedProviderLabel = getProviderLabel(selectedProvider);
+  const saveStatusText = saving
+    ? "Saving changes..."
+    : lastSavedAt
+      ? `Saved at ${formatClock(lastSavedAt)}`
+      : "Not saved yet";
   const previewMessages = debugByAgent[selectedAgent] || [];
   const agentOptions = useMemo(
     () =>
-      ADMIN_AGENT_IDS.map((agentId) => ({
+      AGENT_IDS.map((agentId) => ({
         value: agentId,
-        label: AGENT_META[agentId]?.name || `智能体 ${agentId}`,
+        label: getAdminAgentLabel(agentId),
       })),
     [],
   );
-  const agentESelectedSkills = useMemo(() => {
-    const list = Array.isArray(agentEConfig?.skills) ? agentEConfig.skills : [];
-    const rowMap = new Map(list.map((item) => [item.id, item]));
-    return agentEAvailableSkills.map((meta) => {
-      const row = rowMap.get(meta.id) || {};
-      return {
-        id: meta.id,
-        name: meta.name,
-        version: meta.version,
-        enabled: !!row.enabled,
-        priority: Number(row.priority || meta.defaultPriority || 50),
-      };
-    });
-  }, [agentEAvailableSkills, agentEConfig?.skills]);
   const markDirty = useCallback(() => {
     dirtyRef.current = true;
     setSaveError("");
@@ -872,12 +840,7 @@ export default function AdminSettingsPage() {
             draftRef.current.runtimeConfigs,
           ),
         };
-        const [data, agentEData] = await Promise.all([
-          saveAdminAgentSettings(adminToken, payload),
-          draftRef.current.agentEConfig
-            ? saveAdminAgentESettings(adminToken, draftRef.current.agentEConfig)
-            : Promise.resolve(null),
-        ]);
+        const data = await saveAdminAgentSettings(adminToken, payload);
 
         const nextPrompts = {
           A: String(data?.prompts?.A || ""),
@@ -900,22 +863,10 @@ export default function AdminSettingsPage() {
         draftRef.current = {
           prompts: nextPrompts,
           runtimeConfigs: nextRuntimeConfigs,
-          agentEConfig: agentEData?.config || draftRef.current.agentEConfig,
         };
-        setDefaultSystemPrompt(
-          String(data?.defaultSystemPrompt || DEFAULT_SYSTEM_PROMPT),
-        );
-        if (agentEData?.config) {
-          setAgentEConfig(agentEData.config);
-          setAgentEAvailableSkills(
-            Array.isArray(agentEData?.availableSkills) ? agentEData.availableSkills : [],
-          );
-        }
-
         dirtyRef.current = false;
         const candidateTimes = [
           String(data?.updatedAt || ""),
-          String(agentEData?.config?.updatedAt || ""),
           new Date().toISOString(),
         ]
           .map((iso) => new Date(iso))
@@ -949,10 +900,7 @@ export default function AdminSettingsPage() {
       setLoadError("");
 
       try {
-        const [data, agentEData] = await Promise.all([
-          fetchAdminAgentSettings(adminToken),
-          fetchAdminAgentESettings(adminToken),
-        ]);
+        const data = await fetchAdminAgentSettings(adminToken);
         if (cancelled) return;
 
         const nextPrompts = {
@@ -969,26 +917,17 @@ export default function AdminSettingsPage() {
         );
         const nextModelDefaults = sanitizeAgentModelMap(data?.agentModelDefaults);
 
-        setDefaultSystemPrompt(
-          String(data?.defaultSystemPrompt || DEFAULT_SYSTEM_PROMPT),
-        );
         setPrompts(nextPrompts);
         setRuntimeConfigs(nextRuntimeConfigs);
         setAgentProviderDefaults(nextProviderDefaults);
         setAgentModelDefaults(nextModelDefaults);
-        setAgentEConfig(agentEData?.config || null);
-        setAgentEAvailableSkills(
-          Array.isArray(agentEData?.availableSkills) ? agentEData.availableSkills : [],
-        );
         draftRef.current = {
           prompts: nextPrompts,
           runtimeConfigs: nextRuntimeConfigs,
-          agentEConfig: agentEData?.config || null,
         };
         dirtyRef.current = false;
         const candidateTimes = [
           String(data?.updatedAt || ""),
-          String(agentEData?.config?.updatedAt || ""),
         ]
           .map((iso) => new Date(iso))
           .filter((date) => !Number.isNaN(date.getTime()));
@@ -1018,9 +957,8 @@ export default function AdminSettingsPage() {
     draftRef.current = {
       prompts,
       runtimeConfigs,
-      agentEConfig,
     };
-  }, [agentEConfig, prompts, runtimeConfigs]);
+  }, [prompts, runtimeConfigs]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -1030,21 +968,6 @@ export default function AdminSettingsPage() {
 
     return () => clearInterval(timer);
   }, [persistSettings]);
-
-  useEffect(() => {
-    function onDocMouseDown(event) {
-      if (!showExportMenu) return;
-      const target = event.target;
-      if (target instanceof Element && target.closest("[data-portal-select-menu='true']")) return;
-      if (menuRef.current && menuRef.current.contains(target)) return;
-      setShowExportMenu(false);
-    }
-
-    document.addEventListener("mousedown", onDocMouseDown);
-    return () => {
-      document.removeEventListener("mousedown", onDocMouseDown);
-    };
-  }, [showExportMenu]);
 
   useEffect(() => {
     if (!isCoreAgentSelected) return;
@@ -1248,98 +1171,6 @@ export default function AdminSettingsPage() {
     markDirty();
   }
 
-  function updateAgentEConfigRoot(field, value) {
-    setAgentEConfig((prev) => ({
-      ...(prev || {}),
-      [field]: value,
-    }));
-    markDirty();
-  }
-
-  function updateAgentERuntime(field, value) {
-    setAgentEConfig((prev) => {
-      const current = prev || {};
-      if (AGENT_E_LOCKED_RUNTIME_FIELDS.has(field)) {
-        return current;
-      }
-      const runtime =
-        current.runtime && typeof current.runtime === "object"
-          ? current.runtime
-          : {};
-      return {
-        ...current,
-        runtime: {
-          ...runtime,
-          [field]: value,
-        },
-      };
-    });
-    markDirty();
-  }
-
-  function updateAgentEReviewPolicy(field, value) {
-    setAgentEConfig((prev) => {
-      const current = prev || {};
-      const policy =
-        current.reviewPolicy && typeof current.reviewPolicy === "object"
-          ? current.reviewPolicy
-          : {};
-      return {
-        ...current,
-        reviewPolicy: {
-          ...policy,
-          [field]: value,
-        },
-      };
-    });
-    markDirty();
-  }
-
-  function updateAgentESkillPolicy(field, value) {
-    setAgentEConfig((prev) => {
-      const current = prev || {};
-      const policy =
-        current.skillPolicy && typeof current.skillPolicy === "object"
-          ? current.skillPolicy
-          : {};
-      return {
-        ...current,
-        skillPolicy: {
-          ...policy,
-          [field]: value,
-        },
-      };
-    });
-    markDirty();
-  }
-
-  function updateAgentESkill(id, patch) {
-    setAgentEConfig((prev) => {
-      const current = prev || {};
-      const list = Array.isArray(current.skills) ? current.skills : [];
-      let touched = false;
-      const next = list.map((item) => {
-        if (item.id !== id) return item;
-        touched = true;
-        return { ...item, ...patch };
-      });
-      if (!touched) {
-        next.push({
-          id,
-          enabled: true,
-          priority: 50,
-          versionPin: "1.x",
-          ...patch,
-        });
-      }
-      return {
-        ...current,
-        skills: next,
-      };
-    });
-    markDirty();
-  }
-
   function onSwitchAgent(agentId) {
     setSelectedAgent(agentId);
     setDebugError("");
@@ -1353,88 +1184,11 @@ export default function AdminSettingsPage() {
     navigate(withAuthSlot("/admin/settings", activeSlot));
   }
 
-  async function onExportUsers() {
-    if (!adminToken) return;
-    setExportError("");
-    setDeleteNotice("");
-    setExportLoading("users");
-    try {
-      const data = await exportAdminUsersTxt(adminToken);
-      downloadTxt(data.filename || "educhat-users.txt", String(data.content || ""));
-      setShowExportMenu(false);
-    } catch (error) {
-      if (handleAuthError(error)) return;
-      setExportError(readErrorMessage(error));
-    } finally {
-      setExportLoading("");
-    }
-  }
-
-  async function onExportChatsTxt() {
-    if (!adminToken) return;
-    setExportError("");
-    setDeleteNotice("");
-    setExportLoading("chats");
-    try {
-      const data = await exportAdminChatsTxt(adminToken, selectedTeacherScopeKey);
-      downloadTxt(data.filename || "educhat-chats.txt", String(data.content || ""));
-      setShowExportMenu(false);
-    } catch (error) {
-      if (handleAuthError(error)) return;
-      setExportError(readErrorMessage(error));
-    } finally {
-      setExportLoading("");
-    }
-  }
-
-  async function onExportChatsZip() {
-    if (!adminToken) return;
-    setExportError("");
-    setDeleteNotice("");
-    setExportLoading("zip");
-    try {
-      const data = await exportAdminChatsZip(adminToken, selectedTeacherScopeKey);
-      downloadBlob(data.filename || "educhat-chats-by-user.zip", data.blob);
-      setShowExportMenu(false);
-    } catch (error) {
-      if (handleAuthError(error)) return;
-      setExportError(readErrorMessage(error));
-    } finally {
-      setExportLoading("");
-    }
-  }
-
-  async function onDeleteAllChats() {
-    if (!adminToken || deleteLoading) return;
-    setDeleteLoading(true);
-    setExportError("");
-    setDeleteNotice("");
-
-    try {
-      const data = await deleteAllUserChats(adminToken, selectedTeacherScopeKey);
-      setDeleteNotice(
-        `已清空“${selectedTeacherScopeLabel}”授课教师下 ${Number(data?.deletedCount || 0)} 条用户对话状态数据。`,
-      );
-      setShowDeleteConfirm(false);
-    } catch (error) {
-      if (handleAuthError(error)) return;
-      setExportError(readErrorMessage(error));
-    } finally {
-      setDeleteLoading(false);
-      setShowExportMenu(false);
-    }
-  }
-
   function resolveDebugRuntimeConfig(agentId) {
-    if (agentId === "E") {
-      const runtime = agentEConfig?.runtime;
-      return runtime && typeof runtime === "object" ? runtime : {};
-    }
     return runtimeConfigs[agentId] || DEFAULT_AGENT_RUNTIME_CONFIG;
   }
 
   function resolveDebugProvider(agentId, runtimeConfig) {
-    if (agentId === "E") return "volcengine";
     if (String(agentId || "").trim().toUpperCase() === "C") return "volcengine";
     const runtimeProvider = String(runtimeConfig?.provider || "")
       .trim()
@@ -1511,7 +1265,7 @@ export default function AdminSettingsPage() {
           });
         }
         return {
-          name: String(item?.name || "文件"),
+          name: String(item?.name || "File"),
           size: Number(item?.size || 0),
           type: String(item?.mimeType || item?.type || ""),
         };
@@ -1536,7 +1290,7 @@ export default function AdminSettingsPage() {
           });
         }
         return {
-          name: String(item?.name || "文件"),
+          name: String(item?.name || "File"),
           size: Number(item?.size || 0),
           type: String(item?.mimeType || item?.type || ""),
           fileId,
@@ -1557,7 +1311,7 @@ export default function AdminSettingsPage() {
       }
 
       return {
-        name: String(item?.name || "文件"),
+        name: String(item?.name || "File"),
         size: Number(item?.size || 0),
         type: String(item?.type || ""),
       };
@@ -1579,7 +1333,9 @@ export default function AdminSettingsPage() {
     if (showAliyunPanel && !aliyunModelPolicy.allowImageInput) {
       const hasImage = safePicked.some((file) => isLikelyImageFile(file));
       if (hasImage) {
-        throw new Error("当前阿里云 MiniMax 模型不支持图片输入，请仅发送文本内容。");
+        throw new Error(
+          "The current Aliyun MiniMax model does not support image input. Please send text only.",
+        );
       }
     }
 
@@ -1610,13 +1366,13 @@ export default function AdminSettingsPage() {
         });
         const preparedRefs = Array.isArray(prepareResult?.files) ? prepareResult.files : [];
         if (preparedRefs.length !== pdfCandidates.length) {
-          throw new Error("PDF 预处理结果异常，请重试。");
+          throw new Error("Unexpected PDF preprocessing result. Please try again.");
         }
         const preparedItems = preparedRefs.map((ref, idx) => {
           const file = pdfCandidates[idx].file;
           const preparedToken = String(ref?.token || "").trim();
           if (!preparedToken) {
-            throw new Error("PDF 预处理缺少 token，请重试。");
+            throw new Error("The PDF preprocessing response did not include a token. Please try again.");
           }
           return {
             index: pdfCandidates[idx].index,
@@ -1680,7 +1436,7 @@ export default function AdminSettingsPage() {
     });
     const remoteRefs = Array.isArray(uploadResult?.files) ? uploadResult.files : [];
     if (remoteRefs.length !== remoteCandidates.length) {
-      throw new Error("文件上传结果异常，请重试。");
+      throw new Error("Unexpected file upload result. Please try again.");
     }
 
     const remoteItems = remoteRefs.map((ref, idx) => ({
@@ -1710,7 +1466,7 @@ export default function AdminSettingsPage() {
     const agentId = selectedAgent;
     const runtimeConfig = resolveDebugRuntimeConfig(agentId);
     if (showAliyunPanel && !aliyunModelPolicy.supported) {
-      setDebugError(aliyunModelPolicy.errorMessage || "当前阿里云模型不受支持。");
+      setDebugError(getAliyunPolicyMessage(aliyunModelPolicy) || "This Aliyun model is not supported.");
       return;
     }
     const content = String(text || "").trim();
@@ -1723,7 +1479,7 @@ export default function AdminSettingsPage() {
     } = splitDebugFileItems(safeFiles);
     if (!content && safeFiles.length === 0) return;
     const userContent =
-      content || (safeFiles.length > 0 ? "请分析我上传的附件内容。" : "");
+      content || (safeFiles.length > 0 ? "Please review the uploaded attachments." : "");
     setDebugError("");
 
     const userMessage = {
@@ -1820,7 +1576,7 @@ export default function AdminSettingsPage() {
             });
           },
           onError: (message) => {
-            throw new Error(message || "调试失败");
+            throw new Error(message || "Debug run failed.");
           },
         },
       );
@@ -1833,7 +1589,7 @@ export default function AdminSettingsPage() {
           item.id === assistantMessageId
             ? {
                 ...item,
-                content: `${item.content || ""}\n\n> 调试失败：${msg}`,
+                content: `${item.content || ""}\n\n> Debug failed: ${msg}`,
               }
             : item,
         );
@@ -1890,7 +1646,7 @@ export default function AdminSettingsPage() {
   async function onDebugAssistantRegenerate(assistantMessageId, promptMessageId) {
     if (!adminToken || debugLoading || !assistantMessageId || !promptMessageId) return;
     if (showAliyunPanel && !aliyunModelPolicy.supported) {
-      setDebugError(aliyunModelPolicy.errorMessage || "当前阿里云模型不受支持。");
+      setDebugError(getAliyunPolicyMessage(aliyunModelPolicy) || "This Aliyun model is not supported.");
       return;
     }
 
@@ -1976,7 +1732,7 @@ export default function AdminSettingsPage() {
             });
           },
           onError: (message) => {
-            throw new Error(message || "调试失败");
+            throw new Error(message || "Debug run failed.");
           },
         },
       );
@@ -1989,7 +1745,7 @@ export default function AdminSettingsPage() {
           item.id === assistantMessageId
             ? {
                 ...item,
-                content: `${item.content || ""}\n\n> 调试失败：${msg}`,
+                content: `${item.content || ""}\n\n> Debug failed: ${msg}`,
               }
             : item,
         );
@@ -2022,403 +1778,79 @@ export default function AdminSettingsPage() {
       <div className="admin-settings-shell">
         <header className="admin-settings-topbar">
           <div className="admin-settings-topbar-left">
-            <button
-              type="button"
-              className="admin-icon-btn"
-              onClick={onBackToOnlinePanel}
-              title="返回教师主页"
-              aria-label="返回教师主页"
-            >
-              <ArrowLeft size={18} />
-            </button>
-            <div className="admin-settings-title-row">
-              <h1 className="admin-settings-title">管理员智能体设置</h1>
-              <div className="admin-agent-select-wrap">
-                <span className="admin-agent-select-icon" aria-hidden="true">
-                  <ShieldAlert size={14} />
-                </span>
-                <PortalSelect
-                  value={selectedAgent}
-                  options={agentOptions}
-                  onChange={onSwitchAgent}
-                  disabled={loading}
-                  compact
-                  className="admin-agent-dropdown"
-                />
+            <div className="admin-settings-hero-copy">
+              <p className="admin-settings-kicker">Admin studio</p>
+              <div className="admin-settings-title-row">
+                <h1 className="admin-settings-title">Agent configuration</h1>
+                <div className="admin-agent-select-wrap">
+                  <PortalSelect
+                    value={selectedAgent}
+                    options={agentOptions}
+                    onChange={onSwitchAgent}
+                    disabled={loading}
+                    compact
+                    className="admin-agent-dropdown"
+                  />
+                </div>
               </div>
             </div>
           </div>
 
           <div className="admin-settings-topbar-right">
-            <div className="admin-save-state" role="status">
-              {saving
-                ? "保存中..."
-                : lastSavedAt
-                  ? `保存时间 ${formatClock(lastSavedAt)}`
-                  : "保存时间 --:--:--"}
+            <div className="admin-save-block">
+              <span className="admin-save-kicker">Save status</span>
+              <div className="admin-save-state" role="status">
+                {saveStatusText}
+              </div>
+              <p className="admin-save-help">Changes are stored per agent.</p>
             </div>
             <button
               type="button"
               className="admin-save-btn"
               onClick={onManualSave}
-              disabled={saving || loading || (isAgentESelected && !agentEConfig)}
+              disabled={saving || loading}
             >
               <Save size={16} />
-              <span>{saving ? "保存中..." : "保存"}</span>
+              <span>{saving ? "Saving..." : "Save changes"}</span>
             </button>
-
+            <button
+              type="button"
+              className="admin-sidebar-back-btn"
+              onClick={onBackToOnlinePanel}
+              title="Back to teacher home"
+              aria-label="Back to teacher home"
+            >
+              <ArrowLeft size={16} />
+              <span>Back</span>
+            </button>
           </div>
         </header>
 
-        {(loadError || saveError || exportError || deleteNotice) && (
-          <div className="admin-message-strip">
-            {[loadError, saveError, exportError].filter(Boolean).map((line) => (
-              <p key={line} className="admin-message-strip-item error">
-                <CircleAlert size={14} />
-                <span>{line}</span>
-              </p>
-            ))}
-            {deleteNotice ? (
-              <p className="admin-message-strip-item success">{deleteNotice}</p>
-            ) : null}
-          </div>
-        )}
+        <div className="admin-settings-main">
+          {(loadError || saveError) && (
+            <div className="admin-message-strip">
+              {[loadError, saveError].filter(Boolean).map((line) => (
+                <p key={line} className="admin-message-strip-item error">
+                  <CircleAlert size={14} />
+                  <span>{line}</span>
+                </p>
+              ))}
+            </div>
+          )}
 
-        <div className={`admin-grid${isAgentESelected ? " admin-grid-agent-e" : ""}`}>
-          {isAgentESelected ? (
-            <>
-              <section className="admin-panel admin-panel-api admin-agent-e-api-panel">
-                <div className="admin-panel-head">
-                  <h2>API 参数</h2>
-                  <span>SSCI审稿人独立策略</span>
-                </div>
-
-                <div className="admin-field-grid">
-                  <div className="admin-field-row split">
-                    <span>启用 SSCI审稿人</span>
-                    <label className="admin-switch-row">
-                      <input
-                        type="checkbox"
-                        checked={!!agentEConfig?.enabled}
-                        onChange={(e) => updateAgentEConfigRoot("enabled", e.target.checked)}
-                        disabled={loading || !agentEConfig}
-                      />
-                      <span>{agentEConfig?.enabled ? "开启" : "关闭"}</span>
-                    </label>
-                  </div>
-
-                  <label className="admin-field-row model-id" htmlFor="admin-agent-e-model">
-                    <span>模型 ID</span>
-                    <input
-                      id="admin-agent-e-model"
-                      type="text"
-                      value={VOLCENGINE_FIXED_SAMPLING_MODEL_ID}
-                      readOnly
-                      disabled
-                    />
-                  </label>
-
-                  <label className="admin-field-row split" htmlFor="admin-agent-e-temperature">
-                    <span>生成随机性</span>
-                    <NumberRuntimeInput
-                      id="admin-agent-e-temperature"
-                      value={VOLCENGINE_FIXED_TEMPERATURE}
-                      min={0}
-                      max={2}
-                      step={0.1}
-                      onChange={() => {}}
-                      disabled
-                    />
-                  </label>
-
-                  <label className="admin-field-row split" htmlFor="admin-agent-e-top-p">
-                    <span>累计概率</span>
-                    <NumberRuntimeInput
-                      id="admin-agent-e-top-p"
-                      value={VOLCENGINE_FIXED_TOP_P}
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      onChange={() => {}}
-                      disabled
-                    />
-                  </label>
-
-                  <label className="admin-field-row split" htmlFor="admin-agent-e-context-rounds">
-                    <span>上下文轮数</span>
-                    <NumberRuntimeInput
-                      id="admin-agent-e-context-rounds"
-                      value={Number(agentEConfig?.runtime?.contextRounds ?? 12)}
-                      min={1}
-                      max={20}
-                      step={1}
-                      onChange={(next) => updateAgentERuntime("contextRounds", next)}
-                      disabled={loading || !agentEConfig}
-                    />
-                  </label>
-
-                  <label className="admin-field-row split" htmlFor="admin-agent-e-max-output">
-                    <span>最大输出长度</span>
-                    <NumberRuntimeInput
-                      id="admin-agent-e-max-output"
-                      value={AGENT_E_FIXED_MAX_OUTPUT_TOKENS}
-                      min={64}
-                      max={131072}
-                      step={64}
-                      onChange={() => {}}
-                      disabled
-                    />
-                  </label>
-
-                  <p className="admin-field-note">
-                    temperature/top_p 已按模型策略固定，且调用时会忽略外部传入值。
-                  </p>
-
-                  <div className="admin-field-row split">
-                    <span>深度思考</span>
-                    <label className="admin-switch-row">
-                      <input
-                        type="checkbox"
-                        checked={!!agentEConfig?.runtime?.enableThinking}
-                        onChange={(e) => updateAgentERuntime("enableThinking", e.target.checked)}
-                        disabled={loading || !agentEConfig}
-                      />
-                      <span>{agentEConfig?.runtime?.enableThinking ? "开启" : "关闭"}</span>
-                    </label>
-                  </div>
-
-                  <div className="admin-field-row split">
-                    <span>注入安全提示</span>
-                    <label className="admin-switch-row">
-                      <input
-                        type="checkbox"
-                        checked={!!agentEConfig?.runtime?.injectSafetyPrompt}
-                        onChange={(e) =>
-                          updateAgentERuntime("injectSafetyPrompt", e.target.checked)
-                        }
-                        disabled={loading || !agentEConfig}
-                      />
-                      <span>{agentEConfig?.runtime?.injectSafetyPrompt ? "开启" : "关闭"}</span>
-                    </label>
-                  </div>
-                </div>
-              </section>
-
-              <div className="admin-agent-e-middle-column">
-                <section className="admin-panel admin-panel-api admin-agent-e-skills-panel">
-                  <div className="admin-panel-head">
-                    <h2>Skills</h2>
-                    <span>启用与优先级</span>
-                  </div>
-
-                  <div className="admin-field-grid">
-                    {agentESelectedSkills.map((skill) => (
-                      <div className="admin-tip-card admin-skill-card" key={skill.id}>
-                        <div className="admin-skill-meta">
-                          <p className="admin-skill-name">{skill.name}</p>
-                          <span className="admin-skill-version">{skill.version}</span>
-                        </div>
-
-                        <div className="admin-field-row split">
-                          <span>启用</span>
-                          <label className="admin-switch-row">
-                            <input
-                              type="checkbox"
-                              checked={!!skill.enabled}
-                              onChange={(e) =>
-                                updateAgentESkill(skill.id, { enabled: e.target.checked })
-                              }
-                              disabled={loading || !agentEConfig}
-                            />
-                            <span>{skill.enabled ? "开启" : "关闭"}</span>
-                          </label>
-                        </div>
-
-                        <label
-                          className="admin-field-row split"
-                          htmlFor={`admin-agent-e-skill-${skill.id}`}
-                        >
-                          <span>优先级</span>
-                          <NumberRuntimeInput
-                            id={`admin-agent-e-skill-${skill.id}`}
-                            value={Number(skill.priority || 50)}
-                            min={1}
-                            max={999}
-                            step={1}
-                            onChange={(next) => updateAgentESkill(skill.id, { priority: next })}
-                            disabled={loading || !agentEConfig}
-                          />
-                        </label>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-
-                <section className="admin-panel admin-panel-api admin-agent-e-review-panel">
-                  <div className="admin-panel-head">
-                    <h2>审稿策略</h2>
-                    <span>reviewPolicy + skillPolicy</span>
-                  </div>
-
-                  <div className="admin-field-grid">
-                    <div className="admin-field-row split">
-                      <span>强制结构化输出</span>
-                      <label className="admin-switch-row">
-                        <input
-                          type="checkbox"
-                          checked={!!agentEConfig?.reviewPolicy?.forceStructuredOutput}
-                          onChange={(e) =>
-                            updateAgentEReviewPolicy("forceStructuredOutput", e.target.checked)
-                          }
-                          disabled={loading || !agentEConfig}
-                        />
-                        <span>
-                          {agentEConfig?.reviewPolicy?.forceStructuredOutput ? "开启" : "关闭"}
-                        </span>
-                      </label>
-                    </div>
-
-                    <div className="admin-field-row split">
-                      <span>强制证据锚点</span>
-                      <label className="admin-switch-row">
-                        <input
-                          type="checkbox"
-                          checked={!!agentEConfig?.reviewPolicy?.requireEvidenceAnchors}
-                          onChange={(e) =>
-                            updateAgentEReviewPolicy("requireEvidenceAnchors", e.target.checked)
-                          }
-                          disabled={loading || !agentEConfig}
-                        />
-                        <span>
-                          {agentEConfig?.reviewPolicy?.requireEvidenceAnchors ? "开启" : "关闭"}
-                        </span>
-                      </label>
-                    </div>
-                    <div className="admin-field-row split">
-                      <span>自动选择技能</span>
-                      <label className="admin-switch-row">
-                        <input
-                          type="checkbox"
-                          checked={!!agentEConfig?.skillPolicy?.autoSelect}
-                          onChange={(e) => updateAgentESkillPolicy("autoSelect", e.target.checked)}
-                          disabled={loading || !agentEConfig}
-                        />
-                        <span>{agentEConfig?.skillPolicy?.autoSelect ? "开启" : "关闭"}</span>
-                      </label>
-                    </div>
-
-                    <div className="admin-field-row split">
-                      <span className="admin-label-with-hint">
-                        <span>严格模式</span>
-                        <InfoHint text="常规期刊审稿建议关闭严格模式，先按事实列问题，再给可补救建议。" />
-                      </span>
-                      <label className="admin-switch-row">
-                        <input
-                          type="checkbox"
-                          checked={!!agentEConfig?.skillPolicy?.strictMode}
-                          onChange={(e) => updateAgentESkillPolicy("strictMode", e.target.checked)}
-                          disabled={loading || !agentEConfig}
-                        />
-                        <span>{agentEConfig?.skillPolicy?.strictMode ? "开启" : "关闭"}</span>
-                      </label>
-                    </div>
-
-                    <div className="admin-field-row split">
-                      <span>允许通用兜底</span>
-                      <label className="admin-switch-row">
-                        <input
-                          type="checkbox"
-                          checked={!!agentEConfig?.skillPolicy?.allowFallbackGeneralAnswer}
-                          onChange={(e) =>
-                            updateAgentESkillPolicy("allowFallbackGeneralAnswer", e.target.checked)
-                          }
-                          disabled={loading || !agentEConfig}
-                        />
-                        <span>
-                          {agentEConfig?.skillPolicy?.allowFallbackGeneralAnswer
-                            ? "开启"
-                            : "关闭"}
-                        </span>
-                      </label>
-                    </div>
-
-                    <label className="admin-field-row split" htmlFor="admin-agent-e-max-skills">
-                      <span>每轮最多技能数</span>
-                      <NumberRuntimeInput
-                        id="admin-agent-e-max-skills"
-                        value={Number(agentEConfig?.skillPolicy?.maxSkillsPerTurn ?? 3)}
-                        min={1}
-                        max={6}
-                        step={1}
-                        onChange={(next) => updateAgentESkillPolicy("maxSkillsPerTurn", next)}
-                        disabled={loading || !agentEConfig}
-                      />
-                    </label>
-                  </div>
-                </section>
-              </div>
-
-              <section className="admin-panel preview admin-agent-e-debug-panel">
-                <div className="admin-panel-head">
-                  <div className="admin-panel-head-title">
-                    <h2>预览与调试</h2>
-                    <InfoHint text="仅用于当前 API 参数调试，调试记录不写入数据库。" />
-                  </div>
-                  <button
-                    type="button"
-                    className="admin-ghost-btn"
-                    onClick={onDebugClear}
-                    disabled={debugLoading || loading}
-                  >
-                    清空
-                  </button>
-                </div>
-
-                <div className="admin-preview-chat">
-                  <MessageList
-                    activeSessionId={`admin-debug-${selectedAgent}`}
-                    messages={previewMessages}
-                    isStreaming={debugLoading}
-                    onAssistantFeedback={onDebugAssistantFeedback}
-                    onAssistantRegenerate={onDebugAssistantRegenerate}
-                  />
-                  <MessageInput
-                    onSend={onDebugSend}
-                    onPrepareFiles={onDebugPrepareFiles}
-                    disabled={
-                      debugLoading ||
-                      loading ||
-                      (showAliyunPanel && !aliyunModelPolicy.supported)
-                    }
-                  />
-                </div>
-                {debugError ? (
-                  <div className="admin-preview-error" role="alert">
-                    <span>{debugError}</span>
-                    <button
-                      type="button"
-                      className="admin-preview-error-close"
-                      onClick={() => setDebugError("")}
-                      aria-label="关闭错误提示"
-                      title="关闭错误提示"
-                    >
-                      <CloseXIcon />
-                    </button>
-                  </div>
-                ) : null}
-              </section>
-            </>
-          ) : (
-            <>
-              <section className="admin-panel admin-panel-prompt">
+          <div className="admin-grid">
+            <section className="admin-panel admin-panel-prompt">
             <div className="admin-panel-head">
-              <h2>提示词设置</h2>
-              <span>{selectedAgentName}</span>
+              <div className="admin-panel-head-copy">
+                <p className="admin-panel-kicker">Prompt design</p>
+                <h2>System direction</h2>
+              </div>
+              <span className="admin-panel-badge">{selectedAgentName}</span>
             </div>
 
             <label className="admin-field-label" htmlFor="admin-prompt-input">
-              <span>系统提示词</span>
-              <InfoHint text="留空时会使用默认系统提示词。该提示词会影响该智能体在主对话中的行为。" />
+              <span>Agent-specific system prompt</span>
+              <InfoHint text="When left empty, the agent falls back to the shared default system prompt used in normal chat." />
             </label>
             <textarea
               id="admin-prompt-input"
@@ -2426,30 +1858,25 @@ export default function AdminSettingsPage() {
               rows={14}
               value={selectedPrompt}
               onChange={(e) => updatePrompt(e.target.value)}
-              placeholder="默认为系统提示词：你是用户的助手"
+              placeholder="Leave blank to inherit the default system prompt."
               disabled={loading}
             />
+            </section>
 
-            <div className="admin-tip-card admin-default-prompt-card">
-              <p className="admin-tip-title">
-                <span>默认系统提示词</span>
-                <InfoHint text="默认值来自 .env 的 DEFAULT_SYSTEM_PROMPT。" />
-              </p>
-              <pre>{defaultSystemPrompt || DEFAULT_SYSTEM_PROMPT}</pre>
-            </div>
-          </section>
-
-          <section className="admin-panel admin-panel-api">
+            <section className="admin-panel admin-panel-api">
             <div className="admin-panel-head">
-              <h2>API 参数</h2>
-              <span className="admin-panel-head-note">
-                <InfoHint text="参数按当前选中的智能体独立保存并生效。" />
+              <div className="admin-panel-head-copy">
+                <p className="admin-panel-kicker">Runtime controls</p>
+                <h2>Model and behavior</h2>
+              </div>
+              <span className="admin-panel-badge admin-panel-badge-muted">
+                {selectedProviderLabel}
               </span>
             </div>
 
             <div className="admin-field-grid">
               <div className="admin-field-row split">
-                <span>服务商</span>
+                <span>Provider</span>
                 <PortalSelect
                   value={selectedProvider}
                   options={PROVIDER_OPTIONS}
@@ -2459,7 +1886,7 @@ export default function AdminSettingsPage() {
               </div>
 
               <label className="admin-field-row model-id" htmlFor="admin-runtime-model">
-                <span>模型 ID</span>
+                <span>Model ID</span>
                 <input
                   id="admin-runtime-model"
                   type="text"
@@ -2467,37 +1894,31 @@ export default function AdminSettingsPage() {
                   onChange={(e) => updateRuntimeField("model", e.target.value)}
                   placeholder={
                     selectedModelDefault
-                      ? `留空则使用默认模型：${selectedModelDefault}`
-                      : "留空则走 .env 里对应 AGENT_MODEL_*"
+                      ? `Leave blank to use the default model: ${selectedModelDefault}`
+                      : "Leave blank to use the matching `AGENT_MODEL_*` value from `.env`."
                   }
                   disabled={loading || isAgentASelected || isAgentCSelected || isAgentDSelected}
                 />
               </label>
-              {isAgentASelected ? (
+              {showOpenRouterPanel ? (
                 <p className="admin-field-note">
-                  智能体 A 已固定使用 {AGENT_A_FIXED_PROVIDER === "packycode" ? "PackyCode" : AGENT_A_FIXED_PROVIDER} / `{AGENT_A_FIXED_MODEL}`。
+                  The OpenRouter route only exposes max output tokens on this screen.
                 </p>
-              ) : null}
-                  {showOpenRouterPanel ? (
-                    <p className="admin-field-note">
-                      Openrouter api仅支持最大输出（max_tokens）配置。
-                    </p>
-                  ) : showAliyunPanel ? (
+              ) : showAliyunPanel ? (
                 <p className="admin-field-note">
                   {aliyunModelUnsupported
-                    ? "当前阿里云模型不受支持，请更换模型后再调用。"
+                    ? getAliyunPolicyMessage(aliyunModelPolicy) ||
+                      "This Aliyun model is not supported on the current route."
                     : aliyunProtocolLocked
-                      ? `当前模型调用方式固定为 ${
-                          aliyunProtocolOptions[0]?.label || "指定协议"
-                        }。`
-                      : "阿里云支持聊天接口、回应接口、DashScope 原生接口三种调用方式，最大输出固定使用模型默认值。"}
+                      ? `This model is locked to ${aliyunProtocolOptions[0]?.label || "a fixed protocol"}.`
+                      : "Aliyun supports Chat API, Responses API, and the DashScope native API. Max output tokens follow the model default."}
                 </p>
               ) : null}
 
               {showVolcenginePanel ? (
                 <>
                   <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
-                    <span>生成随机性</span>
+                    <span>Temperature</span>
                     <NumberRuntimeInput
                       id="admin-runtime-temperature"
                       value={selectedRuntime.temperature}
@@ -2510,7 +1931,7 @@ export default function AdminSettingsPage() {
                   </label>
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
-                    <span>累计概率</span>
+                    <span>Top-p</span>
                     <NumberRuntimeInput
                       id="admin-runtime-top-p"
                       value={selectedRuntime.topP}
@@ -2523,7 +1944,7 @@ export default function AdminSettingsPage() {
                   </label>
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
-                    <span>上下文轮数</span>
+                    <span>Context rounds</span>
                     <NumberRuntimeInput
                       id="admin-runtime-context-rounds"
                       value={selectedRuntime.contextRounds}
@@ -2537,8 +1958,8 @@ export default function AdminSettingsPage() {
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-max-output-tokens">
                     <span className="admin-label-with-hint">
-                      最大输出长度
-                      <InfoHint text="会映射到 Responses 的最大输出参数。" />
+                      Max output tokens
+                      <InfoHint text="This maps to the max output setting on the Responses API." />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-max-output-tokens"
@@ -2554,8 +1975,8 @@ export default function AdminSettingsPage() {
                   {!isAgentDSelected ? (
                     <div className="admin-field-row split">
                       <span className="admin-label-with-hint">
-                        注入系统时间
-                        <InfoHint text="开启后，每次会话都会在系统提示词中注入当前日期（年月日）。" />
+                        Inject current date
+                        <InfoHint text="When enabled, the current date is injected into the system prompt for each conversation." />
                       </span>
                       <label className="admin-switch-row">
                         <input
@@ -2566,15 +1987,15 @@ export default function AdminSettingsPage() {
                           }
                           disabled={loading}
                         />
-                        <span>{selectedRuntime.includeCurrentTime ? "开启" : "关闭"}</span>
+                        <span>{formatToggleState(selectedRuntime.includeCurrentTime)}</span>
                       </label>
                     </div>
                   ) : null}
 
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
-                      SP防泄漏指令
-                      <InfoHint text="默认关闭。开启后会注入 SP 防泄漏指令；识别到探查系统设定时，将执行身份回应或礼貌拒绝且不解释判定依据。" />
+                      Prompt leak guard
+                      <InfoHint text="Off by default. When enabled, the runtime injects anti-leak instructions and refuses prompt probing more defensively." />
                     </span>
                     <label className="admin-switch-row">
                       <input
@@ -2585,12 +2006,12 @@ export default function AdminSettingsPage() {
                         }
                         disabled={loading}
                       />
-                      <span>{selectedRuntime.preventPromptLeak ? "开启" : "关闭"}</span>
+                      <span>{formatToggleState(selectedRuntime.preventPromptLeak)}</span>
                     </label>
                   </div>
 
                   <div className="admin-field-row split">
-                    <span>深度思考</span>
+                    <span>Reasoning</span>
                     <label className="admin-switch-row">
                       <input
                         type="checkbox"
@@ -2598,12 +2019,12 @@ export default function AdminSettingsPage() {
                         onChange={(e) => updateRuntimeField("enableThinking", e.target.checked)}
                         disabled={loading}
                       />
-                      <span>{selectedRuntime.enableThinking ? "开启" : "关闭"}</span>
+                      <span>{formatToggleState(selectedRuntime.enableThinking)}</span>
                     </label>
                   </div>
 
                   <div className="admin-field-row split">
-                    <span>联网搜索</span>
+                    <span>Web search</span>
                     <label
                       className={`admin-switch-row ${webSearchSwitchDisabled ? "disabled" : ""}`}
                     >
@@ -2616,15 +2037,15 @@ export default function AdminSettingsPage() {
                         disabled={webSearchSwitchDisabled}
                       />
                       <span>
-                        {!!selectedRuntime.enableWebSearch && webSearchSupported
-                          ? "开启"
-                          : "关闭"}
+                        {formatToggleState(
+                          !!selectedRuntime.enableWebSearch && webSearchSupported,
+                        )}
                       </span>
                     </label>
                   </div>
 
                   <div className="admin-field-row split">
-                    <span>搜索来源</span>
+                    <span>Search sources</span>
                     <div className="admin-switch-group">
                       {VOLCENGINE_WEB_SEARCH_SOURCE_OPTIONS.map((source) => (
                         <label
@@ -2652,8 +2073,8 @@ export default function AdminSettingsPage() {
                     htmlFor="admin-runtime-web-search-max-keyword"
                   >
                     <span className="admin-label-with-hint">
-                      单轮关键词数
-                      <InfoHint text="限制每轮搜索可用关键词数量，范围 1 到 50。" />
+                      Keywords per round
+                      <InfoHint text="Limits how many keywords are used in each search step. Range: 1 to 50." />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-web-search-max-keyword"
@@ -2671,8 +2092,8 @@ export default function AdminSettingsPage() {
                     htmlFor="admin-runtime-web-search-limit"
                   >
                     <span className="admin-label-with-hint">
-                      单次结果条数
-                      <InfoHint text="限制单次搜索返回结果数量，范围 1 到 50。" />
+                      Results per request
+                      <InfoHint text="Limits how many search results come back in a single request. Range: 1 to 50." />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-web-search-limit"
@@ -2690,8 +2111,8 @@ export default function AdminSettingsPage() {
                     htmlFor="admin-runtime-web-search-max-tool-calls"
                   >
                     <span className="admin-label-with-hint">
-                      工具调用轮次上限
-                      <InfoHint text="限制一次回答内最多可执行的联网搜索轮次，范围 1 到 10。" />
+                      Max tool-call rounds
+                      <InfoHint text="Caps the number of web-search tool rounds inside one answer. Range: 1 to 10." />
                     </span>
                     <NumberRuntimeInput
                       id="admin-runtime-web-search-max-tool-calls"
@@ -2710,7 +2131,7 @@ export default function AdminSettingsPage() {
                   {!showPackyCodePanel && !aliyunSamplingFixed ? (
                     <>
                       <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
-                        <span>生成随机性</span>
+                        <span>Temperature</span>
                         <NumberRuntimeInput
                           id="admin-runtime-temperature"
                           value={selectedRuntime.temperature}
@@ -2723,7 +2144,7 @@ export default function AdminSettingsPage() {
                       </label>
 
                       <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
-                        <span>累计概率</span>
+                        <span>Top-p</span>
                         <NumberRuntimeInput
                           id="admin-runtime-top-p"
                           value={selectedRuntime.topP}
@@ -2735,21 +2156,16 @@ export default function AdminSettingsPage() {
                         />
                       </label>
                     </>
-                  ) : showPackyCodePanel ? (
-                    <p className="admin-field-note">
-                      当前 PackyCode / `gpt-5.4` 接入已隐藏未验证或已确认不兼容的采样参数，
-                      默认按 256k token 预算运行；上下文轮数对 Packy 不生效。
-                    </p>
                   ) : (
                     <p className="admin-field-note">
-                      当前模型采样参数固定：temperature = {ALIYUN_MINIMAX_FIXED_TEMPERATURE}、
-                      top_p = {ALIYUN_MINIMAX_FIXED_TOP_P}。
+                      This model uses fixed sampling values: temperature = {ALIYUN_MINIMAX_FIXED_TEMPERATURE}
+                      {", "}top_p = {ALIYUN_MINIMAX_FIXED_TOP_P}.
                     </p>
                   )}
 
                   {!showPackyCodePanel ? (
                     <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
-                      <span>上下文轮数</span>
+                      <span>Context rounds</span>
                       <NumberRuntimeInput
                         id="admin-runtime-context-rounds"
                         value={selectedRuntime.contextRounds}
@@ -2761,21 +2177,15 @@ export default function AdminSettingsPage() {
                       />
                     </label>
                   ) : null}
-                  {showPackyCodePanel ? (
-                    <p className="admin-field-note">
-                      PackyCode 会尽量带全量历史，并在接近 256k 上下文预算时自动做本地摘要压缩。
-                    </p>
-                  ) : null}
-
                   {showAliyunPanel ? (
                     <div className="admin-field-row split">
                       <span className="admin-label-with-hint">
-                        阿里云调用方式
+                        Aliyun protocol
                         <InfoHint
                           text={
                             aliyunProtocolLocked
-                              ? "当前模型仅支持一种调用协议，已自动锁定。"
-                              : "支持 OpenAI Chat、OpenAI Responses 和 DashScope 原生接口。"
+                              ? "This model supports only one protocol and has been locked automatically."
+                              : "Supports OpenAI Chat, OpenAI Responses, and the DashScope native API."
                           }
                         />
                       </span>
@@ -2791,8 +2201,8 @@ export default function AdminSettingsPage() {
                   {showAliyunPanel ? (
                     <div className="admin-field-row split">
                       <span className="admin-label-with-hint">
-                        文件处理模式
-                        <InfoHint text="仅 DashScope 原生接口生效。兼容模式会先本地解析再注入文本；调试模式会优先下发 OSS 文件 URL。" />
+                        File processing mode
+                        <InfoHint text="Applies only to the DashScope native API. Compatibility mode parses files locally first; debug mode prefers OSS file URLs." />
                       </span>
                       <PortalSelect
                         value={selectedRuntime.aliyunFileProcessMode}
@@ -2807,8 +2217,8 @@ export default function AdminSettingsPage() {
                   {!isAgentDSelected ? (
                     <div className="admin-field-row split">
                       <span className="admin-label-with-hint">
-                        注入系统时间
-                        <InfoHint text="开启后，每次会话都会在系统提示词中注入当前日期（年月日）。" />
+                        Inject current date
+                        <InfoHint text="When enabled, the current date is injected into the system prompt for each conversation." />
                       </span>
                       <label className="admin-switch-row">
                         <input
@@ -2819,15 +2229,15 @@ export default function AdminSettingsPage() {
                           }
                           disabled={loading}
                         />
-                        <span>{selectedRuntime.includeCurrentTime ? "开启" : "关闭"}</span>
+                        <span>{formatToggleState(selectedRuntime.includeCurrentTime)}</span>
                       </label>
                     </div>
                   ) : null}
 
                   <div className="admin-field-row split">
                     <span className="admin-label-with-hint">
-                      SP防泄漏指令
-                      <InfoHint text="默认关闭。开启后会注入 SP 防泄漏指令；识别到探查系统设定时，将执行身份回应或礼貌拒绝且不解释判定依据。" />
+                      Prompt leak guard
+                      <InfoHint text="Off by default. When enabled, the runtime injects anti-leak instructions and refuses prompt probing more defensively." />
                     </span>
                     <label className="admin-switch-row">
                       <input
@@ -2838,12 +2248,12 @@ export default function AdminSettingsPage() {
                         }
                         disabled={loading}
                       />
-                      <span>{selectedRuntime.preventPromptLeak ? "开启" : "关闭"}</span>
+                      <span>{formatToggleState(selectedRuntime.preventPromptLeak)}</span>
                     </label>
                   </div>
 
                   <div className="admin-field-row split">
-                    <span>深度思考</span>
+                    <span>Reasoning</span>
                     <label
                       className={`admin-switch-row ${providerSupportsReasoning ? "" : "disabled"}`}
                     >
@@ -2853,15 +2263,15 @@ export default function AdminSettingsPage() {
                         onChange={(e) => updateRuntimeField("enableThinking", e.target.checked)}
                         disabled={loading || !providerSupportsReasoning}
                       />
-                      <span>{selectedRuntime.enableThinking ? "开启" : "关闭"}</span>
+                      <span>{formatToggleState(selectedRuntime.enableThinking)}</span>
                     </label>
                   </div>
 
                   {!showOpenRouterPanel && !showAliyunPanel && !showPackyCodePanel ? (
                     <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens-chat">
                       <span className="admin-label-with-hint">
-                        上下文窗口
-                        <InfoHint text="Chat 协议配置项，可手动编辑。" />
+                        Context window
+                        <InfoHint text="A Chat-protocol setting that can be edited manually." />
                       </span>
                       <NumberRuntimeInput
                         id="admin-runtime-context-window-tokens-chat"
@@ -2878,8 +2288,8 @@ export default function AdminSettingsPage() {
                   {!showOpenRouterPanel && !showAliyunPanel && !showPackyCodePanel ? (
                     <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens-chat">
                       <span className="admin-label-with-hint">
-                        最大输入长度
-                        <InfoHint text="Chat 协议配置项，可手动编辑。" />
+                        Max input tokens
+                        <InfoHint text="A Chat-protocol setting that can be edited manually." />
                       </span>
                       <NumberRuntimeInput
                         id="admin-runtime-max-input-tokens-chat"
@@ -2895,14 +2305,14 @@ export default function AdminSettingsPage() {
 
                   <label className="admin-field-row split" htmlFor="admin-runtime-max-output-tokens-chat">
                     <span className="admin-label-with-hint">
-                      {showOpenRouterPanel ? "最大输出长度（Max Tokens）" : "最大输出长度"}
+                      {showOpenRouterPanel ? "Max output tokens" : "Max output length"}
                       <InfoHint
                         text={
                           showOpenRouterPanel
-                            ? "会映射到 OpenRouter Chat 的 max_tokens 参数。"
+                            ? "This maps to the `max_tokens` field on OpenRouter Chat."
                           : showAliyunPanel
-                              ? "阿里云接入固定使用模型默认最大输出，不手动下发最大输出参数。"
-                              : "会映射到 Chat 的最大输出参数。"
+                              ? "Aliyun always uses the model default for maximum output and does not send an override."
+                              : "This maps to the max output setting for the Chat API."
                         }
                       />
                     </span>
@@ -2921,17 +2331,12 @@ export default function AdminSettingsPage() {
                       }
                     />
                   </label>
-                  {showPackyCodePanel ? (
-                    <p className="admin-field-note">
-                      PackyCode / `gpt-5.4` 的最大输出已固定为 256000。
-                    </p>
-                  ) : null}
                   {showAliyunPanel && aliyunWebSearchAllowed ? (
                     <>
                       <div className="admin-field-row split">
                         <span className="admin-label-with-hint">
-                          联网搜索
-                          <InfoHint text="启用后会下发联网搜索能力；回应模式会挂载网页搜索工具。" />
+                          Web search
+                          <InfoHint text="Enables search capability. In Responses mode it mounts the web-search tool." />
                         </span>
                         <label className="admin-switch-row">
                           <input
@@ -2942,12 +2347,12 @@ export default function AdminSettingsPage() {
                             }
                             disabled={loading}
                           />
-                          <span>{selectedRuntime.enableWebSearch ? "开启" : "关闭"}</span>
+                          <span>{formatToggleState(selectedRuntime.enableWebSearch)}</span>
                         </label>
                       </div>
 
                       <div className="admin-field-row split">
-                        <span>强制搜索</span>
+                        <span>Force search</span>
                         <label className="admin-switch-row">
                           <input
                             type="checkbox"
@@ -2957,12 +2362,12 @@ export default function AdminSettingsPage() {
                             }
                             disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
                           />
-                          <span>{selectedRuntime.aliyunSearchForced ? "开启" : "关闭"}</span>
+                          <span>{formatToggleState(selectedRuntime.aliyunSearchForced)}</span>
                         </label>
                       </div>
 
                       <div className="admin-field-row split">
-                        <span>搜索策略</span>
+                        <span>Search strategy</span>
                         <PortalSelect
                           value={selectedRuntime.aliyunSearchStrategy}
                           options={ALIYUN_SEARCH_STRATEGY_OPTIONS}
@@ -2973,7 +2378,7 @@ export default function AdminSettingsPage() {
                       </div>
 
                       <div className="admin-field-row split">
-                        <span>返回搜索来源</span>
+                        <span>Return sources</span>
                         <label className="admin-switch-row">
                           <input
                             type="checkbox"
@@ -2983,12 +2388,12 @@ export default function AdminSettingsPage() {
                             }
                             disabled={aliyunSearchDisabled || aliyunDashscopeSearchOnlyDisabled}
                           />
-                          <span>{selectedRuntime.aliyunSearchEnableSource ? "开启" : "关闭"}</span>
+                          <span>{formatToggleState(selectedRuntime.aliyunSearchEnableSource)}</span>
                         </label>
                       </div>
 
                       <div className="admin-field-row split">
-                        <span>角标标注</span>
+                        <span>Citations</span>
                         <label className="admin-switch-row">
                           <input
                             type="checkbox"
@@ -3002,12 +2407,12 @@ export default function AdminSettingsPage() {
                               !selectedRuntime.aliyunSearchEnableSource
                             }
                           />
-                          <span>{selectedRuntime.aliyunSearchEnableCitation ? "开启" : "关闭"}</span>
+                          <span>{formatToggleState(selectedRuntime.aliyunSearchEnableCitation)}</span>
                         </label>
                       </div>
 
                       <div className="admin-field-row split">
-                        <span>角标格式</span>
+                        <span>Citation format</span>
                         <PortalSelect
                           value={selectedRuntime.aliyunSearchCitationFormat}
                           options={ALIYUN_SEARCH_CITATION_FORMAT_OPTIONS}
@@ -3024,7 +2429,7 @@ export default function AdminSettingsPage() {
                       </div>
 
                       <div className="admin-field-row split">
-                        <span>垂域搜索</span>
+                        <span>Domain search</span>
                         <label className="admin-switch-row">
                           <input
                             type="checkbox"
@@ -3038,15 +2443,15 @@ export default function AdminSettingsPage() {
                             disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
                           />
                           <span>
-                            {selectedRuntime.aliyunSearchEnableSearchExtension
-                              ? "开启"
-                              : "关闭"}
+                            {formatToggleState(
+                              selectedRuntime.aliyunSearchEnableSearchExtension,
+                            )}
                           </span>
                         </label>
                       </div>
 
                       <div className="admin-field-row split">
-                        <span>首包先返回来源</span>
+                        <span>Prepend sources in first chunk</span>
                         <label className="admin-switch-row">
                           <input
                             type="checkbox"
@@ -3059,14 +2464,12 @@ export default function AdminSettingsPage() {
                             }
                             disabled={aliyunSearchDisabled || aliyunDashscopeSearchOnlyDisabled}
                           />
-                          <span>
-                            {selectedRuntime.aliyunSearchPrependSearchResult ? "开启" : "关闭"}
-                          </span>
+                          <span>{formatToggleState(selectedRuntime.aliyunSearchPrependSearchResult)}</span>
                         </label>
                       </div>
 
                       <div className="admin-field-row split">
-                        <span>搜索时效</span>
+                        <span>Freshness</span>
                         <PortalSelect
                           value={selectedRuntime.aliyunSearchFreshness}
                           options={ALIYUN_SEARCH_FRESHNESS_OPTIONS}
@@ -3078,8 +2481,8 @@ export default function AdminSettingsPage() {
 
                       <label className="admin-field-row" htmlFor="admin-runtime-aliyun-assigned-sites">
                         <span className="admin-label-with-hint">
-                          限定站点
-                          <InfoHint text="每行或逗号分隔一个域名，最多 25 个。" />
+                          Allowed sites
+                          <InfoHint text="Enter one domain per line, or separate them with commas. Maximum: 25 domains." />
                         </span>
                         <textarea
                           className="admin-textarea admin-runtime-textarea admin-aliyun-search-textarea"
@@ -3094,15 +2497,15 @@ export default function AdminSettingsPage() {
                                 .filter(Boolean),
                             )
                           }
-                          placeholder={"例如：baidu.com\nsina.cn"}
+                          placeholder={"Example:\nbaidu.com\nsina.cn"}
                           disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
                         />
                       </label>
 
                       <label className="admin-field-row" htmlFor="admin-runtime-aliyun-prompt-intervene">
                         <span className="admin-label-with-hint">
-                          检索范围干预
-                          <InfoHint text="自然语言限制检索范围，例如“仅检索人工智能技术相关内容”。" />
+                          Search scope hint
+                          <InfoHint text="Use natural language to narrow the search scope, for example: `Only search for AI technology content`." />
                         </span>
                         <textarea
                           className="admin-textarea admin-runtime-textarea admin-aliyun-search-textarea"
@@ -3114,7 +2517,7 @@ export default function AdminSettingsPage() {
                               e.target.value,
                             )
                           }
-                          placeholder="例如：仅检索人工智能技术相关内容"
+                          placeholder="Example: Only search for AI technology content."
                           disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
                         />
                       </label>
@@ -3126,8 +2529,8 @@ export default function AdminSettingsPage() {
                             htmlFor="admin-runtime-aliyun-web-search-max-tool-calls"
                           >
                             <span className="admin-label-with-hint">
-                              工具调用轮次上限
-                              <InfoHint text="仅回应模式生效，范围 1 到 10。" />
+                              Max tool-call rounds
+                              <InfoHint text="Applies only in Responses mode. Range: 1 to 10." />
                             </span>
                             <NumberRuntimeInput
                               id="admin-runtime-aliyun-web-search-max-tool-calls"
@@ -3143,7 +2546,7 @@ export default function AdminSettingsPage() {
                           </label>
 
                           <div className="admin-field-row split">
-                            <span>附加工具：网页提取</span>
+                            <span>Extra tool: web extractor</span>
                             <label className="admin-switch-row">
                               <input
                                 type="checkbox"
@@ -3156,16 +2559,12 @@ export default function AdminSettingsPage() {
                                 }
                                 disabled={aliyunSearchDisabled}
                               />
-                              <span>
-                                {selectedRuntime.aliyunResponsesEnableWebExtractor
-                                  ? "开启"
-                                  : "关闭"}
-                              </span>
+                              <span>{formatToggleState(selectedRuntime.aliyunResponsesEnableWebExtractor)}</span>
                             </label>
                           </div>
 
                           <div className="admin-field-row split">
-                            <span>附加工具：代码解释器</span>
+                            <span>Extra tool: code interpreter</span>
                             <label className="admin-switch-row">
                               <input
                                 type="checkbox"
@@ -3178,11 +2577,7 @@ export default function AdminSettingsPage() {
                                 }
                                 disabled={aliyunSearchDisabled}
                               />
-                              <span>
-                                {selectedRuntime.aliyunResponsesEnableCodeInterpreter
-                                  ? "开启"
-                                  : "关闭"}
-                              </span>
+                              <span>{formatToggleState(selectedRuntime.aliyunResponsesEnableCodeInterpreter)}</span>
                             </label>
                           </div>
                         </>
@@ -3194,8 +2589,8 @@ export default function AdminSettingsPage() {
                     <>
                       <div className="admin-field-row split">
                         <span className="admin-label-with-hint">
-                          PDF 引擎
-                          <InfoHint text="对应 file-parser 插件的 pdf.engine。auto 为不显式下发，交由 OpenRouter 自动选择。" />
+                          PDF engine
+                          <InfoHint text="Maps to `pdf.engine` on the file-parser plugin. `auto` means the field is omitted and OpenRouter chooses automatically." />
                         </span>
                         <PortalSelect
                           value={selectedRuntime.openrouterPdfEngine}
@@ -3208,76 +2603,58 @@ export default function AdminSettingsPage() {
                     </>
                   ) : null}
 
-                  {showPackyCodePanel ? (
-                    <p className="admin-field-note warning">
-                      当前 PackyCode 接入仅启用标准 Chat Completions；联网搜索、OpenRouter 插件和
-                      Responses 协议暂不支持。
-                    </p>
-                  ) : null}
-                  {showPackyCodePanel ? (
-                    <p className="admin-field-note">
-                      当前项目对 Packy 实际下发的上游字段为 `model`、`messages`、`stream`、
-                      `max_tokens` 与 `reasoning.effort`；`temperature`、`top_p` 等字段不会发送。
-                    </p>
-                  ) : null}
-                  {!showOpenRouterPanel && !showAliyunPanel ? (
-                    <p
-                      className={`admin-field-note ${providerSupportsReasoning ? "" : "warning"}`}
-                    >
-                      {providerReasoningHint}
-                    </p>
-                  ) : null}
                   {showAliyunPanel && !aliyunModelPolicy.supported ? (
                     <p className="admin-field-note warning">
-                      {aliyunModelPolicy.errorMessage}
+                      {getAliyunPolicyMessage(aliyunModelPolicy)}
                     </p>
                   ) : null}
                   {showAliyunPanel && aliyunModelPolicy.key === "kimi_k2_5" ? (
                     <p className="admin-field-note">
-                      提示：Kimi 仅支持 `kimi-k2.5`，固定使用 DashScope 原生多模态端点，且不支持联网搜索。
+                      Note: Kimi supports only `kimi-k2.5` here. It is locked to the
+                      DashScope native multimodal endpoint and does not support web search.
                     </p>
                   ) : null}
                   {showAliyunPanel && aliyunModelPolicy.key === "minimax_m2" ? (
                     <p className="admin-field-note warning">
-                      提示：MiniMax-M2.5 / MiniMax-M2.1 固定使用 Chat API，禁用联网搜索与图片输入。
+                      Note: MiniMax-M2.5 / MiniMax-M2.1 are locked to Chat API and disable
+                      both web search and image input.
                     </p>
                   ) : null}
                   {showAliyunPanel && !aliyunWebSearchAllowed && aliyunModelPolicy.supported ? (
                     <p className="admin-field-note warning">
-                      当前模型不支持联网搜索，相关搜索参数已自动隐藏并禁用。
+                      This model does not support web search. Related search controls are
+                      hidden and disabled automatically.
                     </p>
                   ) : null}
                   {showAliyunPanel && aliyunWebSearchAllowed && aliyunProtocol !== "dashscope" ? (
                     <p className="admin-field-note warning">
-                      提示：返回搜索来源、角标标注、角标格式、首包先返回来源仅在 DashScope 原生
-                      接口下生效。
+                      Note: source returns, citation toggles, citation format, and
+                      prepended search sources work only on the DashScope native API.
                     </p>
                   ) : null}
                   {showAliyunPanel && aliyunWebSearchAllowed && aliyunProtocol === "responses" ? (
                     <p className="admin-field-note warning">
-                      提示：回应模式的联网搜索通过网页搜索工具挂载，不下发搜索参数选项。
+                      Note: in Responses mode, web search is mounted as a tool instead of
+                      receiving explicit search parameter options.
                     </p>
                   ) : null}
                   {showAliyunPanel &&
                   selectedRuntime.aliyunFileProcessMode === "native_oss_url" ? (
                     <p className="admin-field-note warning">
-                      调试提示：原生文件 URL 模式已开启。若上游返回文件格式不支持，请切回“本地解析（兼容模式）”。
+                      Debug note: native file URL mode is on. If the upstream service
+                      rejects the file format, switch back to `Local parse (compatibility)`.
                     </p>
                   ) : null}
                 </>
               )}
             </div>
-          </section>
+            </section>
 
-              <section
-                className={`admin-panel preview${
-                  isAgentESelected ? " admin-agent-e-debug-panel" : ""
-                }`}
-              >
+            <section className="admin-panel admin-panel-preview preview">
             <div className="admin-panel-head">
-              <div className="admin-panel-head-title">
-                <h2>预览与调试</h2>
-                <InfoHint text="仅用于当前 API 参数调试，调试记录不写入数据库。" />
+              <div className="admin-panel-head-copy">
+                <p className="admin-panel-kicker">Live rehearsal</p>
+                <h2>Preview and debug</h2>
               </div>
               <button
                 type="button"
@@ -3285,7 +2662,7 @@ export default function AdminSettingsPage() {
                 onClick={onDebugClear}
                 disabled={debugLoading || loading}
               >
-                清空
+                Clear thread
               </button>
             </div>
 
@@ -3314,19 +2691,17 @@ export default function AdminSettingsPage() {
                   type="button"
                   className="admin-preview-error-close"
                   onClick={() => setDebugError("")}
-                  aria-label="关闭错误提示"
-                  title="关闭错误提示"
+                  aria-label="Dismiss debug error"
+                  title="Dismiss debug error"
                 >
                   <CloseXIcon />
                 </button>
               </div>
             ) : null}
-              </section>
-            </>
-          )}
+            </section>
+          </div>
         </div>
       </div>
-
     </div>
   );
 }

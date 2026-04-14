@@ -36,6 +36,8 @@ const REASONING_TOGGLE_ANIMATION_MS = 280;
 const SESSION_SWITCH_SETTLE_MAX_MS = 1200;
 const SESSION_SWITCH_SETTLE_QUIET_MS = 180;
 const MANUAL_SCROLL_PAUSE_MS = 900;
+const LATEST_STATE_ENTER_THRESHOLD_PX = 24;
+const LATEST_STATE_EXIT_THRESHOLD_PX = 72;
 const ASK_POPOVER_EDGE_MARGIN = 56;
 const CJK_PUNCTUATION_PATTERN = /([，。！？；：、“”‘’（）《》〈〉「」『』【】〔〕…—·]+)/g;
 const TYPOGRAPHY_SKIP_TAGS = new Set(["code", "pre", "kbd", "samp"]);
@@ -219,6 +221,14 @@ function normalizeRenderedMarkdown(value) {
   return lines.join("\n");
 }
 
+function resolveIsAtLatestWithHysteresis(remain, previousIsAtLatest = true) {
+  const safeRemain = Number.isFinite(remain) ? remain : Number.POSITIVE_INFINITY;
+  if (previousIsAtLatest) {
+    return safeRemain <= LATEST_STATE_EXIT_THRESHOLD_PX;
+  }
+  return safeRemain <= LATEST_STATE_ENTER_THRESHOLD_PX;
+}
+
 const MessageList = forwardRef(function MessageList({
   activeSessionId = "",
   messages,
@@ -318,7 +328,10 @@ const MessageList = forwardRef(function MessageList({
       }
 
       const remain = root.scrollHeight - (root.scrollTop + root.clientHeight);
-      setLatestState(remain <= 40, true);
+      setLatestState(
+        resolveIsAtLatestWithHysteresis(remain, isAtLatestRef.current),
+        true,
+      );
     },
     [setLatestState],
   );
@@ -338,20 +351,20 @@ const MessageList = forwardRef(function MessageList({
   );
 
   const checkIsAtLatest = useCallback(() => {
-    const root = rootRef.current;
-    if (!root) return true;
+      const root = rootRef.current;
+      if (!root) return true;
 
-    const remain = root.scrollHeight - (root.scrollTop + root.clientHeight);
-    if (Date.now() < sessionSwitchSettlingUntilRef.current) {
-      if (remain <= 72) {
-        return true;
+      const remain = root.scrollHeight - (root.scrollTop + root.clientHeight);
+      if (Date.now() < sessionSwitchSettlingUntilRef.current) {
+        if (remain <= LATEST_STATE_EXIT_THRESHOLD_PX) {
+          return true;
+        }
+        clearSessionSwitchSettling(false);
       }
-      clearSessionSwitchSettling(false);
-    }
-    const next = remain <= 40;
-    setLatestState(next);
-    return next;
-  }, [clearSessionSwitchSettling, setLatestState]);
+      const next = resolveIsAtLatestWithHysteresis(remain, isAtLatestRef.current);
+      setLatestState(next);
+      return next;
+    }, [clearSessionSwitchSettling, setLatestState]);
 
   const jumpToLatest = useCallback(() => {
     const root = rootRef.current;

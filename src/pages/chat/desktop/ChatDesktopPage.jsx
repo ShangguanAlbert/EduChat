@@ -149,13 +149,16 @@ const TEXT_PREVIEW_EXTENSIONS = new Set([
   "vue",
   "svelte",
 ]);
-const CHAT_AGENT_IDS = Object.freeze(["A", "B", "C", "D", "E"]);
+const CHAT_AGENT_IDS = Object.freeze(["A", "B", "C", "D"]);
+const REMOVED_AGENT_E_ID = "E";
+const REMOVED_AGENT_E_NAME = "SSCI审稿人";
+const REMOVED_AGENT_E_NOTICE =
+  "该会话原绑定的 SSCI审稿人已下线，当前会话不可继续对话。";
 const DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   A: "volcengine",
   B: "volcengine",
   C: "volcengine",
   D: "aliyun",
-  E: "openrouter",
 });
 const TEACHER_SCOPE_YANG_JUNFENG = "yang-junfeng";
 const AGENT_C_LOCKED_PROVIDER = "volcengine";
@@ -487,7 +490,6 @@ function sanitizeAgentProviderDefaults(raw) {
     B: sanitizeProvider(source.B, DEFAULT_AGENT_PROVIDER_MAP.B),
     C: sanitizeProvider(source.C, DEFAULT_AGENT_PROVIDER_MAP.C),
     D: sanitizeProvider(source.D, DEFAULT_AGENT_PROVIDER_MAP.D),
-    E: sanitizeProvider(source.E, DEFAULT_AGENT_PROVIDER_MAP.E),
   };
   next.C = AGENT_C_LOCKED_PROVIDER;
   return next;
@@ -586,7 +588,7 @@ function fillTeacherHomeDefaultUserInfo(profile) {
 }
 
 function resolveRuntimeConfigForAgent(agentId, runtimeConfigs) {
-  const safeAgentId = AGENT_META[agentId] ? agentId : "A";
+  const safeAgentId = CHAT_AGENT_IDS.includes(agentId) ? agentId : "A";
   const base = runtimeConfigs?.[safeAgentId] || DEFAULT_AGENT_RUNTIME_CONFIG;
   if (safeAgentId === "C") {
     return {
@@ -601,12 +603,7 @@ function resolveRuntimeConfigForAgent(agentId, runtimeConfigs) {
       enableWebSearch: true,
     };
   }
-  if (safeAgentId !== "E") return base;
-  return {
-    ...base,
-    provider: "volcengine",
-    protocol: "responses",
-  };
+  return base;
 }
 
 function normalizeUsageValue(value) {
@@ -659,11 +656,8 @@ function sanitizeContextSummaryMessage(raw) {
 }
 
 function getSmartContextDefaultEnabled(agentId) {
-  return (
-    String(agentId || "")
-      .trim()
-      .toUpperCase() === "E"
-  );
+  void agentId;
+  return false;
 }
 
 function sanitizeSmartContextSessionId(value) {
@@ -681,6 +675,18 @@ function sanitizeSmartContextAgentId(value) {
     .toUpperCase();
   if (CHAT_AGENT_IDS.includes(id)) return id;
   return "";
+}
+
+function sanitizeStoredAgentId(value) {
+  const id = String(value || "")
+    .trim()
+    .toUpperCase();
+  if (CHAT_AGENT_IDS.includes(id) || id === REMOVED_AGENT_E_ID) return id;
+  return "";
+}
+
+function isRemovedAgentId(value) {
+  return sanitizeStoredAgentId(value) === REMOVED_AGENT_E_ID;
 }
 
 function buildSmartContextKey(sessionId, agentId) {
@@ -777,7 +783,7 @@ function sanitizeAgentBySessionMap(raw) {
     .slice(0, 1200)
     .forEach(([rawSessionId, rawAgentId]) => {
       const sessionId = sanitizeSmartContextSessionId(rawSessionId);
-      const agentId = sanitizeSmartContextAgentId(rawAgentId);
+      const agentId = sanitizeStoredAgentId(rawAgentId);
       if (!sessionId || !agentId) return;
       normalized[sessionId] = agentId;
     });
@@ -791,8 +797,23 @@ function readAgentBySession(map, sessionId, fallback = "A") {
   const safeFallback = sanitizeSmartContextAgentId(fallback) || "A";
   if (!safeSessionId) return safeFallback;
 
-  const savedAgent = sanitizeSmartContextAgentId(source[safeSessionId]);
-  return savedAgent || safeFallback;
+  const savedAgent = sanitizeStoredAgentId(source[safeSessionId]);
+  if (savedAgent) return savedAgent;
+  return safeFallback;
+}
+
+function readStoredAgentBySession(map, sessionId) {
+  const source = map && typeof map === "object" ? map : {};
+  const safeSessionId = sanitizeSmartContextSessionId(sessionId);
+  if (!safeSessionId) return "";
+  return sanitizeStoredAgentId(source[safeSessionId]);
+}
+
+function readSelectableAgentBySession(map, sessionId, fallback = "A") {
+  const savedAgent = readStoredAgentBySession(map, sessionId);
+  if (CHAT_AGENT_IDS.includes(savedAgent)) return savedAgent;
+  const safeFallback = sanitizeSmartContextAgentId(fallback) || "A";
+  return safeFallback;
 }
 
 function patchAgentBySession(map, sessionId, agentId) {
@@ -840,8 +861,7 @@ function ensureAgentBySessionMap(map, sessions, fallbackAgent = "A") {
   let changed = false;
   const next = {};
   validSessionIds.forEach((sessionId) => {
-    const nextAgent =
-      sanitizeSmartContextAgentId(source[sessionId]) || safeFallback;
+    const nextAgent = sanitizeStoredAgentId(source[sessionId]) || safeFallback;
     if (source[sessionId] !== nextAgent) changed = true;
     next[sessionId] = nextAgent;
   });
@@ -1080,6 +1100,9 @@ export default function ChatDesktopPage() {
   const pendingMetaSaveRef = useRef(false);
   const messagePersistChainRef = useRef(new Map());
   const messagePersistRevisionRef = useRef(new Map());
+  const homeStageSessionIdRef = useRef("");
+  const startedSessionIdsRef = useRef(new Set());
+  const stableCanUseMessageInputRef = useRef(false);
   const groupsRef = useRef(initialViewState.groups);
   const sessionsRef = useRef(initialViewState.sessions);
   const sessionMessagesRef = useRef(initialViewState.sessionMessages);
@@ -1123,10 +1146,15 @@ export default function ChatDesktopPage() {
     () => sessions.find((s) => s.id === activeId) || null,
     [sessions, activeId],
   );
-  const activeSessionAgent = useMemo(
-    () => readAgentBySession(agentBySession, activeId, "A"),
+  const activeSessionStoredAgent = useMemo(
+    () => readStoredAgentBySession(agentBySession, activeId),
     [agentBySession, activeId],
   );
+  const activeSessionAgent = useMemo(
+    () => readSelectableAgentBySession(agentBySession, activeId, "A"),
+    [agentBySession, activeId],
+  );
+  const activeSessionUsesRemovedAgent = isRemovedAgentId(activeSessionStoredAgent);
   const messages = useMemo(
     () => sessionMessages[activeId] || [],
     [sessionMessages, activeId],
@@ -1198,21 +1226,55 @@ export default function ChatDesktopPage() {
     () => messages.filter((m) => m.role === "user").length,
     [messages],
   );
+  useLayoutEffect(() => {
+    const source =
+      sessionMessages && typeof sessionMessages === "object" ? sessionMessages : {};
+    Object.entries(source).forEach(([sessionId, list]) => {
+      if (!sessionId) return;
+      if (!chatDataService.hasUserTurn(list)) return;
+      startedSessionIdsRef.current.add(sessionId);
+      if (homeStageSessionIdRef.current === sessionId) {
+        homeStageSessionIdRef.current = "";
+      }
+    });
+  }, [sessionMessages]);
+  useLayoutEffect(() => {
+    if (!activeId) return;
+    if (!chatDataService.hasUserTurn(messages)) return;
+    startedSessionIdsRef.current.add(activeId);
+    if (homeStageSessionIdRef.current === activeId) {
+      homeStageSessionIdRef.current = "";
+    }
+  }, [activeId, messages]);
   const hasStartedConversation = useMemo(
-    () => chatDataService.hasUserTurn(messages),
-    [messages],
+    () =>
+      chatDataService.hasUserTurn(messages) ||
+      startedSessionIdsRef.current.has(activeId) ||
+      homeStageSessionIdRef.current !== activeId,
+    [activeId, messages],
   );
   const displayedMessages = useMemo(
     () => (hasStartedConversation ? messages : []),
     [hasStartedConversation, messages],
   );
   const hasAtLeastOneSession = sessions.length > 0;
-  const canUseMessageInput = hasAtLeastOneSession && !!activeSession;
+  useLayoutEffect(() => {
+    if (hasAtLeastOneSession && activeSession) {
+      stableCanUseMessageInputRef.current = true;
+      return;
+    }
+    if (!hasAtLeastOneSession || !activeId) {
+      stableCanUseMessageInputRef.current = false;
+    }
+  }, [hasAtLeastOneSession, activeId, activeSession]);
   const roundWarningDismissed = !!dismissedRoundWarningBySession[activeId];
   const userInfoComplete = useMemo(
     () => isUserInfoComplete(userInfo),
     [userInfo],
   );
+  const isActiveSessionStreaming =
+    isStreaming &&
+    sanitizeSmartContextSessionId(streamTargetRef.current?.sessionId) === activeId;
   const interactionLocked = bootstrapLoading || forceUserInfoModal || userInfoSaving;
   const shouldConfirmStreamingExit = isStreaming;
   const teacherLockedAgentId = useMemo(
@@ -1221,6 +1283,9 @@ export default function ChatDesktopPage() {
   );
   const teacherScopedAgentLocked = !!teacherLockedAgentId;
   const activeAgent = useMemo(() => AGENT_META[agent] || AGENT_META.A, [agent]);
+  const activeAgentDisplayName = activeSessionUsesRemovedAgent
+    ? `${REMOVED_AGENT_E_NAME}（已下线）`
+    : activeAgent.name;
   const activeRuntimeConfig = useMemo(
     () => resolveRuntimeConfigForAgent(agent, agentRuntimeConfigs),
     [agentRuntimeConfigs, agent],
@@ -1294,15 +1359,24 @@ export default function ChatDesktopPage() {
     buildFreshAutoSessionBundleRef.current = buildFreshAutoSessionBundle;
   }, [buildFreshAutoSessionBundle]);
   const agentSwitchLocked =
-    teacherScopedAgentLocked || effectiveSmartContextEnabled;
+    teacherScopedAgentLocked || effectiveSmartContextEnabled || activeSessionUsesRemovedAgent;
   const agentSelectDisabledTitle = teacherScopedAgentLocked
     ? "当前授课教师下已锁定为“远程教育”智能体。"
-    : "开启智能上下文管理后，需先关闭开关才能切换智能体。";
+    : activeSessionUsesRemovedAgent
+      ? REMOVED_AGENT_E_NOTICE
+      : "开启智能上下文管理后，需先关闭开关才能切换智能体。";
   const canonicalActiveHref = buildChatSessionHref(activeId);
+  const isSessionRouteSyncPending =
+    !!activeId && canonicalActiveHref !== currentRouteHref;
+  const canUseMessageInput =
+    hasAtLeastOneSession &&
+    (!!activeSession ||
+      (isSessionRouteSyncPending && stableCanUseMessageInputRef.current)) &&
+    !activeSessionUsesRemovedAgent;
   const sessionActionsLocked =
     bootstrapPending ||
     sessionMutationPending ||
-    (!!activeId && canonicalActiveHref !== currentRouteHref);
+    isSessionRouteSyncPending;
   const makeRuntimeSnapshot = (agentId = agent) => {
     const runtime = resolveRuntimeConfigForAgent(agentId, agentRuntimeConfigs);
     return createRuntimeSnapshot({
@@ -1405,6 +1479,13 @@ export default function ChatDesktopPage() {
         !confirmStreamingExit("switch-session")
       ) {
         return;
+      }
+      if (
+        currentActiveId &&
+        safeSessionId !== currentActiveId &&
+        homeStageSessionIdRef.current === currentActiveId
+      ) {
+        homeStageSessionIdRef.current = "";
       }
       syncImmediateRefs({
         activeId: safeSessionId,
@@ -1976,6 +2057,7 @@ export default function ChatDesktopPage() {
       nextSmartContextEnabledBySessionAgent: nextSmartContextMap,
     });
     if (!persistResult.ok) return;
+    homeStageSessionIdRef.current = next.session.id;
     try {
       await persistMessageUpsertsImmediately(
         next.messages.map((message) => ({
@@ -2202,6 +2284,7 @@ export default function ChatDesktopPage() {
         ),
       });
       autoCreatedSessionRecord = freshBundle.sessionRecord;
+      homeStageSessionIdRef.current = freshBundle.activeId;
       nextSessions = freshBundle.sessions;
       nextMessages = freshBundle.sessionMessages;
       nextActiveSessionId = freshBundle.activeId;
@@ -2323,6 +2406,7 @@ export default function ChatDesktopPage() {
         ),
       });
       autoCreatedSessionRecord = freshBundle.sessionRecord;
+      homeStageSessionIdRef.current = freshBundle.activeId;
       nextSessions = freshBundle.sessions;
       nextMessages = freshBundle.sessionMessages;
       nextActiveSessionId = freshBundle.activeId;
@@ -2704,6 +2788,13 @@ export default function ChatDesktopPage() {
   async function onSend(text, files) {
     if (!activeId || isStreaming || interactionLocked || !userInfoComplete)
       return;
+    if (activeSessionUsesRemovedAgent) {
+      setStreamError(REMOVED_AGENT_E_NOTICE);
+      return;
+    }
+    if (homeStageSessionIdRef.current === activeId) {
+      homeStageSessionIdRef.current = "";
+    }
     const runtimeConfig = resolveRuntimeConfigForAgent(
       agent,
       agentRuntimeConfigs,
@@ -3129,6 +3220,10 @@ export default function ChatDesktopPage() {
       agentRuntimeConfigs,
     );
     setStreamError("");
+    if (activeSessionUsesRemovedAgent) {
+      setStreamError(REMOVED_AGENT_E_NOTICE);
+      return;
+    }
 
     const currentSessionId = activeId;
     const list = sessionMessages[currentSessionId] || [];
@@ -3461,7 +3556,7 @@ export default function ChatDesktopPage() {
       groups,
       messages: exportMessages,
       userInfo,
-      activeAgentName: activeAgent.name,
+      activeAgentName: activeAgentDisplayName,
       apiTemperature: String(activeRuntimeConfig.temperature),
       apiTopP: String(activeRuntimeConfig.topP),
       apiReasoningEffort: activeRuntimeConfig.enableThinking ? "high" : "none",
@@ -3673,6 +3768,7 @@ export default function ChatDesktopPage() {
         );
         if (bootstrapAutoSessionBundle) {
           rawActiveId = bootstrapAutoSessionBundle.activeId;
+          homeStageSessionIdRef.current = bootstrapAutoSessionBundle.activeId;
         }
         const nextTeacherScopeKey = normalizeTeacherScopeKey(
           data?.teacherScopeKey,
@@ -4327,6 +4423,7 @@ export default function ChatDesktopPage() {
               onChange={onAgentChange}
               disabled={agentSwitchLocked}
               disabledTitle={agentSelectDisabledTitle}
+              displayName={activeAgentDisplayName}
             />
             <button
               type="button"
@@ -4399,10 +4496,20 @@ export default function ChatDesktopPage() {
           </div>
         </div>
 
-        {(streamError || stateSaveError || bootstrapError || noteActionError) && (
+        {(streamError ||
+          stateSaveError ||
+          bootstrapError ||
+          noteActionError ||
+          activeSessionUsesRemovedAgent) && (
           <div className="stream-error">
             <span>
-              {[streamError, stateSaveError, bootstrapError, noteActionError]
+              {[
+                activeSessionUsesRemovedAgent ? REMOVED_AGENT_E_NOTICE : "",
+                streamError,
+                stateSaveError,
+                bootstrapError,
+                noteActionError,
+              ]
                 .filter(Boolean)
                 .join(" | ")}
             </span>
@@ -4432,7 +4539,7 @@ export default function ChatDesktopPage() {
               ref={messageListRef}
               activeSessionId={activeId}
               messages={displayedMessages}
-              isStreaming={isStreaming}
+              isStreaming={isActiveSessionStreaming}
               streamingStatusText={streamingStatusText}
               focusMessageId={focusUserMessageId}
               bottomInset={messageBottomInset}
@@ -4480,8 +4587,8 @@ export default function ChatDesktopPage() {
                 onStop={onStopStreaming}
                 onPrepareFiles={onPrepareFiles}
                 onFilesChange={handleComposerFilesChange}
-                disabled={interactionLocked || !canUseMessageInput}
-                isStreaming={isStreaming}
+                disabled={interactionLocked || !canUseMessageInput || activeSessionUsesRemovedAgent}
+                isStreaming={isActiveSessionStreaming}
                 layoutMode={hasStartedConversation ? "thread" : "home"}
                 quoteText={selectedAskText}
                 onClearQuote={() => setSelectedAskText("")}

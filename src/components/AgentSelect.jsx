@@ -7,7 +7,6 @@ const AGENTS = [
   { id: "B", name: "智能体 B" },
   { id: "C", name: "远程教育" },
   { id: "D", name: "千问3.5" },
-  { id: "E", name: "SSCI审稿人" },
 ];
 
 export default function AgentSelect({
@@ -16,6 +15,7 @@ export default function AgentSelect({
   onOpenApiSettings,
   disabled = false,
   disabledTitle = "",
+  displayName = "",
 }) {
   const selectedIndex = useMemo(
     () =>
@@ -27,8 +27,8 @@ export default function AgentSelect({
   );
 
   const current = useMemo(
-    () => AGENTS.find((a) => a.id === value) ?? AGENTS[0],
-    [value],
+    () => (displayName ? { id: value, name: displayName } : AGENTS.find((a) => a.id === value) ?? AGENTS[0]),
+    [displayName, value],
   );
 
   const [open, setOpen] = useState(false);

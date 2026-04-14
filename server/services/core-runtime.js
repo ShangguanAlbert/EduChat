@@ -27,22 +27,8 @@ import { countTokens, encodeChat } from "gpt-tokenizer";
 import { resolveConfiguredBasePath, withBasePath } from "../config/base-path.js";
 import { SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT } from "../prompts/leakProtectionPrompt.js";
 import { PROMPT_LEAK_PROBE_KEYWORDS } from "../prompts/leakProtectionKeywords.js";
-import {
-  AGENT_E_CONFIG_KEY,
-  AGENT_E_FIXED_PROVIDER,
-  AGENT_E_ID,
-} from "../agent-e/constants.js";
 
 const APP_BASE_PATH = resolveConfiguredBasePath();
-import {
-  buildAgentEAdminSettingsResponse,
-  createAgentEConfigModel,
-  normalizeAgentEConfigDoc,
-  sanitizeAgentEConfigPayload,
-  sanitizeAgentERuntime,
-} from "../agent-e/config.js";
-import { selectAgentESkills } from "../agent-e/skills/registry.js";
-import { buildAgentESystemPrompt } from "../agent-e/promptComposer.js";
 import {
   buildAliyunChatPayload,
   buildAliyunDashScopePayload,
@@ -1796,8 +1782,6 @@ const classroomHomeworkFileSchema = new mongoose.Schema(
 const ClassroomHomeworkFile =
   mongoose.models.ClassroomHomeworkFile ||
   mongoose.model("ClassroomHomeworkFile", classroomHomeworkFileSchema);
-const AgentEConfig = createAgentEConfigModel(mongoose);
-
 function normalizeMessages(messages) {
   if (!Array.isArray(messages)) return [];
 
@@ -4780,82 +4764,6 @@ async function attachFilesToLatestUserMessageByLocalParsing(
   }
 
   return null;
-}
-
-async function streamAgentEResponse({
-  res,
-  messages,
-  files = [],
-  volcengineFileRefs = [],
-  preparedAttachmentRefs = [],
-  stagedAttachmentRefs = [],
-  runtimeOverride = null,
-  chatUserId = "",
-  chatStorageUserId = "",
-  teacherScopeKey = DEFAULT_TEACHER_SCOPE_KEY,
-  sessionId = "",
-  smartContextEnabled = false,
-  contextMode = "append",
-  attachUploadedFiles = true,
-}) {
-  const config = await readAgentEConfig();
-  if (!config.enabled) {
-    res.status(403).json({ error: "SSCI审稿人当前已被管理员禁用。" });
-    return;
-  }
-
-  let runtime = sanitizeAgentERuntime(runtimeOverride, config.runtime);
-  const effectiveProvider = AGENT_E_FIXED_PROVIDER;
-  runtime = sanitizeSingleAgentRuntimeConfig(
-    {
-      ...runtime,
-      provider: effectiveProvider,
-    },
-    "A",
-  );
-  runtime.provider = effectiveProvider;
-
-  const selectedSkills = selectAgentESkills({
-    messages,
-    bindings: config.skills,
-    maxSkills: config.skillPolicy?.maxSkillsPerTurn,
-    autoSelect: !!config.skillPolicy?.autoSelect,
-  });
-  const composedSystemPrompt = buildAgentESystemPrompt({
-    config,
-    selectedSkills,
-  });
-
-  await streamAgentResponse({
-    res,
-    agentId: AGENT_E_ID,
-    messages,
-    files,
-    volcengineFileRefs,
-    preparedAttachmentRefs,
-    stagedAttachmentRefs,
-    runtimeConfig: runtime,
-    systemPromptOverride: composedSystemPrompt,
-    providerOverride: effectiveProvider,
-    modelOverride: runtime.model,
-    metaExtras: {
-      selectedSkills: selectedSkills.map((item) => item.id),
-      skillStrictMode: !!config.skillPolicy?.strictMode,
-      outputSchema: config.reviewPolicy?.forceStructuredOutput
-        ? "ssci-problem-list-v1"
-        : "ssci-problem-list-flex-v1",
-      evidenceAnchorsRequired: !!config.reviewPolicy?.requireEvidenceAnchors,
-      providerMode: "locked",
-      providerLockedTo: effectiveProvider,
-    },
-    chatUserId,
-    chatStorageUserId,
-    teacherScopeKey,
-    sessionId,
-    smartContextEnabled,
-    contextMode,
-    attachUploadedFiles,
-  });
 }
 
 async function streamAgentResponse({
@@ -8329,7 +8237,7 @@ async function readSessionContextRef({
     provider,
     protocol,
     model,
-    agentId: ["A", "B", "C", "D", AGENT_E_ID].includes(agentId) ? agentId : "",
+    agentId: ["A", "B", "C", "D"].includes(agentId) ? agentId : "",
     updatedAt: sanitizeIsoDate(raw.updatedAt),
   };
 }
@@ -9612,18 +9520,6 @@ async function getSystemPromptByAgent(agentId) {
 
 async function getResolvedAgentRuntimeConfig(agentId) {
   const targetAgent = sanitizeAgent(agentId);
-  if (targetAgent === AGENT_E_ID) {
-    try {
-      const agentEConfig = await readAgentEConfig();
-      return sanitizeAgentERuntime(
-        agentEConfig?.runtime,
-        agentEConfig?.runtime,
-      );
-    } catch (error) {
-      console.error("Failed to load agent E runtime config:", error);
-      return sanitizeAgentERuntime();
-    }
-  }
   try {
     const config = await readAdminAgentConfig();
     const resolved = resolveAgentRuntimeConfigs(config.runtimeConfigs);
@@ -9646,32 +9542,6 @@ function getDefaultSystemPrompt() {
 async function readAdminAgentConfig() {
   const doc = await AdminConfig.findOne({ key: ADMIN_CONFIG_KEY }).lean();
   return normalizeAdminConfigDoc(doc);
-}
-
-async function readAgentEConfig() {
-  const doc = await AgentEConfig.findOne({ key: AGENT_E_CONFIG_KEY }).lean();
-  return normalizeAgentEConfigDoc(doc);
-}
-
-async function writeAgentEConfig(raw) {
-  const previous = await readAgentEConfig();
-  const normalized = sanitizeAgentEConfigPayload(raw, previous);
-  const { updatedAt: _ignore, ...payload } = normalized;
-  const doc = await AgentEConfig.findOneAndUpdate(
-    { key: AGENT_E_CONFIG_KEY },
-    {
-      $set: {
-        ...payload,
-        key: AGENT_E_CONFIG_KEY,
-      },
-    },
-    {
-      upsert: true,
-      new: true,
-      setDefaultsOnInsert: true,
-    },
-  ).lean();
-  return normalizeAgentEConfigDoc(doc);
 }
 
 function sanitizeAdminClassroomTaskType(value, fallback = "text") {
@@ -12823,7 +12693,7 @@ function sanitizeSmartContextMapAgentId(value) {
   const key = String(value || "")
     .trim()
     .toUpperCase();
-  if (["A", "B", "C", "D", AGENT_E_ID].includes(key)) return key;
+  if (["A", "B", "C", "D"].includes(key)) return key;
   return "";
 }
 
@@ -13521,7 +13391,7 @@ function sanitizeAgent(value) {
   const id = String(value || "")
     .trim()
     .toUpperCase();
-  if (["A", "B", "C", "D", AGENT_E_ID].includes(id)) return id;
+  if (["A", "B", "C", "D"].includes(id)) return id;
   return "A";
 }
 
@@ -13532,7 +13402,7 @@ function resolveTeacherScopedLockedAgentId(teacherScopeKey) {
   )
     .trim()
     .toUpperCase();
-  if (["A", "B", "C", "D", AGENT_E_ID].includes(rawLockedAgent)) {
+  if (["A", "B", "C", "D"].includes(rawLockedAgent)) {
     return rawLockedAgent;
   }
   return "";
@@ -17558,16 +17428,6 @@ export {
   WebSocketServer,
   SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT,
   PROMPT_LEAK_PROBE_KEYWORDS,
-  AGENT_E_CONFIG_KEY,
-  AGENT_E_FIXED_PROVIDER,
-  AGENT_E_ID,
-  buildAgentEAdminSettingsResponse,
-  createAgentEConfigModel,
-  normalizeAgentEConfigDoc,
-  sanitizeAgentEConfigPayload,
-  sanitizeAgentERuntime,
-  selectAgentESkills,
-  buildAgentESystemPrompt,
   buildAliyunChatPayload,
   buildAliyunDashScopePayload,
   buildAliyunHeaders,
@@ -17755,7 +17615,6 @@ export {
   AdminClassroomLessonFile,
   classroomHomeworkFileSchema,
   ClassroomHomeworkFile,
-  AgentEConfig,
   getDefaultRuntimeConfigByAgent,
   createDefaultAgentRuntimeConfigMap,
   normalizeMessages,
@@ -17814,7 +17673,6 @@ export {
   attachFilesToLatestUserMessageForOpenRouter,
   attachFilesToLatestUserMessageForAliyunDashScope,
   attachFilesToLatestUserMessageByLocalParsing,
-  streamAgentEResponse,
   streamAgentResponse,
   streamSeedreamImageGeneration,
   buildSeedreamImageGenerationRequest,
@@ -17943,8 +17801,6 @@ export {
   getResolvedAgentRuntimeConfig,
   getDefaultSystemPrompt,
   readAdminAgentConfig,
-  readAgentEConfig,
-  writeAgentEConfig,
   sanitizeAdminClassroomTaskType,
   sanitizeAdminClassroomTaskPayload,
   sanitizeAdminClassroomCourseFilePayload,

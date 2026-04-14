@@ -637,11 +637,8 @@ export async function streamAdminAgentDebug(
   const agentId = String(safePayload.agentId || "A")
     .trim()
     .toUpperCase();
-  const isAgentE = agentId === "E";
-  const endpoint = isAgentE
-    ? "/api/auth/admin/agent-e/debug-stream"
-    : "/api/auth/admin/agent-debug-stream";
-  const runtimeKey = isAgentE ? "runtimeOverride" : "runtimeConfig";
+  const endpoint = "/api/auth/admin/agent-debug-stream";
+  const runtimeKey = "runtimeConfig";
   const runtimePayload =
     safePayload.runtimeOverride &&
     typeof safePayload.runtimeOverride === "object"

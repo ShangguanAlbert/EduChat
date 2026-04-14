@@ -1,6 +1,5 @@
 export {
   streamAgentResponse,
-  streamAgentEResponse,
   resolveSmartContextRuntime,
   saveSessionContextRef,
   clearSessionContextRef,

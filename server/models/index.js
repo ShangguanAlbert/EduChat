@@ -9,5 +9,4 @@ export {
   AdminConfig,
   AdminClassroomLessonFile,
   ClassroomHomeworkFile,
-  AgentEConfig,
 } from "../services/core-runtime.js";

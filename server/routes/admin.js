@@ -24,16 +24,6 @@ export function registerAdminRoutes(app, deps) {
     WebSocketServer,
     SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT,
     PROMPT_LEAK_PROBE_KEYWORDS,
-    AGENT_E_CONFIG_KEY,
-    AGENT_E_FIXED_PROVIDER,
-    AGENT_E_ID,
-    buildAgentEAdminSettingsResponse,
-    createAgentEConfigModel,
-    normalizeAgentEConfigDoc,
-    sanitizeAgentEConfigPayload,
-    sanitizeAgentERuntime,
-    selectAgentESkills,
-    buildAgentESystemPrompt,
     buildAliyunChatPayload,
     buildAliyunDashScopePayload,
     buildAliyunHeaders,
@@ -219,7 +209,6 @@ export function registerAdminRoutes(app, deps) {
     AdminClassroomLessonFile,
     classroomHomeworkFileSchema,
     ClassroomHomeworkFile,
-    AgentEConfig,
     getDefaultRuntimeConfigByAgent,
     createDefaultAgentRuntimeConfigMap,
     normalizeMessages,
@@ -272,7 +261,6 @@ export function registerAdminRoutes(app, deps) {
     attachFilesToLatestUserMessageForOpenRouter,
     attachFilesToLatestUserMessageForAliyunDashScope,
     attachFilesToLatestUserMessageByLocalParsing,
-    streamAgentEResponse,
     streamAgentResponse,
     streamSeedreamImageGeneration,
     buildSeedreamImageGenerationRequest,
@@ -387,8 +375,6 @@ export function registerAdminRoutes(app, deps) {
     getResolvedAgentRuntimeConfig,
     getDefaultSystemPrompt,
     readAdminAgentConfig,
-    readAgentEConfig,
-    writeAgentEConfig,
     sanitizeAdminClassroomTaskType,
     sanitizeAdminClassroomTaskPayload,
     sanitizeAdminClassroomCourseFilePayload,
@@ -963,46 +949,6 @@ export function registerAdminRoutes(app, deps) {
     await ChatState.deleteOne({ _id: sourceState._id });
     return "dropped";
   }
-
-  app.get("/api/auth/admin/agent-e/settings", async (req, res) => {
-    if (!(await authenticateAdminRequest(req, res))) return;
-    const config = await readAgentEConfig();
-    res.json(buildAgentEAdminSettingsResponse(config));
-  });
-
-  app.put("/api/auth/admin/agent-e/settings", async (req, res) => {
-    if (!(await authenticateAdminRequest(req, res))) return;
-    const next = await writeAgentEConfig(req.body || {});
-    res.json(buildAgentEAdminSettingsResponse(next));
-  });
-
-  app.get("/api/auth/admin/agent-e/skills", async (req, res) => {
-    if (!(await authenticateAdminRequest(req, res))) return;
-    const config = await readAgentEConfig();
-    const payload = buildAgentEAdminSettingsResponse(config);
-    res.json({
-      ok: true,
-      skills: payload.config.skills,
-      availableSkills: payload.availableSkills,
-      updatedAt: payload.config.updatedAt,
-    });
-  });
-
-  app.put("/api/auth/admin/agent-e/skills", async (req, res) => {
-    if (!(await authenticateAdminRequest(req, res))) return;
-    const config = await readAgentEConfig();
-    const next = await writeAgentEConfig({
-      ...config,
-      skills: Array.isArray(req.body?.skills) ? req.body.skills : [],
-    });
-    const payload = buildAgentEAdminSettingsResponse(next);
-    res.json({
-      ok: true,
-      skills: payload.config.skills,
-      availableSkills: payload.availableSkills,
-      updatedAt: payload.config.updatedAt,
-    });
-  });
 
   app.get("/api/auth/admin/me", async (req, res) => {
     const admin = await authenticateAdminRequest(req, res);

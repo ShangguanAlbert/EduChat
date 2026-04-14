@@ -1,7 +1,5 @@
 export {
   readAdminAgentConfig,
-  writeAgentEConfig,
-  readAgentEConfig,
   buildAdminUsersExportTxt,
   buildAdminChatsExportTxt,
   buildSingleUserChatExportTxt,
