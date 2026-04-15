@@ -203,10 +203,6 @@ const ADMIN_AGENT_META = Object.freeze({
     summary: "An Aliyun-native profile with provider-specific controls and search policies.",
   },
 });
-const PROVIDER_LABEL_MAP = new Map(
-  PROVIDER_OPTIONS.map((item) => [item.value, item.label]),
-);
-
 function createDefaultAgentProviderMap() {
   return {
     A: "volcengine",
@@ -346,16 +342,8 @@ function shouldRelogin(error) {
   );
 }
 
-function formatToggleState(enabled) {
-  return enabled ? "On" : "Off";
-}
-
 function getAdminAgentLabel(agentId) {
   return ADMIN_AGENT_META[agentId]?.label || `Agent ${agentId}`;
-}
-
-function getProviderLabel(provider) {
-  return PROVIDER_LABEL_MAP.get(provider) || provider || "Provider default";
 }
 
 function getAliyunPolicyMessage(policy) {
@@ -791,8 +779,6 @@ export default function AdminSettingsPage() {
   const isAgentDSelected = selectedAgent === "D";
   const isCoreAgentSelected = AGENT_IDS.includes(selectedAgent);
   const selectedPrompt = prompts[selectedAgent] || "";
-  const selectedAgentName = getAdminAgentLabel(selectedAgent);
-  const selectedProviderLabel = getProviderLabel(selectedProvider);
   const saveStatusText = saving
     ? "Saving changes..."
     : lastSavedAt
@@ -1796,86 +1782,9 @@ export default function AdminSettingsPage() {
             </div>
           </div>
 
-          <div className="admin-settings-topbar-right">
-            <div className="admin-save-block">
-              <span className="admin-save-kicker">Save status</span>
-              <div className="admin-save-state" role="status">
-                {saveStatusText}
-              </div>
-              <p className="admin-save-help">Changes are stored per agent.</p>
-            </div>
-            <button
-              type="button"
-              className="admin-save-btn"
-              onClick={onManualSave}
-              disabled={saving || loading}
-            >
-              <Save size={16} />
-              <span>{saving ? "Saving..." : "Save changes"}</span>
-            </button>
-            <button
-              type="button"
-              className="admin-sidebar-back-btn"
-              onClick={onBackToOnlinePanel}
-              title="Back to teacher home"
-              aria-label="Back to teacher home"
-            >
-              <ArrowLeft size={16} />
-              <span>Back</span>
-            </button>
-          </div>
-        </header>
-
-        <div className="admin-settings-main">
-          {(loadError || saveError) && (
-            <div className="admin-message-strip">
-              {[loadError, saveError].filter(Boolean).map((line) => (
-                <p key={line} className="admin-message-strip-item error">
-                  <CircleAlert size={14} />
-                  <span>{line}</span>
-                </p>
-              ))}
-            </div>
-          )}
-
-          <div className="admin-grid">
-            <section className="admin-panel admin-panel-prompt">
-            <div className="admin-panel-head">
-              <div className="admin-panel-head-copy">
-                <p className="admin-panel-kicker">Prompt design</p>
-                <h2>System direction</h2>
-              </div>
-              <span className="admin-panel-badge">{selectedAgentName}</span>
-            </div>
-
-            <label className="admin-field-label" htmlFor="admin-prompt-input">
-              <span>Agent-specific system prompt</span>
-              <InfoHint text="When left empty, the agent falls back to the shared default system prompt used in normal chat." />
-            </label>
-            <textarea
-              id="admin-prompt-input"
-              className="admin-textarea admin-prompt-textarea"
-              rows={14}
-              value={selectedPrompt}
-              onChange={(e) => updatePrompt(e.target.value)}
-              placeholder="Leave blank to inherit the default system prompt."
-              disabled={loading}
-            />
-            </section>
-
-            <section className="admin-panel admin-panel-api">
-            <div className="admin-panel-head">
-              <div className="admin-panel-head-copy">
-                <p className="admin-panel-kicker">Runtime controls</p>
-                <h2>Model and behavior</h2>
-              </div>
-              <span className="admin-panel-badge admin-panel-badge-muted">
-                {selectedProviderLabel}
-              </span>
-            </div>
-
+          <section className="admin-sidebar-runtime admin-panel-api">
             <div className="admin-field-grid">
-              <div className="admin-field-row split">
+              <div className="admin-field-row split admin-sidebar-inline-row">
                 <span>Provider</span>
                 <PortalSelect
                   value={selectedProvider}
@@ -1885,7 +1794,10 @@ export default function AdminSettingsPage() {
                 />
               </div>
 
-              <label className="admin-field-row model-id" htmlFor="admin-runtime-model">
+              <label
+                className="admin-field-row model-id admin-sidebar-inline-row"
+                htmlFor="admin-runtime-model"
+              >
                 <span>Model ID</span>
                 <input
                   id="admin-runtime-model"
@@ -1917,7 +1829,7 @@ export default function AdminSettingsPage() {
 
               {showVolcenginePanel ? (
                 <>
-                  <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
+                  <label className="admin-field-row split admin-sidebar-inline-row" htmlFor="admin-runtime-temperature">
                     <span>Temperature</span>
                     <NumberRuntimeInput
                       id="admin-runtime-temperature"
@@ -1930,7 +1842,7 @@ export default function AdminSettingsPage() {
                     />
                   </label>
 
-                  <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
+                  <label className="admin-field-row split admin-sidebar-inline-row" htmlFor="admin-runtime-top-p">
                     <span>Top-p</span>
                     <NumberRuntimeInput
                       id="admin-runtime-top-p"
@@ -1943,7 +1855,7 @@ export default function AdminSettingsPage() {
                     />
                   </label>
 
-                  <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
+                  <label className="admin-field-row split admin-sidebar-inline-row" htmlFor="admin-runtime-context-rounds">
                     <span>Context rounds</span>
                     <NumberRuntimeInput
                       id="admin-runtime-context-rounds"
@@ -1956,7 +1868,10 @@ export default function AdminSettingsPage() {
                     />
                   </label>
 
-                  <label className="admin-field-row split" htmlFor="admin-runtime-max-output-tokens">
+                  <label
+                    className="admin-field-row split admin-sidebar-inline-row"
+                    htmlFor="admin-runtime-max-output-tokens"
+                  >
                     <span className="admin-label-with-hint">
                       Max output tokens
                       <InfoHint text="This maps to the max output setting on the Responses API." />
@@ -1973,12 +1888,12 @@ export default function AdminSettingsPage() {
                   </label>
 
                   {!isAgentDSelected ? (
-                    <div className="admin-field-row split">
+                    <div className="admin-field-row split admin-sidebar-inline-row">
                       <span className="admin-label-with-hint">
                         Inject current date
                         <InfoHint text="When enabled, the current date is injected into the system prompt for each conversation." />
                       </span>
-                      <label className="admin-switch-row">
+                      <label className="admin-switch-row admin-switch-row-plain">
                         <input
                           type="checkbox"
                           checked={!!selectedRuntime.includeCurrentTime}
@@ -1987,17 +1902,16 @@ export default function AdminSettingsPage() {
                           }
                           disabled={loading}
                         />
-                        <span>{formatToggleState(selectedRuntime.includeCurrentTime)}</span>
                       </label>
                     </div>
                   ) : null}
 
-                  <div className="admin-field-row split">
+                  <div className="admin-field-row split admin-sidebar-inline-row">
                     <span className="admin-label-with-hint">
                       Prompt leak guard
                       <InfoHint text="Off by default. When enabled, the runtime injects anti-leak instructions and refuses prompt probing more defensively." />
                     </span>
-                    <label className="admin-switch-row">
+                    <label className="admin-switch-row admin-switch-row-plain">
                       <input
                         type="checkbox"
                         checked={!!selectedRuntime.preventPromptLeak}
@@ -2006,27 +1920,25 @@ export default function AdminSettingsPage() {
                         }
                         disabled={loading}
                       />
-                      <span>{formatToggleState(selectedRuntime.preventPromptLeak)}</span>
                     </label>
                   </div>
 
-                  <div className="admin-field-row split">
+                  <div className="admin-field-row split admin-sidebar-inline-row">
                     <span>Reasoning</span>
-                    <label className="admin-switch-row">
+                    <label className="admin-switch-row admin-switch-row-plain">
                       <input
                         type="checkbox"
                         checked={!!selectedRuntime.enableThinking}
                         onChange={(e) => updateRuntimeField("enableThinking", e.target.checked)}
                         disabled={loading}
                       />
-                      <span>{formatToggleState(selectedRuntime.enableThinking)}</span>
                     </label>
                   </div>
 
-                  <div className="admin-field-row split">
+                  <div className="admin-field-row split admin-sidebar-inline-row">
                     <span>Web search</span>
                     <label
-                      className={`admin-switch-row ${webSearchSwitchDisabled ? "disabled" : ""}`}
+                      className={`admin-switch-row admin-switch-row-plain ${webSearchSwitchDisabled ? "disabled" : ""}`}
                     >
                       <input
                         type="checkbox"
@@ -2036,11 +1948,6 @@ export default function AdminSettingsPage() {
                         }
                         disabled={webSearchSwitchDisabled}
                       />
-                      <span>
-                        {formatToggleState(
-                          !!selectedRuntime.enableWebSearch && webSearchSupported,
-                        )}
-                      </span>
                     </label>
                   </div>
 
@@ -2069,7 +1976,7 @@ export default function AdminSettingsPage() {
                   </div>
 
                   <label
-                    className="admin-field-row split"
+                    className="admin-field-row split admin-sidebar-inline-row"
                     htmlFor="admin-runtime-web-search-max-keyword"
                   >
                     <span className="admin-label-with-hint">
@@ -2088,7 +1995,7 @@ export default function AdminSettingsPage() {
                   </label>
 
                   <label
-                    className="admin-field-row split"
+                    className="admin-field-row split admin-sidebar-inline-row"
                     htmlFor="admin-runtime-web-search-limit"
                   >
                     <span className="admin-label-with-hint">
@@ -2107,7 +2014,7 @@ export default function AdminSettingsPage() {
                   </label>
 
                   <label
-                    className="admin-field-row split"
+                    className="admin-field-row split admin-sidebar-inline-row"
                     htmlFor="admin-runtime-web-search-max-tool-calls"
                   >
                     <span className="admin-label-with-hint">
@@ -2130,7 +2037,7 @@ export default function AdminSettingsPage() {
                 <>
                   {!showPackyCodePanel && !aliyunSamplingFixed ? (
                     <>
-                      <label className="admin-field-row split" htmlFor="admin-runtime-temperature">
+                      <label className="admin-field-row split admin-sidebar-inline-row" htmlFor="admin-runtime-temperature">
                         <span>Temperature</span>
                         <NumberRuntimeInput
                           id="admin-runtime-temperature"
@@ -2143,7 +2050,7 @@ export default function AdminSettingsPage() {
                         />
                       </label>
 
-                      <label className="admin-field-row split" htmlFor="admin-runtime-top-p">
+                      <label className="admin-field-row split admin-sidebar-inline-row" htmlFor="admin-runtime-top-p">
                         <span>Top-p</span>
                         <NumberRuntimeInput
                           id="admin-runtime-top-p"
@@ -2164,7 +2071,7 @@ export default function AdminSettingsPage() {
                   )}
 
                   {!showPackyCodePanel ? (
-                    <label className="admin-field-row split" htmlFor="admin-runtime-context-rounds">
+                    <label className="admin-field-row split admin-sidebar-inline-row" htmlFor="admin-runtime-context-rounds">
                       <span>Context rounds</span>
                       <NumberRuntimeInput
                         id="admin-runtime-context-rounds"
@@ -2178,7 +2085,7 @@ export default function AdminSettingsPage() {
                     </label>
                   ) : null}
                   {showAliyunPanel ? (
-                    <div className="admin-field-row split">
+                    <div className="admin-field-row split admin-sidebar-inline-row">
                       <span className="admin-label-with-hint">
                         Aliyun protocol
                         <InfoHint
@@ -2199,7 +2106,7 @@ export default function AdminSettingsPage() {
                     </div>
                   ) : null}
                   {showAliyunPanel ? (
-                    <div className="admin-field-row split">
+                    <div className="admin-field-row split admin-sidebar-inline-row">
                       <span className="admin-label-with-hint">
                         File processing mode
                         <InfoHint text="Applies only to the DashScope native API. Compatibility mode parses files locally first; debug mode prefers OSS file URLs." />
@@ -2215,12 +2122,12 @@ export default function AdminSettingsPage() {
                   ) : null}
 
                   {!isAgentDSelected ? (
-                    <div className="admin-field-row split">
+                    <div className="admin-field-row split admin-sidebar-inline-row">
                       <span className="admin-label-with-hint">
                         Inject current date
                         <InfoHint text="When enabled, the current date is injected into the system prompt for each conversation." />
                       </span>
-                      <label className="admin-switch-row">
+                      <label className="admin-switch-row admin-switch-row-plain">
                         <input
                           type="checkbox"
                           checked={!!selectedRuntime.includeCurrentTime}
@@ -2229,17 +2136,16 @@ export default function AdminSettingsPage() {
                           }
                           disabled={loading}
                         />
-                        <span>{formatToggleState(selectedRuntime.includeCurrentTime)}</span>
                       </label>
                     </div>
                   ) : null}
 
-                  <div className="admin-field-row split">
+                  <div className="admin-field-row split admin-sidebar-inline-row">
                     <span className="admin-label-with-hint">
                       Prompt leak guard
                       <InfoHint text="Off by default. When enabled, the runtime injects anti-leak instructions and refuses prompt probing more defensively." />
                     </span>
-                    <label className="admin-switch-row">
+                    <label className="admin-switch-row admin-switch-row-plain">
                       <input
                         type="checkbox"
                         checked={!!selectedRuntime.preventPromptLeak}
@@ -2248,14 +2154,13 @@ export default function AdminSettingsPage() {
                         }
                         disabled={loading}
                       />
-                      <span>{formatToggleState(selectedRuntime.preventPromptLeak)}</span>
                     </label>
                   </div>
 
-                  <div className="admin-field-row split">
+                  <div className="admin-field-row split admin-sidebar-inline-row">
                     <span>Reasoning</span>
                     <label
-                      className={`admin-switch-row ${providerSupportsReasoning ? "" : "disabled"}`}
+                      className={`admin-switch-row admin-switch-row-plain ${providerSupportsReasoning ? "" : "disabled"}`}
                     >
                       <input
                         type="checkbox"
@@ -2263,12 +2168,11 @@ export default function AdminSettingsPage() {
                         onChange={(e) => updateRuntimeField("enableThinking", e.target.checked)}
                         disabled={loading || !providerSupportsReasoning}
                       />
-                      <span>{formatToggleState(selectedRuntime.enableThinking)}</span>
                     </label>
                   </div>
 
                   {!showOpenRouterPanel && !showAliyunPanel && !showPackyCodePanel ? (
-                    <label className="admin-field-row split" htmlFor="admin-runtime-context-window-tokens-chat">
+                    <label className="admin-field-row split admin-sidebar-inline-row" htmlFor="admin-runtime-context-window-tokens-chat">
                       <span className="admin-label-with-hint">
                         Context window
                         <InfoHint text="A Chat-protocol setting that can be edited manually." />
@@ -2286,7 +2190,7 @@ export default function AdminSettingsPage() {
                   ) : null}
 
                   {!showOpenRouterPanel && !showAliyunPanel && !showPackyCodePanel ? (
-                    <label className="admin-field-row split" htmlFor="admin-runtime-max-input-tokens-chat">
+                    <label className="admin-field-row split admin-sidebar-inline-row" htmlFor="admin-runtime-max-input-tokens-chat">
                       <span className="admin-label-with-hint">
                         Max input tokens
                         <InfoHint text="A Chat-protocol setting that can be edited manually." />
@@ -2303,7 +2207,10 @@ export default function AdminSettingsPage() {
                     </label>
                   ) : null}
 
-                  <label className="admin-field-row split" htmlFor="admin-runtime-max-output-tokens-chat">
+                  <label
+                    className="admin-field-row split admin-sidebar-inline-row"
+                    htmlFor="admin-runtime-max-output-tokens-chat"
+                  >
                     <span className="admin-label-with-hint">
                       {showOpenRouterPanel ? "Max output tokens" : "Max output length"}
                       <InfoHint
@@ -2333,12 +2240,12 @@ export default function AdminSettingsPage() {
                   </label>
                   {showAliyunPanel && aliyunWebSearchAllowed ? (
                     <>
-                      <div className="admin-field-row split">
+                      <div className="admin-field-row split admin-sidebar-inline-row">
                         <span className="admin-label-with-hint">
                           Web search
                           <InfoHint text="Enables search capability. In Responses mode it mounts the web-search tool." />
                         </span>
-                        <label className="admin-switch-row">
+                        <label className="admin-switch-row admin-switch-row-plain">
                           <input
                             type="checkbox"
                             checked={!!selectedRuntime.enableWebSearch}
@@ -2347,13 +2254,12 @@ export default function AdminSettingsPage() {
                             }
                             disabled={loading}
                           />
-                          <span>{formatToggleState(selectedRuntime.enableWebSearch)}</span>
                         </label>
                       </div>
 
-                      <div className="admin-field-row split">
+                      <div className="admin-field-row split admin-sidebar-inline-row">
                         <span>Force search</span>
-                        <label className="admin-switch-row">
+                        <label className="admin-switch-row admin-switch-row-plain">
                           <input
                             type="checkbox"
                             checked={!!selectedRuntime.aliyunSearchForced}
@@ -2362,11 +2268,10 @@ export default function AdminSettingsPage() {
                             }
                             disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
                           />
-                          <span>{formatToggleState(selectedRuntime.aliyunSearchForced)}</span>
                         </label>
                       </div>
 
-                      <div className="admin-field-row split">
+                      <div className="admin-field-row split admin-sidebar-inline-row">
                         <span>Search strategy</span>
                         <PortalSelect
                           value={selectedRuntime.aliyunSearchStrategy}
@@ -2377,9 +2282,9 @@ export default function AdminSettingsPage() {
                         />
                       </div>
 
-                      <div className="admin-field-row split">
+                      <div className="admin-field-row split admin-sidebar-inline-row">
                         <span>Return sources</span>
-                        <label className="admin-switch-row">
+                        <label className="admin-switch-row admin-switch-row-plain">
                           <input
                             type="checkbox"
                             checked={!!selectedRuntime.aliyunSearchEnableSource}
@@ -2388,13 +2293,12 @@ export default function AdminSettingsPage() {
                             }
                             disabled={aliyunSearchDisabled || aliyunDashscopeSearchOnlyDisabled}
                           />
-                          <span>{formatToggleState(selectedRuntime.aliyunSearchEnableSource)}</span>
                         </label>
                       </div>
 
-                      <div className="admin-field-row split">
+                      <div className="admin-field-row split admin-sidebar-inline-row">
                         <span>Citations</span>
-                        <label className="admin-switch-row">
+                        <label className="admin-switch-row admin-switch-row-plain">
                           <input
                             type="checkbox"
                             checked={!!selectedRuntime.aliyunSearchEnableCitation}
@@ -2407,11 +2311,10 @@ export default function AdminSettingsPage() {
                               !selectedRuntime.aliyunSearchEnableSource
                             }
                           />
-                          <span>{formatToggleState(selectedRuntime.aliyunSearchEnableCitation)}</span>
                         </label>
                       </div>
 
-                      <div className="admin-field-row split">
+                      <div className="admin-field-row split admin-sidebar-inline-row">
                         <span>Citation format</span>
                         <PortalSelect
                           value={selectedRuntime.aliyunSearchCitationFormat}
@@ -2428,9 +2331,9 @@ export default function AdminSettingsPage() {
                         />
                       </div>
 
-                      <div className="admin-field-row split">
+                      <div className="admin-field-row split admin-sidebar-inline-row">
                         <span>Domain search</span>
-                        <label className="admin-switch-row">
+                        <label className="admin-switch-row admin-switch-row-plain">
                           <input
                             type="checkbox"
                             checked={!!selectedRuntime.aliyunSearchEnableSearchExtension}
@@ -2442,17 +2345,12 @@ export default function AdminSettingsPage() {
                             }
                             disabled={aliyunSearchDisabled || aliyunProtocol === "responses"}
                           />
-                          <span>
-                            {formatToggleState(
-                              selectedRuntime.aliyunSearchEnableSearchExtension,
-                            )}
-                          </span>
                         </label>
                       </div>
 
-                      <div className="admin-field-row split">
+                      <div className="admin-field-row split admin-sidebar-inline-row">
                         <span>Prepend sources in first chunk</span>
-                        <label className="admin-switch-row">
+                        <label className="admin-switch-row admin-switch-row-plain">
                           <input
                             type="checkbox"
                             checked={!!selectedRuntime.aliyunSearchPrependSearchResult}
@@ -2464,11 +2362,10 @@ export default function AdminSettingsPage() {
                             }
                             disabled={aliyunSearchDisabled || aliyunDashscopeSearchOnlyDisabled}
                           />
-                          <span>{formatToggleState(selectedRuntime.aliyunSearchPrependSearchResult)}</span>
                         </label>
                       </div>
 
-                      <div className="admin-field-row split">
+                      <div className="admin-field-row split admin-sidebar-inline-row">
                         <span>Freshness</span>
                         <PortalSelect
                           value={selectedRuntime.aliyunSearchFreshness}
@@ -2525,7 +2422,7 @@ export default function AdminSettingsPage() {
                       {aliyunProtocol === "responses" ? (
                         <>
                           <label
-                            className="admin-field-row split"
+                            className="admin-field-row split admin-sidebar-inline-row"
                             htmlFor="admin-runtime-aliyun-web-search-max-tool-calls"
                           >
                             <span className="admin-label-with-hint">
@@ -2545,9 +2442,9 @@ export default function AdminSettingsPage() {
                             />
                           </label>
 
-                          <div className="admin-field-row split">
+                          <div className="admin-field-row split admin-sidebar-inline-row">
                             <span>Extra tool: web extractor</span>
-                            <label className="admin-switch-row">
+                            <label className="admin-switch-row admin-switch-row-plain">
                               <input
                                 type="checkbox"
                                 checked={!!selectedRuntime.aliyunResponsesEnableWebExtractor}
@@ -2559,13 +2456,12 @@ export default function AdminSettingsPage() {
                                 }
                                 disabled={aliyunSearchDisabled}
                               />
-                              <span>{formatToggleState(selectedRuntime.aliyunResponsesEnableWebExtractor)}</span>
                             </label>
                           </div>
 
-                          <div className="admin-field-row split">
+                          <div className="admin-field-row split admin-sidebar-inline-row">
                             <span>Extra tool: code interpreter</span>
-                            <label className="admin-switch-row">
+                            <label className="admin-switch-row admin-switch-row-plain">
                               <input
                                 type="checkbox"
                                 checked={!!selectedRuntime.aliyunResponsesEnableCodeInterpreter}
@@ -2577,7 +2473,6 @@ export default function AdminSettingsPage() {
                                 }
                                 disabled={aliyunSearchDisabled}
                               />
-                              <span>{formatToggleState(selectedRuntime.aliyunResponsesEnableCodeInterpreter)}</span>
                             </label>
                           </div>
                         </>
@@ -2587,7 +2482,7 @@ export default function AdminSettingsPage() {
 
                   {showOpenRouterPanel ? (
                     <>
-                      <div className="admin-field-row split">
+                      <div className="admin-field-row split admin-sidebar-inline-row">
                         <span className="admin-label-with-hint">
                           PDF engine
                           <InfoHint text="Maps to `pdf.engine` on the file-parser plugin. `auto` means the field is omitted and OpenRouter chooses automatically." />
@@ -2648,6 +2543,66 @@ export default function AdminSettingsPage() {
                 </>
               )}
             </div>
+          </section>
+
+          <div className="admin-settings-topbar-right">
+            <div className="admin-save-block">
+              <span className="admin-save-kicker">Save status</span>
+              <div className="admin-save-state" role="status">
+                {saveStatusText}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="admin-save-btn"
+              onClick={onManualSave}
+              disabled={saving || loading}
+            >
+              <Save size={16} />
+              <span>{saving ? "Saving..." : "Save changes"}</span>
+            </button>
+            <button
+              type="button"
+              className="admin-sidebar-back-btn"
+              onClick={onBackToOnlinePanel}
+              title="Back to teacher home"
+              aria-label="Back to teacher home"
+            >
+              <ArrowLeft size={16} />
+              <span>Back</span>
+            </button>
+          </div>
+        </header>
+
+        <div className="admin-settings-main">
+          {(loadError || saveError) && (
+            <div className="admin-message-strip">
+              {[loadError, saveError].filter(Boolean).map((line) => (
+                <p key={line} className="admin-message-strip-item error">
+                  <CircleAlert size={14} />
+                  <span>{line}</span>
+                </p>
+              ))}
+            </div>
+          )}
+
+          <div className="admin-grid">
+            <section className="admin-panel admin-panel-prompt">
+            <div className="admin-panel-head">
+              <div className="admin-panel-head-copy">
+                <p className="admin-panel-kicker">Prompt design</p>
+                <h2>System prompt</h2>
+              </div>
+            </div>
+            <textarea
+              id="admin-prompt-input"
+              className="admin-textarea admin-prompt-textarea"
+              rows={14}
+              value={selectedPrompt}
+              onChange={(e) => updatePrompt(e.target.value)}
+              placeholder="Leave blank to inherit the default system prompt."
+              disabled={loading}
+            />
             </section>
 
             <section className="admin-panel admin-panel-preview preview">
