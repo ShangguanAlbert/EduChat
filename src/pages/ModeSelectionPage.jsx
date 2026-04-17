@@ -1306,6 +1306,7 @@ export default function ModeSelectionPage() {
                       onDrop={onHomeworkDrop}
                     >
                       <p>拖拽作业文件到这里，或点击下方按钮添加</p>
+                      <p className="task-status-tip">单个文件最大 50MB，每次最多可上传 6 个文件。</p>
                       <button
                         type="button"
                         className="task-homework-upload-btn"

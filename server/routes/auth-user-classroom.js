@@ -146,6 +146,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     TEACHER_LESSON_FILE_OSS_SCOPE,
     TEACHER_LESSON_FILE_OSS_SUB_SCOPE,
     STUDENT_HOMEWORK_OSS_SUB_SCOPE,
+    STUDENT_HOMEWORK_MAX_FILE_SIZE_BYTES,
     STUDENT_HOMEWORK_UPLOAD_MAX_FILES,
     STUDENT_HOMEWORK_MAX_FILES_PER_LESSON_PER_STUDENT,
     FIXED_ADMIN_ACCOUNTS,
@@ -200,6 +201,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     OPENROUTER_AUDIO_EXTENSIONS,
     OPENROUTER_AUDIO_MIME_TO_FORMAT,
     upload,
+    studentHomeworkUpload,
     imageGenerationUpload,
     groupChatImageUpload,
     groupChatFileUpload,
@@ -1307,7 +1309,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   app.post(
     "/api/classroom/homework/submissions/:lessonId/files",
     requireChatAuth,
-    upload.array("files", STUDENT_HOMEWORK_UPLOAD_MAX_FILES),
+    studentHomeworkUpload.array("files", STUDENT_HOMEWORK_UPLOAD_MAX_FILES),
     async (req, res) => {
       const teacherScopeKey = sanitizeTeacherScopeKey(req.authTeacherScopeKey);
       if (teacherScopeKey !== SHANGGUAN_FUZE_TEACHER_SCOPE_KEY) {
@@ -1404,7 +1406,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
             fileName: sanitizeGroupChatFileName(uploaded.fileName || renamedFileName),
             originalFileName: sanitizeGroupChatFileName(file.originalname || renamedFileName),
             mimeType: sanitizeGroupChatFileMimeType(uploaded.mimeType || file.mimetype),
-            size: sanitizeRuntimeInteger(uploaded.size, 0, 0, MAX_FILE_SIZE_BYTES),
+            size: sanitizeRuntimeInteger(uploaded.size, 0, 0, STUDENT_HOMEWORK_MAX_FILE_SIZE_BYTES),
             storageType: "oss",
             ossKey: sanitizeGroupChatOssObjectKey(uploaded.ossKey),
             ossBucket: sanitizeAliyunOssBucket(uploaded.ossBucket),

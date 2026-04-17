@@ -188,6 +188,7 @@ const CHAT_ATTACHMENT_OSS_SCOPE = "chat-attachments";
 const TEACHER_LESSON_FILE_OSS_SCOPE = "teacher_sgfz";
 const TEACHER_LESSON_FILE_OSS_SUB_SCOPE = "lesson-files";
 const STUDENT_HOMEWORK_OSS_SUB_SCOPE = "student-homework";
+const STUDENT_HOMEWORK_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 const STUDENT_HOMEWORK_UPLOAD_MAX_FILES = 6;
 const STUDENT_HOMEWORK_MAX_FILES_PER_LESSON_PER_STUDENT = 20;
 const FIXED_ADMIN_ACCOUNTS = Object.freeze(readFixedAdminAccountsFromEnv());
@@ -916,6 +917,13 @@ const OPENROUTER_AUDIO_MIME_TO_FORMAT = Object.freeze({
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { files: MAX_FILES, fileSize: MAX_FILE_SIZE_BYTES },
+});
+const studentHomeworkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: STUDENT_HOMEWORK_UPLOAD_MAX_FILES,
+    fileSize: STUDENT_HOMEWORK_MAX_FILE_SIZE_BYTES,
+  },
 });
 const imageGenerationUpload = multer({
   storage: multer.memoryStorage(),
@@ -10029,7 +10037,12 @@ function normalizeClassroomHomeworkFileDoc(doc) {
     ),
     originalName: sanitizeGroupChatFileName(doc?.originalFileName || ""),
     mimeType: sanitizeGroupChatFileMimeType(doc?.mimeType),
-    size: sanitizeRuntimeInteger(doc?.size, 0, 0, MAX_FILE_SIZE_BYTES),
+    size: sanitizeRuntimeInteger(
+      doc?.size,
+      0,
+      0,
+      STUDENT_HOMEWORK_MAX_FILE_SIZE_BYTES,
+    ),
     uploadedAt: sanitizeIsoDate(doc?.uploadedAt) || "",
   };
 }
@@ -17532,6 +17545,7 @@ export {
   TEACHER_LESSON_FILE_OSS_SCOPE,
   TEACHER_LESSON_FILE_OSS_SUB_SCOPE,
   STUDENT_HOMEWORK_OSS_SUB_SCOPE,
+  STUDENT_HOMEWORK_MAX_FILE_SIZE_BYTES,
   STUDENT_HOMEWORK_UPLOAD_MAX_FILES,
   STUDENT_HOMEWORK_MAX_FILES_PER_LESSON_PER_STUDENT,
   FIXED_ADMIN_ACCOUNTS,
@@ -17586,6 +17600,7 @@ export {
   OPENROUTER_AUDIO_EXTENSIONS,
   OPENROUTER_AUDIO_MIME_TO_FORMAT,
   upload,
+  studentHomeworkUpload,
   imageGenerationUpload,
   groupChatImageUpload,
   groupChatFileUpload,
