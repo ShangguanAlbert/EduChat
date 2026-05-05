@@ -15,6 +15,11 @@ import {
 } from "lucide-react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import {
+  CLASSROOM_FILE_KIND_TASK,
+  getClassroomFileDownloadErrorText,
+  getClassroomFileFallbackName,
+} from "../../shared/classroomFileLabels.js";
+import {
   clearUserAuthSession,
   getStoredAuthUser,
   resolveActiveAuthSlot,
@@ -694,16 +699,29 @@ export default function ModeSelectionPage() {
     setDownloadError("");
     setDownloadingFileId(safeFileId);
     try {
-      const data = await downloadClassroomLessonFile(safeFileId);
+      const data = await downloadClassroomLessonFile(safeFileId, {
+        fileKind: CLASSROOM_FILE_KIND_TASK,
+      });
       if (data?.downloadUrl) {
-        triggerUrlDownload(data.downloadUrl, data.fileName || "课程文件.bin");
+        triggerUrlDownload(
+          data.downloadUrl,
+          data.fileName || getClassroomFileFallbackName(CLASSROOM_FILE_KIND_TASK),
+        );
       } else if (data?.blob) {
-        triggerBrowserDownload(data.blob, data.fileName || "课程文件.bin");
+        triggerBrowserDownload(
+          data.blob,
+          data.fileName || getClassroomFileFallbackName(CLASSROOM_FILE_KIND_TASK),
+        );
       } else {
-        throw new Error("课程文件下载失败，请稍后重试。");
+        throw new Error(
+          getClassroomFileDownloadErrorText(CLASSROOM_FILE_KIND_TASK),
+        );
       }
     } catch (error) {
-      setDownloadError(error?.message || "课程文件下载失败，请稍后重试。");
+      setDownloadError(
+        error?.message ||
+          getClassroomFileDownloadErrorText(CLASSROOM_FILE_KIND_TASK),
+      );
     } finally {
       setDownloadingFileId("");
     }
@@ -1054,6 +1072,11 @@ export default function ModeSelectionPage() {
                   {downloadError}
                 </p>
               ) : null}
+              {downloadingFileId ? (
+                <p className="task-status-tip" role="status" aria-live="polite">
+                  文件正在下载，请稍后。
+                </p>
+              ) : null}
               {homeworkError ? (
                 <p className="task-status-tip error" role="alert">
                   {homeworkError}
@@ -1219,19 +1242,32 @@ export default function ModeSelectionPage() {
                                         <div className="task-lesson-file-list">
                                           {taskFiles.map((file, fileIndex) => {
                                             const fileId = String(file?.id || "");
+                                            const isDownloading = downloadingFileId === fileId;
                                             return (
                                               <button
                                                 key={fileId || `task-file-${fileIndex + 1}`}
                                                 type="button"
                                                 className="task-lesson-file-btn"
                                                 onClick={() => void onDownloadLessonFile(fileId)}
-                                                disabled={!fileId || downloadingFileId === fileId}
+                                                disabled={!fileId || isDownloading}
                                               >
-                                                <span>
+                                                <span className="task-lesson-file-content">
                                                   <strong>{file?.name || "任务附件"}</strong>
                                                   <small>{formatFileSize(file?.size)}</small>
+                                                  {isDownloading ? (
+                                                    <small>文件正在下载，请稍后。</small>
+                                                  ) : null}
                                                 </span>
-                                                <Download size={16} />
+                                                <span className="task-lesson-file-action">
+                                                  {isDownloading ? (
+                                                    "下载中..."
+                                                  ) : (
+                                                    <>
+                                                      <Download size={16} />
+                                                      <span>下载</span>
+                                                    </>
+                                                  )}
+                                                </span>
                                               </button>
                                             );
                                           })}

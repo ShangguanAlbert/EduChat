@@ -9795,7 +9795,17 @@ function getDefaultSystemPrompt() {
 
 async function readAdminAgentConfig() {
   const doc = await AdminConfig.findOne({ key: ADMIN_CONFIG_KEY }).lean();
-  return normalizeAdminConfigDoc(doc);
+  const config = normalizeAdminConfigDoc(doc);
+  const storedFileDocs = await AdminClassroomLessonFile.find({
+    key: ADMIN_CONFIG_KEY,
+  }).lean();
+  return {
+    ...config,
+    teacherCoursePlans: repairAdminClassroomCoursePlansFileMetadata(
+      config.teacherCoursePlans,
+      storedFileDocs,
+    ),
+  };
 }
 
 function sanitizeAdminClassroomTaskType(value, fallback = "text") {
@@ -9840,7 +9850,12 @@ function sanitizeAdminClassroomCourseFilePayload(input, index = 0) {
   const mimeType = sanitizeGroupChatFileMimeType(
     source.mimeType || source.type,
   );
-  const size = sanitizeRuntimeInteger(source.size, 0, 0, MAX_FILE_SIZE_BYTES);
+  const size = sanitizeRuntimeInteger(
+    source.size,
+    0,
+    0,
+    TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
+  );
   const uploadedAt = sanitizeIsoDate(source.uploadedAt) || "";
   if (!fileId || !fileName) return null;
 
@@ -10296,6 +10311,40 @@ function normalizeClassroomHomeworkFileDoc(doc) {
     ),
     uploadedAt: sanitizeIsoDate(doc?.uploadedAt) || "",
   };
+}
+
+function repairAdminClassroomCoursePlansFileMetadata(
+  teacherCoursePlans = [],
+  storedFileDocs = [],
+) {
+  const plans = sanitizeAdminClassroomCoursePlansPayload(teacherCoursePlans);
+  const docs = Array.isArray(storedFileDocs) ? storedFileDocs : [];
+  if (plans.length === 0 || docs.length === 0) return plans;
+
+  const fileMap = new Map();
+  docs.forEach((doc) => {
+    const normalized = normalizeAdminClassroomLessonFileDoc(doc);
+    if (!normalized?.id) return;
+    fileMap.set(normalized.id, normalized);
+  });
+  if (fileMap.size === 0) return plans;
+
+  const mergeFiles = (files = []) =>
+    sanitizeAdminClassroomCourseFilesPayload(files).map((file) => {
+      const matched = fileMap.get(String(file?.id || ""));
+      return matched ? { ...file, ...matched } : file;
+    });
+
+  return plans.map((lesson) => ({
+    ...lesson,
+    files: mergeFiles(lesson?.files),
+    tasks: Array.isArray(lesson?.tasks)
+      ? lesson.tasks.map((task) => ({
+          ...task,
+          files: mergeFiles(task?.files),
+        }))
+      : [],
+  }));
 }
 
 function compareClassroomRosterStudent(a, b) {
@@ -18133,6 +18182,7 @@ export {
   createClassroomHomeworkFileId,
   normalizeAdminClassroomLessonFileDoc,
   normalizeClassroomHomeworkFileDoc,
+  repairAdminClassroomCoursePlansFileMetadata,
   compareClassroomRosterStudent,
   iterateAdminClassroomTaskFiles,
   collectAdminClassroomFileIdsFromLesson,

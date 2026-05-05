@@ -361,6 +361,10 @@
   cursor: not-allowed;
 }
 
+.task-lesson-file-content {
+  min-width: 0;
+}
+
 .task-lesson-file-btn span strong {
   display: block;
   font-size: 14px;
@@ -372,6 +376,17 @@
   margin-top: 3px;
   font-size: 12px;
   color: var(--mode-muted);
+}
+
+.task-lesson-file-action {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #44689c;
+  white-space: nowrap;
 }
 
 .task-hidden-file-input {

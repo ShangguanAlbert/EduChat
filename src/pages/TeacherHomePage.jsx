@@ -47,6 +47,11 @@ import {
 import { useLocation, useNavigate } from "react-router-dom";
 import PortalSelect from "../components/PortalSelect.jsx";
 import {
+  CLASSROOM_FILE_KIND_TASK,
+  getClassroomFileDownloadErrorText,
+  getClassroomFileFallbackName,
+} from "../../shared/classroomFileLabels.js";
+import {
   TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
   TEACHER_TASK_UPLOAD_MAX_FILES,
   appendTeacherTaskUploadDrafts,
@@ -188,6 +193,8 @@ const USER_CREATE_DEFAULT_TEACHER_SCOPE_KEY =
   ).trim() || DEFAULT_TEACHER_SCOPE_KEY;
 const PARTY_ROOM_CREATE_MAX_MEMBERS = 10;
 const TEACHER_HOME_REFRESH_SUCCESS_MS = 2000;
+const TASK_FILE_UPLOAD_STATUS_TEXT = "文件正在上传，请稍后。";
+const TASK_FILE_DOWNLOAD_STATUS_TEXT = "文件正在下载，请稍后。";
 const USER_CREATE_CLASS_TEACHER_SCOPE_RULES = Object.freeze([
   {
     classToken: "教技231".replace(/\s+/g, "").replace(/班/g, ""),
@@ -4241,15 +4248,21 @@ export default function TeacherHomePage() {
       if (data?.downloadUrl) {
         triggerUrlDownload(
           data.downloadUrl,
-          data.filename || file?.name || "课程文件.bin",
+          data.filename ||
+            file?.name ||
+            getClassroomFileFallbackName(CLASSROOM_FILE_KIND_TASK),
         );
       } else if (data?.blob) {
         triggerBrowserDownload(
           data.blob,
-          data.filename || file?.name || "课程文件.bin",
+          data.filename ||
+            file?.name ||
+            getClassroomFileFallbackName(CLASSROOM_FILE_KIND_TASK),
         );
       } else {
-        throw new Error("课程文件下载失败，请稍后重试。");
+        throw new Error(
+          getClassroomFileDownloadErrorText(CLASSROOM_FILE_KIND_TASK),
+        );
       }
     } catch (rawError) {
       if (handleAuthError(rawError)) return;
@@ -6026,7 +6039,7 @@ export default function TeacherHomePage() {
                                         <Upload size={14} />
                                         <span>
                                           {uploadingFiles
-                                            ? "正在上传..."
+                                            ? "上传中..."
                                             : "上传全部"}
                                         </span>
                                       </button>
@@ -6065,7 +6078,7 @@ export default function TeacherHomePage() {
                                                 </span>
                                                 <span>
                                                   {file?.status === "uploading"
-                                                    ? "文件正在上传，请稍后。"
+                                                    ? TASK_FILE_UPLOAD_STATUS_TEXT
                                                     : file?.error ||
                                                       "已加入待上传列表。"}
                                                 </span>
@@ -6115,13 +6128,23 @@ export default function TeacherHomePage() {
                                           >
                                             <div className="teacher-file-chip-info">
                                               <FileText size={14} />
-                                              <strong>
-                                                {file?.name || "任务附件"}
-                                              </strong>
-                                              <span>
-                                                {formatFileSize(file?.size)}
-                                              </span>
-                                              <span>{`上传于 ${formatDisplayTime(file?.uploadedAt)}`}</span>
+                                              <div className="teacher-file-chip-meta">
+                                                <div className="teacher-file-chip-headline">
+                                                  <strong>
+                                                    {file?.name || "任务附件"}
+                                                  </strong>
+                                                </div>
+                                                <div className="teacher-file-chip-subline">
+                                                  <span>
+                                                    {formatFileSize(file?.size)}
+                                                  </span>
+                                                  <span>
+                                                    {isDownloading
+                                                      ? TASK_FILE_DOWNLOAD_STATUS_TEXT
+                                                      : `上传于 ${formatDisplayTime(file?.uploadedAt)}`}
+                                                  </span>
+                                                </div>
+                                              </div>
                                             </div>
                                             <div className="teacher-file-chip-actions">
                                               <button
@@ -6137,7 +6160,18 @@ export default function TeacherHomePage() {
                                                 }
                                                 title="下载附件"
                                               >
-                                                <Download size={14} />
+                                                {isDownloading ? (
+                                                  <span className="teacher-file-chip-action-label">
+                                                    下载中...
+                                                  </span>
+                                                ) : (
+                                                  <>
+                                                    <Download size={14} />
+                                                    <span className="teacher-file-chip-action-label">
+                                                      下载
+                                                    </span>
+                                                  </>
+                                                )}
                                               </button>
                                               <button
                                                 type="button"
@@ -9368,6 +9402,8 @@ export default function TeacherHomePage() {
           </div>
         ) : null}
         {error ||
+        uploadingFiles ||
+        downloadingFileId ||
         imageLibraryNotice ||
         exportCenterNotice ||
         classroomSaveNotice ||
@@ -9379,6 +9415,16 @@ export default function TeacherHomePage() {
                 role="alert"
               >
                 {error}
+              </p>
+            ) : null}
+            {uploadingFiles ? (
+              <p className="teacher-home-alert info teacher-home-toast" role="status">
+                {TASK_FILE_UPLOAD_STATUS_TEXT}
+              </p>
+            ) : null}
+            {downloadingFileId ? (
+              <p className="teacher-home-alert info teacher-home-toast" role="status">
+                {TASK_FILE_DOWNLOAD_STATUS_TEXT}
               </p>
             ) : null}
             {pageRefreshState === "success" ? (

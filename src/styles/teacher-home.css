@@ -401,6 +401,12 @@
   background: #fff1f0;
 }
 
+.teacher-home-alert.info {
+  border: 1px solid #c7d6ef;
+  color: #284b7b;
+  background: #f5f9ff;
+}
+
 .teacher-home-alert.success {
   border: 1px solid rgba(134, 239, 172, 0.9);
   color: #166534;
@@ -1822,6 +1828,12 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.teacher-file-chip-action-label {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .teacher-empty-text {

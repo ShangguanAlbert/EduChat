@@ -1,4 +1,9 @@
 import { normalizeChatBootstrapResponse } from "../../shared/contracts/chat.js";
+import {
+  getClassroomFileFallbackName,
+  getClassroomFileLabel,
+  resolveClassroomFileKindByTask,
+} from "../../shared/classroomFileLabels.js";
 
 export function registerAuthUserClassroomRoutes(app, deps) {
   function readSignedUrlExpiryText(url) {
@@ -3328,8 +3333,12 @@ export function registerAuthUserClassroomRoutes(app, deps) {
         return;
       }
 
+      const fileKind = resolveClassroomFileKindByTask(lessonMatch.task);
+      const fileLabel = getClassroomFileLabel(fileKind);
       const fileName = sanitizeGroupChatFileName(
-        lessonMatch.file?.name || fileDoc.fileName || "课程文件.bin",
+        lessonMatch.file?.name ||
+          fileDoc.fileName ||
+          getClassroomFileFallbackName(fileKind),
       );
       const mimeType = sanitizeGroupChatFileMimeType(
         lessonMatch.file?.mimeType || fileDoc.mimeType,
@@ -3350,7 +3359,9 @@ export function registerAuthUserClassroomRoutes(app, deps) {
           });
           return;
         }
-        res.status(404).json({ error: "课程文件链接已失效，请教师重新上传。" });
+        res.status(404).json({
+          error: `${fileLabel}链接已失效，请教师重新上传。`,
+        });
         return;
       }
 
@@ -3396,8 +3407,12 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       return;
     }
 
+    const fileKind = resolveClassroomFileKindByTask(lessonMatch.task);
+    const fileLabel = getClassroomFileLabel(fileKind);
     const fileName = sanitizeGroupChatFileName(
-      lessonMatch.file?.name || fileDoc.fileName || "课程文件.bin",
+      lessonMatch.file?.name ||
+        fileDoc.fileName ||
+        getClassroomFileFallbackName(fileKind),
     );
     const mimeType = sanitizeGroupChatFileMimeType(lessonMatch.file?.mimeType || fileDoc.mimeType);
     const storageType = sanitizeGroupChatFileStorageType(fileDoc?.storageType);
@@ -3408,7 +3423,9 @@ export function registerAuthUserClassroomRoutes(app, deps) {
         fileName,
       });
       if (!downloadUrl) {
-        res.status(404).json({ error: "课程文件下载链接不可用，请稍后重试。" });
+        res.status(404).json({
+          error: `${fileLabel}下载链接不可用，请稍后重试。`,
+        });
         return;
       }
       res.json({

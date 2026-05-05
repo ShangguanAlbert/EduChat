@@ -1,3 +1,4 @@
+import { getClassroomFileFallbackName } from "../../../shared/classroomFileLabels.js";
 import { getUserToken } from "../../app/authStorage.js";
 
 function authHeaders(extra = {}) {
@@ -99,8 +100,12 @@ export function deleteClassroomHomeworkFile(lessonId, fileId) {
   );
 }
 
-export async function downloadClassroomLessonFile(fileId) {
+export async function downloadClassroomLessonFile(
+  fileId,
+  { fileKind } = {},
+) {
   const safeFileId = String(fileId || "").trim();
+  const fallbackFileName = getClassroomFileFallbackName(fileKind);
   const resp = await fetch(
     `/api/classroom/lessons/files/${encodeURIComponent(safeFileId)}/download`,
     {
@@ -122,7 +127,9 @@ export async function downloadClassroomLessonFile(fileId) {
     if (downloadUrl) {
       return {
         downloadUrl,
-        fileName: String(data?.fileName || "课程文件.bin").trim() || "课程文件.bin",
+        fileName:
+          String(data?.fileName || fallbackFileName).trim() ||
+          fallbackFileName,
         mimeType: String(data?.mimeType || ""),
       };
     }
@@ -145,6 +152,6 @@ export async function downloadClassroomLessonFile(fileId) {
 
   return {
     blob,
-    fileName: fileName || "课程文件.bin",
+    fileName: fileName || fallbackFileName,
   };
 }
