@@ -180,6 +180,7 @@ const GROUP_CHAT_DEFAULT_MESSAGES_LIMIT = 80;
 const GROUP_CHAT_MAX_MESSAGES_LIMIT = 200;
 const GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES = 6 * 1024 * 1024;
 const GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+const TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024;
 const GROUP_CHAT_FILE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const GROUP_CHAT_OSS_DEFAULT_REGION = "oss-cn-hangzhou";
 const GROUP_CHAT_OSS_DEFAULT_PREFIX = "chat-files";
@@ -936,6 +937,13 @@ const studentHomeworkUpload = multer({
   limits: {
     files: STUDENT_HOMEWORK_UPLOAD_MAX_FILES,
     fileSize: STUDENT_HOMEWORK_MAX_FILE_SIZE_BYTES,
+  },
+});
+const teacherClassroomFileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: ADMIN_CLASSROOM_COURSE_FILE_UPLOAD_MAX_FILES,
+    fileSize: TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
   },
 });
 const imageGenerationUpload = multer({
@@ -10262,7 +10270,12 @@ function normalizeAdminClassroomLessonFileDoc(doc) {
       doc?.fileName || doc?.name || "课程文件.bin",
     ),
     mimeType: sanitizeGroupChatFileMimeType(doc?.mimeType),
-    size: sanitizeRuntimeInteger(doc?.size, 0, 0, MAX_FILE_SIZE_BYTES),
+    size: sanitizeRuntimeInteger(
+      doc?.size,
+      0,
+      0,
+      TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
+    ),
     uploadedAt: sanitizeIsoDate(doc?.uploadedAt) || "",
   };
 }
@@ -17806,6 +17819,7 @@ export {
   GROUP_CHAT_MAX_MESSAGES_LIMIT,
   GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES,
   GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+  TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
   GROUP_CHAT_FILE_TTL_MS,
   GROUP_CHAT_OSS_DEFAULT_REGION,
   GROUP_CHAT_OSS_DEFAULT_PREFIX,
@@ -17877,6 +17891,7 @@ export {
   OPENROUTER_AUDIO_MIME_TO_FORMAT,
   upload,
   studentHomeworkUpload,
+  teacherClassroomFileUpload,
   imageGenerationUpload,
   groupChatImageUpload,
   groupChatFileUpload,

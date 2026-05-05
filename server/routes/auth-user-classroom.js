@@ -131,6 +131,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     GROUP_CHAT_MAX_MESSAGES_LIMIT,
     GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES,
     GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+    TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
     GROUP_CHAT_FILE_TTL_MS,
     GROUP_CHAT_OSS_DEFAULT_REGION,
     GROUP_CHAT_OSS_DEFAULT_PREFIX,
@@ -202,6 +203,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     OPENROUTER_AUDIO_MIME_TO_FORMAT,
     upload,
     studentHomeworkUpload,
+    teacherClassroomFileUpload,
     imageGenerationUpload,
     groupChatImageUpload,
     groupChatFileUpload,
@@ -2863,7 +2865,10 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   app.post(
     "/api/auth/admin/classroom-plans/:lessonId/files",
     requireAdminAuth,
-    upload.array("files", ADMIN_CLASSROOM_COURSE_FILE_UPLOAD_MAX_FILES),
+    teacherClassroomFileUpload.array(
+      "files",
+      ADMIN_CLASSROOM_COURSE_FILE_UPLOAD_MAX_FILES,
+    ),
     async (req, res) => {
       const lessonId = sanitizeId(req.params.lessonId, "");
       if (!lessonId) {
@@ -2915,7 +2920,12 @@ export function registerAuthUserClassroomRoutes(app, deps) {
             lessonId,
             fileName: sanitizeGroupChatFileName(uploaded.fileName || file.originalname || "课程文件.bin"),
             mimeType: sanitizeGroupChatFileMimeType(uploaded.mimeType || file.mimetype),
-            size: sanitizeRuntimeInteger(uploaded.size, 0, 0, MAX_FILE_SIZE_BYTES),
+            size: sanitizeRuntimeInteger(
+              uploaded.size,
+              0,
+              0,
+              TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
+            ),
             storageType: "oss",
             ossKey: sanitizeGroupChatOssObjectKey(uploaded.ossKey),
             ossBucket: sanitizeAliyunOssBucket(uploaded.ossBucket),
@@ -2983,7 +2993,10 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   app.post(
     "/api/auth/admin/classroom-plans/:lessonId/tasks/:taskId/files",
     requireAdminAuth,
-    upload.array("files", ADMIN_CLASSROOM_COURSE_FILE_UPLOAD_MAX_FILES),
+    teacherClassroomFileUpload.array(
+      "files",
+      ADMIN_CLASSROOM_COURSE_FILE_UPLOAD_MAX_FILES,
+    ),
     async (req, res) => {
       const lessonId = sanitizeId(req.params.lessonId, "");
       const taskId = sanitizeId(req.params.taskId, "");
@@ -3044,7 +3057,12 @@ export function registerAuthUserClassroomRoutes(app, deps) {
             taskId,
             fileName: sanitizeGroupChatFileName(uploaded.fileName || file.originalname || "任务附件.bin"),
             mimeType: sanitizeGroupChatFileMimeType(uploaded.mimeType || file.mimetype),
-            size: sanitizeRuntimeInteger(uploaded.size, 0, 0, MAX_FILE_SIZE_BYTES),
+            size: sanitizeRuntimeInteger(
+              uploaded.size,
+              0,
+              0,
+              TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
+            ),
             storageType: "oss",
             ossKey: sanitizeGroupChatOssObjectKey(uploaded.ossKey),
             ossBucket: sanitizeAliyunOssBucket(uploaded.ossBucket),

@@ -46,6 +46,15 @@ import {
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import PortalSelect from "../components/PortalSelect.jsx";
+import {
+  TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
+  TEACHER_TASK_UPLOAD_MAX_FILES,
+  appendTeacherTaskUploadDrafts,
+  buildTeacherTaskUploadScopeKey,
+  markTeacherTaskUploadDraftsFailed,
+  markTeacherTaskUploadDraftsUploading,
+  removeTeacherTaskUploadDraft,
+} from "../features/classroom/teacherTaskUploadQueue.js";
 import { GENDER_OPTIONS, GRADE_OPTIONS } from "./chat/constants.js";
 import {
   DEFAULT_TEACHER_SCOPE_KEY,
@@ -1219,6 +1228,7 @@ export default function TeacherHomePage() {
   const [teacherCoursePlans, setTeacherCoursePlans] = useState([]);
   const [selectedCourseId, setSelectedCourseId] = useState("");
   const [selectedTaskId, setSelectedTaskId] = useState("");
+  const [taskUploadDraftsByScope, setTaskUploadDraftsByScope] = useState({});
   const [newTaskType, setNewTaskType] = useState("link");
   const [timeEditorDialog, setTimeEditorDialog] = useState({
     open: false,
@@ -3090,6 +3100,16 @@ export default function TeacherHomePage() {
   );
   const selectedTask =
     selectedTaskIndex >= 0 ? selectedCourseTasks[selectedTaskIndex] : null;
+  const selectedTaskUploadScopeKey = useMemo(
+    () => buildTeacherTaskUploadScopeKey(selectedCourse?.id, selectedTask?.id),
+    [selectedCourse, selectedTask],
+  );
+  const selectedTaskUploadDrafts = useMemo(() => {
+    if (!selectedTaskUploadScopeKey) return [];
+    return Array.isArray(taskUploadDraftsByScope[selectedTaskUploadScopeKey])
+      ? taskUploadDraftsByScope[selectedTaskUploadScopeKey]
+      : [];
+  }, [selectedTaskUploadScopeKey, taskUploadDraftsByScope]);
   const selectedTaskFiles = useMemo(
     () => (Array.isArray(selectedTask?.files) ? selectedTask.files : []),
     [selectedTask],
@@ -4052,23 +4072,91 @@ export default function TeacherHomePage() {
     await persistClassroomConfig({ silent: false });
   }
 
-  async function onUploadTaskFiles(event) {
+  function onSelectTaskFiles(event) {
     const sourceFiles = Array.from(event?.target?.files || []);
     event.target.value = "";
+    if (!selectedTaskUploadScopeKey || sourceFiles.length === 0) return;
+    const result = appendTeacherTaskUploadDrafts(
+      selectedTaskUploadDrafts,
+      sourceFiles,
+    );
+    setError("");
+    if (result.error) {
+      setError(result.error);
+      return;
+    }
+    setTaskUploadDraftsByScope((current) => ({
+      ...current,
+      [selectedTaskUploadScopeKey]: result.drafts,
+    }));
+  }
+
+  function onRemoveTaskUploadDraft(localId) {
+    const safeLocalId = String(localId || "").trim();
+    if (!selectedTaskUploadScopeKey || !safeLocalId || uploadingFiles) return;
+    setTaskUploadDraftsByScope((current) => {
+      const currentDrafts = Array.isArray(current[selectedTaskUploadScopeKey])
+        ? current[selectedTaskUploadScopeKey]
+        : [];
+      return {
+        ...current,
+        [selectedTaskUploadScopeKey]: removeTeacherTaskUploadDraft(
+          currentDrafts,
+          safeLocalId,
+        ),
+      };
+    });
+  }
+
+  async function onUploadQueuedTaskFiles() {
     const safeLessonId = String(selectedCourseId || "").trim();
     const safeTaskId = String(selectedTaskId || "").trim();
-    if (!adminToken || !safeLessonId || !safeTaskId || sourceFiles.length === 0)
+    if (
+      !adminToken ||
+      !selectedTaskUploadScopeKey ||
+      !safeLessonId ||
+      !safeTaskId ||
+      selectedTaskUploadDrafts.length === 0 ||
+      uploadingFiles
+    ) {
       return;
+    }
     setUploadingFiles(true);
     setError("");
+    setTaskUploadDraftsByScope((current) => {
+      const currentDrafts = Array.isArray(current[selectedTaskUploadScopeKey])
+        ? current[selectedTaskUploadScopeKey]
+        : [];
+      return {
+        ...current,
+        [selectedTaskUploadScopeKey]:
+          markTeacherTaskUploadDraftsUploading(currentDrafts),
+      };
+    });
     try {
       const ensuredSaved = await persistClassroomConfig({ silent: true });
-      if (!ensuredSaved) return;
+      if (!ensuredSaved) {
+        setTaskUploadDraftsByScope((current) => {
+          const currentDrafts = Array.isArray(
+            current[selectedTaskUploadScopeKey],
+          )
+            ? current[selectedTaskUploadScopeKey]
+            : [];
+          return {
+            ...current,
+            [selectedTaskUploadScopeKey]: markTeacherTaskUploadDraftsFailed(
+              currentDrafts,
+              "保存课堂配置失败，请稍后重试。",
+            ),
+          };
+        });
+        return;
+      }
       const data = await uploadAdminClassroomTaskFiles(
         adminToken,
         safeLessonId,
         safeTaskId,
-        sourceFiles,
+        selectedTaskUploadDrafts.map((item) => item.file).filter(Boolean),
       );
       const plans = Array.isArray(data?.teacherCoursePlans)
         ? data.teacherCoursePlans
@@ -4083,9 +4171,26 @@ export default function TeacherHomePage() {
         teacherCoursePlans: normalizedPlans,
         classroomDisciplineConfig,
       });
+      setTaskUploadDraftsByScope((current) => ({
+        ...current,
+        [selectedTaskUploadScopeKey]: [],
+      }));
     } catch (rawError) {
+      const message = readErrorMessage(rawError);
+      setTaskUploadDraftsByScope((current) => {
+        const currentDrafts = Array.isArray(current[selectedTaskUploadScopeKey])
+          ? current[selectedTaskUploadScopeKey]
+          : [];
+        return {
+          ...current,
+          [selectedTaskUploadScopeKey]: markTeacherTaskUploadDraftsFailed(
+            currentDrafts,
+            message,
+          ),
+        };
+      });
       if (handleAuthError(rawError)) return;
-      setError(readErrorMessage(rawError));
+      setError(message);
     } finally {
       setUploadingFiles(false);
     }
@@ -5880,7 +5985,7 @@ export default function TeacherHomePage() {
                                         type="file"
                                         multiple
                                         className="teacher-hidden-file-input"
-                                        onChange={onUploadTaskFiles}
+                                        onChange={onSelectTaskFiles}
                                       />
                                       <button
                                         type="button"
@@ -5892,23 +5997,103 @@ export default function TeacherHomePage() {
                                         data-tooltip={
                                           uploadingFiles
                                             ? "上传中..."
-                                            : "上传任务附件"
+                                            : "添加任务附件"
                                         }
                                         title={
                                           uploadingFiles
                                             ? "上传中..."
-                                            : "上传任务附件"
+                                            : "添加任务附件"
                                         }
                                         aria-label={
                                           uploadingFiles
                                             ? "上传中..."
-                                            : "上传任务附件"
+                                            : "添加任务附件"
                                         }
                                       >
                                         <Upload size={14} />
                                       </button>
+                                      <button
+                                        type="button"
+                                        className="teacher-primary-btn"
+                                        onClick={() =>
+                                          void onUploadQueuedTaskFiles()
+                                        }
+                                        disabled={
+                                          uploadingFiles ||
+                                          selectedTaskUploadDrafts.length === 0
+                                        }
+                                      >
+                                        <Upload size={14} />
+                                        <span>
+                                          {uploadingFiles
+                                            ? "正在上传..."
+                                            : "上传全部"}
+                                        </span>
+                                      </button>
                                     </div>
                                   </div>
+                                  <p className="teacher-task-file-hint">{`单个文件最大 ${formatFileSize(
+                                    TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
+                                  )}，每次最多上传 ${TEACHER_TASK_UPLOAD_MAX_FILES} 个文件。`}</p>
+                                  {selectedTaskUploadDrafts.length > 0 ? (
+                                    <div className="teacher-file-chip-list">
+                                      {selectedTaskUploadDrafts.map((file) => (
+                                        <div
+                                          key={file?.localId || file?.name}
+                                          className={`teacher-file-chip teacher-file-chip-${String(
+                                            file?.status || "draft",
+                                          )}`}
+                                        >
+                                          <div className="teacher-file-chip-info">
+                                            <FileText size={14} />
+                                            <div className="teacher-file-chip-meta">
+                                              <div className="teacher-file-chip-headline">
+                                                <strong>
+                                                  {file?.name || "任务附件"}
+                                                </strong>
+                                                <span className="teacher-file-chip-status">
+                                                  {file?.status === "uploading"
+                                                    ? "上传中"
+                                                    : file?.status === "failed"
+                                                      ? "上传失败"
+                                                      : "待上传"}
+                                                </span>
+                                              </div>
+                                              <div className="teacher-file-chip-subline">
+                                                <span>
+                                                  {formatFileSize(file?.size)}
+                                                </span>
+                                                <span>
+                                                  {file?.status === "uploading"
+                                                    ? "文件正在上传，请稍后。"
+                                                    : file?.error ||
+                                                      "已加入待上传列表。"}
+                                                </span>
+                                              </div>
+                                            </div>
+                                          </div>
+                                          <div className="teacher-file-chip-actions">
+                                            <button
+                                              type="button"
+                                              className="teacher-icon-btn danger"
+                                              onClick={() =>
+                                                onRemoveTaskUploadDraft(
+                                                  file?.localId,
+                                                )
+                                              }
+                                              disabled={
+                                                uploadingFiles ||
+                                                file?.status === "uploading"
+                                              }
+                                              title="移除待上传文件"
+                                            >
+                                              <X size={14} />
+                                            </button>
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : null}
                                   {selectedTaskFiles.length === 0 ? (
                                     <p className="teacher-empty-text">
                                       当前任务未上传附件。
