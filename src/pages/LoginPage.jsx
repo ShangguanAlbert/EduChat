@@ -17,7 +17,7 @@ import { setAdminToken } from "./login/adminSession.js";
 import { EMPTY_AUTH_STATUS, PRIVACY_POLICY_SECTIONS } from "./login/loginConstants.js";
 import {
   DEFAULT_TEACHER_SCOPE_KEY,
-  SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
+  getTeacherScopeStudentEntryPath,
   TEACHER_SCOPE_OPTIONS,
 } from "../../shared/teacherScopes.js";
 import {
@@ -28,6 +28,16 @@ import "../styles/login.css";
 function readErrorMessage(error) {
   return error?.message || "请求失败，请稍后再试。";
 }
+
+const REGISTER_GENDER_OPTIONS = ["男", "女"];
+const REGISTER_GRADE_OPTIONS = [
+  "7年级", "8年级", "9年级", "高一", "高二", "高三",
+  "大学一年级", "大学二年级", "大学三年级", "大学四年级",
+  "硕士研究生", "博士研究生",
+];
+const EMPTY_REGISTER_PROFILE = Object.freeze({
+  name: "", studentId: "", gender: "", grade: "", className: "",
+});
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -49,6 +59,7 @@ export default function LoginPage() {
   const [registerUsername, setRegisterUsername] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
   const [registerPasswordConfirm, setRegisterPasswordConfirm] = useState("");
+  const [registerProfile, setRegisterProfile] = useState(EMPTY_REGISTER_PROFILE);
   const [registerErr, setRegisterErr] = useState("");
   const [registerLoading, setRegisterLoading] = useState(false);
 
@@ -157,9 +168,7 @@ export default function LoginPage() {
         .toLowerCase();
       navigate(
         withAuthSlot(
-          nextTeacherScopeKey === SHANGGUAN_FUZE_TEACHER_SCOPE_KEY
-            ? "/mode-selection"
-            : "/chat",
+          getTeacherScopeStudentEntryPath(nextTeacherScopeKey),
         ),
       );
     } catch (error) {
@@ -174,6 +183,7 @@ export default function LoginPage() {
     setRegisterPassword("");
     setRegisterPasswordConfirm("");
     setRegisterUsername("");
+    setRegisterProfile(EMPTY_REGISTER_PROFILE);
     setShowRegisterModal(true);
   }
 
@@ -193,6 +203,7 @@ export default function LoginPage() {
       const data = await registerAccount({
         username: targetUsername,
         password: registerPassword,
+        profile: registerProfile,
       });
 
       setShowRegisterModal(false);
@@ -452,7 +463,7 @@ export default function LoginPage() {
       {showRegisterModal && (
         <ModalOverlay
           title="注册账号"
-          subtitle="创建普通用户账号用于登录"
+          subtitle="请一次性填写账号与学生信息，注册后可直接进入学生中心和聊天。"
           onClose={() => setShowRegisterModal(false)}
         >
           <form onSubmit={onRegisterSubmit}>
@@ -489,6 +500,83 @@ export default function LoginPage() {
                 type="password"
                 placeholder="再次输入密码"
                 autoComplete="new-password"
+              />
+            </div>
+
+            <div className="login-modal-section-title">学生信息</div>
+
+            <div className="login-field">
+              <label className="login-label">姓名</label>
+              <input
+                className="login-input"
+                value={registerProfile.name}
+                onChange={(e) => setRegisterProfile((current) => ({ ...current, name: e.target.value }))}
+                placeholder="请输入真实姓名"
+                disabled={registerLoading}
+                autoComplete="name"
+                required
+              />
+            </div>
+
+            <div className="login-field">
+              <label className="login-label">学号</label>
+              <input
+                className="login-input"
+                value={registerProfile.studentId}
+                onChange={(e) => setRegisterProfile((current) => ({ ...current, studentId: e.target.value }))}
+                placeholder="请输入学号"
+                disabled={registerLoading}
+                inputMode="numeric"
+                pattern="[0-9]{1,20}"
+                autoComplete="off"
+                required
+              />
+            </div>
+
+            <div className="login-profile-fields">
+              <div className="login-field">
+                <label className="login-label">性别</label>
+                <select
+                  className="login-input login-select"
+                  value={registerProfile.gender}
+                  onChange={(e) => setRegisterProfile((current) => ({ ...current, gender: e.target.value }))}
+                  disabled={registerLoading}
+                  required
+                >
+                  <option value="" disabled>请选择</option>
+                  {REGISTER_GENDER_OPTIONS.map((option) => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="login-field">
+                <label className="login-label">年级</label>
+                <select
+                  className="login-input login-select"
+                  value={registerProfile.grade}
+                  onChange={(e) => setRegisterProfile((current) => ({ ...current, grade: e.target.value }))}
+                  disabled={registerLoading}
+                  required
+                >
+                  <option value="" disabled>请选择</option>
+                  {REGISTER_GRADE_OPTIONS.map((option) => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="login-field">
+              <label className="login-label">班级</label>
+              <input
+                className="login-input"
+                value={registerProfile.className}
+                onChange={(e) => setRegisterProfile((current) => ({ ...current, className: e.target.value }))}
+                placeholder="例如：高一（1）班"
+                disabled={registerLoading}
+                autoComplete="organization"
+                required
               />
             </div>
 

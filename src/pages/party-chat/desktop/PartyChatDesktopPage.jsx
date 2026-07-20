@@ -6,6 +6,7 @@ import {
   Download,
   File as FileIcon,
   FileUp,
+  LogOut,
   MoreHorizontal,
   ImagePlus,
   Loader2,
@@ -27,7 +28,14 @@ import MessageInput from "../../../components/MessageInput.jsx";
 import MessageList from "../../../components/MessageList.jsx";
 import { AGENT_META } from "../../chat/constants.js";
 import { readErrorMessage, readSseStream } from "../../chat/chatHelpers.js";
-import { getUserToken, withAuthSlot } from "../../../app/authStorage.js";
+import {
+  clearScopedAdminToken,
+  clearUserAuthSession,
+  getStoredAuthUser,
+  getUserToken,
+  withAuthSlot,
+} from "../../../app/authStorage.js";
+import { SHI_GAOJUN_TEACHER_SCOPE_KEY } from "../../../../shared/teacherScopes.js";
 import {
   readReturnUrlFromSearch,
   redirectToReturnUrl,
@@ -41,12 +49,14 @@ import {
 import {
   createPartyRoom,
   deletePartyFileMessage,
+  deletePartyRoomAnnouncementAttachment,
   dissolvePartyRoom,
   fetchPartyBootstrap,
   fetchPartyMessages,
   joinPartyRoom,
   markPartyRoomRead,
   renamePartyRoom,
+  savePartyRoomAnnouncement,
   setPartyRoomAgentMemberAccess,
   setPartyRoomMemberMute,
   downloadPartyFile,
@@ -54,6 +64,7 @@ import {
   sendPartyImageMessage,
   sendPartyTextMessage,
   togglePartyMessageReaction,
+  uploadPartyRoomAnnouncementAttachment,
 } from "../../party/partyApi.js";
 import {
   arePartyIdListsEqual,
@@ -62,6 +73,7 @@ import {
   normalizePartyRoomOnlineUserIds,
 } from "../../party/partyRealtimeState.js";
 import { createPartySocketClient } from "../../party/partySocket.js";
+import PythonCollabPanel from "./PythonCollabPanel.jsx";
 import "../../../styles/chat.css";
 import "../../../styles/party-chat.css";
 
@@ -215,11 +227,21 @@ export default function PartyChatDesktopPage({
       return "";
     }
   }, [location.search]);
-  const backButtonLabel = returnTarget === "teacher-home" ? "返回教师主页" : "返回";
+  const isShiGaojunTeacherScope =
+    String(getStoredAuthUser()?.teacherScopeKey || "").trim().toLowerCase() ===
+    SHI_GAOJUN_TEACHER_SCOPE_KEY;
+  const backButtonLabel = isShiGaojunTeacherScope
+    ? "退出平台"
+    : returnTarget === "teacher-home"
+      ? "返回教师主页"
+      : "返回";
   const imageInputRef = useRef(null);
   const fileInputRef = useRef(null);
+  const announcementAttachmentInputRef = useRef(null);
   const messagesViewportRef = useRef(null);
   const socketRef = useRef(null);
+  const codingCollaborationListenersRef = useRef(new Map());
+  const desiredCodingCollaborationRoomIdsRef = useRef(new Set());
   const joinedRoomIdsRef = useRef(new Set());
   const roomsRef = useRef([]);
   const quickJoinAttemptedRoomCodeRef = useRef("");
@@ -285,6 +307,13 @@ export default function PartyChatDesktopPage({
   const [showRenameRoomModal, setShowRenameRoomModal] = useState(false);
   const [renameRoomName, setRenameRoomName] = useState("");
   const [renameSubmitting, setRenameSubmitting] = useState(false);
+  const [isAnnouncementExpanded, setIsAnnouncementExpanded] = useState(false);
+  const [isAnnouncementEditing, setIsAnnouncementEditing] = useState(false);
+  const [announcementDraft, setAnnouncementDraft] = useState("");
+  const [announcementSubmitting, setAnnouncementSubmitting] = useState(false);
+  const [codingEditorsByRoom, setCodingEditorsByRoom] = useState({});
+  const [announcementAttachmentSubmitting, setAnnouncementAttachmentSubmitting] = useState(false);
+  const [downloadingAnnouncementFileId, setDownloadingAnnouncementFileId] = useState("");
   const [showDissolveRoomModal, setShowDissolveRoomModal] = useState(false);
   const [dissolveConfirmText, setDissolveConfirmText] = useState("");
   const [dissolveSubmitting, setDissolveSubmitting] = useState(false);
@@ -321,6 +350,30 @@ export default function PartyChatDesktopPage({
     () => rooms.find((room) => room.id === activeRoomId) || null,
     [rooms, activeRoomId],
   );
+
+  const publishCodingCollaborationMessage = useCallback((payload) => {
+    const roomId = String(payload?.roomId || "").trim();
+    if (!roomId) return;
+    codingCollaborationListenersRef.current.get(roomId)?.forEach((listener) => listener(payload));
+  }, []);
+
+  const subscribeCodingCollaboration = useCallback((roomId, listener) => {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId || typeof listener !== "function") return () => {};
+    let listeners = codingCollaborationListenersRef.current.get(safeRoomId);
+    if (!listeners) {
+      listeners = new Set();
+      codingCollaborationListenersRef.current.set(safeRoomId, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      const currentListeners = codingCollaborationListenersRef.current.get(safeRoomId);
+      currentListeners?.delete(listener);
+      if (currentListeners?.size === 0) {
+        codingCollaborationListenersRef.current.delete(safeRoomId);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let frameId = 0;
@@ -1387,6 +1440,26 @@ export default function PartyChatDesktopPage({
     });
   }, [navigate, returnTarget, returnUrl, teacherHomeExportContext.exportDate, teacherHomeExportContext.exportTeacherScopeKey, teacherHomePanelParam]);
 
+  const handlePlatformLogout = useCallback(() => {
+    if (!window.confirm("确定要退出整个元协坊平台吗？退出后需要重新登录。")) {
+      return;
+    }
+    if (readSyncTimerRef.current) {
+      clearTimeout(readSyncTimerRef.current);
+      readSyncTimerRef.current = 0;
+    }
+    if (copyImageToastTimerRef.current) {
+      clearTimeout(copyImageToastTimerRef.current);
+      copyImageToastTimerRef.current = 0;
+    }
+    joinedRoomIdsRef.current = new Set();
+    socketRef.current?.close();
+    socketRef.current = null;
+    clearUserAuthSession();
+    clearScopedAdminToken();
+    navigate(withAuthSlot("/login"), { replace: true });
+  }, [navigate]);
+
   const mergeMessages = useCallback((roomId, incoming, { replace = false } = {}) => {
     const safeRoomId = String(roomId || "").trim();
     const safeIncoming = Array.isArray(incoming) ? incoming.filter(Boolean) : [];
@@ -1871,6 +1944,9 @@ export default function PartyChatDesktopPage({
       token,
       onAuthed: () => {
         joinedRoomIdsRef.current = joinAllPartyRooms(socketClient, roomsRef.current);
+        desiredCodingCollaborationRoomIdsRef.current.forEach((roomId) => {
+          socketClient.joinCodingCollaboration(roomId);
+        });
       },
       onMessageCreated: (payload) => {
         const roomId = String(payload?.roomId || payload?.message?.roomId || "").trim();
@@ -1920,6 +1996,22 @@ export default function PartyChatDesktopPage({
         if (!roomId) return;
         applyRoomReadState(roomId, payload?.readState);
       },
+      onCodingCollaborationMessage: publishCodingCollaborationMessage,
+      onCodingEditorPresenceUpdated: (payload) => {
+        const roomId = String(payload?.roomId || "").trim();
+        if (!roomId) return;
+        const editors = (Array.isArray(payload?.editors) ? payload.editors : [])
+          .map((editor) => ({
+            userId: String(editor?.userId || "").trim(),
+            name: String(editor?.name || "成员").trim() || "成员",
+          }))
+          .filter((editor) => editor.userId)
+          .slice(0, 8);
+        setCodingEditorsByRoom((previous) => ({
+          ...previous,
+          [roomId]: editors,
+        }));
+      },
       onError: (payload) => {
         const message = String(payload?.message || "").trim();
         if (message) {
@@ -1930,6 +2022,9 @@ export default function PartyChatDesktopPage({
 
     socketClient.connect();
     socketRef.current = socketClient;
+    desiredCodingCollaborationRoomIdsRef.current.forEach((roomId) => {
+      socketClient.joinCodingCollaboration(roomId);
+    });
 
     return () => {
       joinedRoomIdsRef.current = new Set();
@@ -1946,9 +2041,40 @@ export default function PartyChatDesktopPage({
     applyRoomUpsert,
     loadBootstrap,
     mergeMessages,
+    publishCodingCollaborationMessage,
     removeRoom,
     touchRoom,
   ]);
+
+  const setCodingEditorPresence = useCallback((roomId, active) => {
+    socketRef.current?.setCodingEditorPresence(roomId, active);
+  }, []);
+
+  const joinCodingCollaboration = useCallback((roomId) => {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId) return;
+    desiredCodingCollaborationRoomIdsRef.current.add(safeRoomId);
+    socketRef.current?.joinCodingCollaboration(roomId);
+  }, []);
+
+  const leaveCodingCollaboration = useCallback((roomId) => {
+    const safeRoomId = String(roomId || "").trim();
+    if (!safeRoomId) return;
+    desiredCodingCollaborationRoomIdsRef.current.delete(safeRoomId);
+    socketRef.current?.leaveCodingCollaboration(roomId);
+  }, []);
+
+  const sendCodingCollaborationUpdate = useCallback((roomId, update) => {
+    socketRef.current?.sendCodingCollaborationUpdate(roomId, update);
+  }, []);
+
+  const sendCodingCollaborationAwareness = useCallback((roomId, update, clientIds) => {
+    socketRef.current?.sendCodingCollaborationAwareness(roomId, update, clientIds);
+  }, []);
+
+  const clearCodingCollaborationOutput = useCallback((roomId) => {
+    return socketRef.current?.clearCodingCollaborationOutput(roomId) || false;
+  }, []);
 
   useEffect(() => {
     if (!activeRoomId) return;
@@ -2248,6 +2374,94 @@ export default function PartyChatDesktopPage({
       setActionError(error?.message || "重命名失败，请稍后重试。");
     } finally {
       setRenameSubmitting(false);
+    }
+  }
+
+  async function handleSaveAnnouncement(event) {
+    event.preventDefault();
+    if (!activeRoom || !canManageActiveRoom || announcementSubmitting) return;
+    setAnnouncementSubmitting(true);
+    try {
+      const result = await savePartyRoomAnnouncement(activeRoom.id, announcementDraft);
+      applyRoomUpsert(result?.room);
+      setIsAnnouncementEditing(false);
+      setActionError("");
+    } catch (error) {
+      setActionError(error?.message || "保存群公告失败，请稍后重试。");
+    } finally {
+      setAnnouncementSubmitting(false);
+    }
+  }
+
+  async function handleUploadAnnouncementAttachment(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!activeRoom || !canManageActiveRoom || !(file instanceof File)) return;
+    if (Number(file.size || 0) > PARTY_UPLOAD_FILE_MAX_FILE_SIZE_BYTES) {
+      setActionError("公告附件不能超过10MB。");
+      return;
+    }
+    setAnnouncementAttachmentSubmitting(true);
+    try {
+      const result = await uploadPartyRoomAnnouncementAttachment(activeRoom.id, file);
+      applyRoomUpsert(result?.room);
+      setActionError("");
+    } catch (error) {
+      setActionError(error?.message || "上传公告附件失败，请稍后重试。");
+    } finally {
+      setAnnouncementAttachmentSubmitting(false);
+    }
+  }
+
+  async function handleDownloadAnnouncementAttachment(attachment) {
+    const roomId = String(activeRoom?.id || "").trim();
+    const fileId = String(attachment?.fileId || "").trim();
+    if (!roomId || !fileId) return;
+    setDownloadingAnnouncementFileId(fileId);
+    try {
+      const result = await downloadPartyFile(roomId, fileId);
+      const fileName = String(result?.fileName || attachment?.fileName || "group-file.bin");
+      const downloadUrl = String(result?.downloadUrl || "").trim();
+      if (downloadUrl) {
+        const anchor = document.createElement("a");
+        anchor.href = downloadUrl;
+        anchor.download = fileName;
+        anchor.target = "_blank";
+        anchor.rel = "noopener noreferrer";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        return;
+      }
+      if (!result?.blob) throw new Error("文件下载失败");
+      const blobUrl = URL.createObjectURL(result.blob);
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(blobUrl);
+    } catch (error) {
+      setActionError(error?.message || "文件下载失败，请稍后重试。");
+    } finally {
+      setDownloadingAnnouncementFileId("");
+    }
+  }
+
+  async function handleDeleteAnnouncementAttachment(attachment) {
+    const roomId = String(activeRoom?.id || "").trim();
+    const fileId = String(attachment?.fileId || "").trim();
+    if (!roomId || !fileId || !canManageActiveRoom || announcementAttachmentSubmitting) return;
+    setAnnouncementAttachmentSubmitting(true);
+    try {
+      const result = await deletePartyRoomAnnouncementAttachment(roomId, fileId);
+      applyRoomUpsert(result?.room);
+      setActionError("");
+    } catch (error) {
+      setActionError(error?.message || "删除公告附件失败，请稍后重试。");
+    } finally {
+      setAnnouncementAttachmentSubmitting(false);
     }
   }
 
@@ -2847,6 +3061,24 @@ export default function PartyChatDesktopPage({
     setShowRenameRoomModal(false);
   }
 
+  function openAnnouncementEditor() {
+    if (!activeRoom || !canManageActiveRoom) return;
+    setAnnouncementDraft(activeRoom.announcement || "");
+    setIsAnnouncementEditing(true);
+    setIsAnnouncementExpanded(true);
+    setActionError("");
+  }
+
+  function openAnnouncementAttachmentPicker() {
+    if (!activeRoom || !canManageActiveRoom || announcementAttachmentSubmitting) return;
+    announcementAttachmentInputRef.current?.click();
+  }
+
+  function closeAnnouncementEditor() {
+    if (announcementSubmitting) return;
+    setIsAnnouncementEditing(false);
+  }
+
   function openDissolveRoomModal() {
     if (!activeRoom || !canManageActiveRoom) return;
     setDissolveConfirmText("");
@@ -3230,6 +3462,9 @@ export default function PartyChatDesktopPage({
     forceScrollToLatestRef.current = true;
     isAtLatestRef.current = true;
     setIsAtLatest(true);
+    setIsAnnouncementExpanded(false);
+    setIsAnnouncementEditing(false);
+    setAnnouncementDraft("");
     setReadReceiptModal({
       open: false,
       messageId: "",
@@ -3374,6 +3609,130 @@ export default function PartyChatDesktopPage({
             )}
           </section>
 
+          <section className="party-card party-announcement-card">
+            <div className="party-announcement-head">
+              <h2 className="party-card-title">群公告</h2>
+              {activeRoom && canManageActiveRoom ? (
+                <button
+                  type="button"
+                  className="party-announcement-edit-btn"
+                  onClick={openAnnouncementEditor}
+                  disabled={announcementSubmitting}
+                >
+                  编辑
+                </button>
+              ) : null}
+            </div>
+
+            {!activeRoom ? (
+              <p className="party-tip">请选择一个派查看公告。</p>
+            ) : isAnnouncementEditing ? (
+              <form className="party-announcement-editor" onSubmit={handleSaveAnnouncement}>
+                <textarea
+                  value={announcementDraft}
+                  onChange={(event) => setAnnouncementDraft(event.target.value)}
+                  maxLength={500}
+                  autoFocus
+                  placeholder="输入群公告，成员进入派后即可查看"
+                  aria-label="编辑群公告"
+                />
+                <div className="party-announcement-editor-meta">
+                  <span>{announcementDraft.length}/500</span>
+                  <div className="party-announcement-editor-actions">
+                    <button
+                      type="button"
+                      onClick={closeAnnouncementEditor}
+                      disabled={announcementSubmitting}
+                    >
+                      取消
+                    </button>
+                    <button type="submit" disabled={announcementSubmitting}>
+                      {announcementSubmitting ? "保存中..." : "保存"}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            ) : (
+              <>
+                <p
+                  className={`party-announcement-content${
+                    isAnnouncementExpanded ? " is-expanded" : ""
+                  }${activeRoom.announcement ? "" : " is-empty"}`}
+                >
+                  {activeRoom.announcement || "暂无群公告"}
+                </p>
+                {activeRoom.announcement ? (
+                  <button
+                    type="button"
+                    className="party-announcement-expand-btn"
+                    onClick={() => setIsAnnouncementExpanded((current) => !current)}
+                  >
+                    {isAnnouncementExpanded ? "收起" : "展开"}
+                  </button>
+                ) : null}
+              </>
+            )}
+            {activeRoom ? (
+              <div className="party-announcement-attachments">
+                <div className="party-announcement-attachments-head">
+                  <span>附件</span>
+                  {canManageActiveRoom ? (
+                    <>
+                      <input
+                        ref={announcementAttachmentInputRef}
+                        className="party-announcement-file-input"
+                        type="file"
+                        onChange={handleUploadAnnouncementAttachment}
+                      />
+                      <button
+                        type="button"
+                        className="party-announcement-upload-btn"
+                        onClick={openAnnouncementAttachmentPicker}
+                        disabled={announcementAttachmentSubmitting || activeRoom.announcementAttachments.length >= 5}
+                      >
+                        <FileUp size={13} />
+                        {announcementAttachmentSubmitting ? "上传中..." : "上传"}
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+                {activeRoom.announcementAttachments.length === 0 ? (
+                  <p className="party-announcement-no-attachments">暂无附件</p>
+                ) : (
+                  <div className="party-announcement-attachment-list">
+                    {activeRoom.announcementAttachments.map((attachment) => (
+                      <div key={attachment.fileId} className="party-announcement-attachment-item">
+                        <FileIcon size={14} />
+                        <button
+                          type="button"
+                          className="party-announcement-download-btn"
+                          onClick={() => void handleDownloadAnnouncementAttachment(attachment)}
+                          disabled={downloadingAnnouncementFileId === attachment.fileId}
+                          title={attachment.fileName}
+                        >
+                          {downloadingAnnouncementFileId === attachment.fileId
+                            ? "下载中..."
+                            : attachment.fileName}
+                        </button>
+                        {canManageActiveRoom ? (
+                          <button
+                            type="button"
+                            className="party-announcement-remove-btn"
+                            onClick={() => void handleDeleteAnnouncementAttachment(attachment)}
+                            disabled={announcementAttachmentSubmitting}
+                            aria-label={`删除附件 ${attachment.fileName}`}
+                          >
+                            <X size={13} />
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </section>
+
           <section className="party-card party-members-card">
             <div className="party-member-list-head">
               <h2 className="party-card-title">成员</h2>
@@ -3436,11 +3795,11 @@ export default function PartyChatDesktopPage({
           <button
             type="button"
             className="party-side-back-btn"
-            onClick={handleBackToChat}
+            onClick={isShiGaojunTeacherScope ? handlePlatformLogout : handleBackToChat}
             title={backButtonLabel}
             aria-label={backButtonLabel}
           >
-            <ArrowLeft size={16} />
+            {isShiGaojunTeacherScope ? <LogOut size={16} /> : <ArrowLeft size={16} />}
             {backButtonLabel}
           </button>
         </aside>
@@ -4152,7 +4511,9 @@ export default function PartyChatDesktopPage({
           )}
         </main>
 
-        <aside className="party-agent-column" aria-label="派Agent">
+        {String(getStoredAuthUser()?.teacherScopeKey || "").trim().toLowerCase() === SHI_GAOJUN_TEACHER_SCOPE_KEY ? (
+          activeRoom ? <PythonCollabPanel roomId={activeRoom.id} me={me} codingEditors={codingEditorsByRoom[activeRoom.id] || []} onEditingChange={setCodingEditorPresence} onJoinCollaboration={joinCodingCollaboration} onLeaveCollaboration={leaveCodingCollaboration} onCollaborationUpdate={sendCodingCollaborationUpdate} onCollaborationAwareness={sendCodingCollaborationAwareness} onCollaborationOutputClear={clearCodingCollaborationOutput} subscribeToCollaboration={subscribeCodingCollaboration} /> : <aside className="party-agent-column" />
+        ) : <aside className="party-agent-column" aria-label="派Agent">
           <div className={`party-agent-panel${partyAgentAccessBlocked ? " is-access-blocked" : ""}`}>
             <div className="party-agent-panel-head">
               <div className="party-agent-panel-head-title">
@@ -4211,7 +4572,7 @@ export default function PartyChatDesktopPage({
               </div>
             ) : null}
           </div>
-        </aside>
+        </aside>}
       </div>
 
       {showCreateRoomModal ? (
@@ -4762,6 +5123,8 @@ function normalizeRoom(raw) {
     id,
     roomCode: String(raw?.roomCode || "").trim(),
     name: String(raw?.name || "未命名派"),
+    announcement: String(raw?.announcement || "").trim().slice(0, 500),
+    announcementAttachments: normalizeAnnouncementAttachments(raw?.announcementAttachments),
     ownerUserId,
     partyAgentMemberEnabled: raw?.partyAgentMemberEnabled !== false,
     memberUserIds,
@@ -4772,6 +5135,23 @@ function normalizeRoom(raw) {
     readStatesProvided,
     onlineMemberUserIds: normalizeRoomOnlineUserIds(raw?.onlineMemberUserIds, memberUserIds),
   };
+}
+
+function normalizeAnnouncementAttachments(rawAttachments) {
+  if (!Array.isArray(rawAttachments)) return [];
+  return rawAttachments
+    .map((item) => {
+      const fileId = String(item?.fileId || "").trim();
+      if (!fileId) return null;
+      return {
+        fileId,
+        fileName: String(item?.fileName || "group-file.bin").trim() || "group-file.bin",
+        mimeType: String(item?.mimeType || "application/octet-stream").trim(),
+        size: Math.max(0, Number(item?.size || 0)),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 5);
 }
 
 function normalizeRoomReadStates(rawReadStates) {

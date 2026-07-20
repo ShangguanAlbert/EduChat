@@ -299,6 +299,19 @@ export function fetchAdminGroupChatRooms(adminToken) {
   return request("/api/auth/admin/group-chat/rooms", adminToken);
 }
 
+export function fetchAdminPartyCodingQuality(adminToken, options = {}) {
+  const params = new URLSearchParams();
+  const hours = Number(options?.hours);
+  const limit = Number(options?.limit);
+  if (Number.isFinite(hours) && hours > 0) params.set("hours", String(Math.floor(hours)));
+  if (Number.isFinite(limit) && limit > 0) params.set("limit", String(Math.floor(limit)));
+  const query = params.toString();
+  return request(
+    `/api/auth/admin/party-coding/quality${query ? `?${query}` : ""}`,
+    adminToken,
+  );
+}
+
 export function createAdminGroupChatRoom(adminToken, payload = {}) {
   return request("/api/auth/admin/group-chat/rooms", adminToken, {
     method: "POST",

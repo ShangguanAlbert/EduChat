@@ -69,6 +69,64 @@ export function renamePartyRoom(roomId, name) {
   });
 }
 
+export function savePartyRoomAnnouncement(roomId, announcement) {
+  const safeRoomId = String(roomId || "").trim();
+  return request(`/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/announcement`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      announcement: String(announcement || "").trim(),
+    }),
+  });
+}
+
+export async function uploadPartyRoomAnnouncementAttachment(roomId, file) {
+  const safeRoomId = String(roomId || "").trim();
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("fileName", String(file?.name || ""));
+  const resp = await fetch(
+    `/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/announcement/attachments`,
+    { method: "POST", headers: authHeaders(), body: formData },
+  );
+  const data = await readJson(resp);
+  if (!resp.ok) throw new Error(data?.error || data?.message || `请求失败（${resp.status}）`);
+  return data;
+}
+
+export function deletePartyRoomAnnouncementAttachment(roomId, fileId) {
+  const safeRoomId = String(roomId || "").trim();
+  const safeFileId = String(fileId || "").trim();
+  return request(
+    `/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/announcement/attachments/${encodeURIComponent(safeFileId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function fetchPartyCodingWorkspace(roomId) {
+  return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding`);
+}
+
+export function savePartyCodingWorkspace(roomId, code) {
+  return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding`, {
+    method: "PUT",
+    body: JSON.stringify({ code: String(code || "") }),
+  });
+}
+
+export function savePartyCodingStdin(roomId, stdin) {
+  return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding/stdin`, {
+    method: "PUT",
+    body: JSON.stringify({ stdin: String(stdin || "") }),
+  });
+}
+
+export function runPartyPython(roomId, { code, stdin }) {
+  return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding/run`, {
+    method: "POST",
+    body: JSON.stringify({ code: String(code || ""), stdin: String(stdin || "") }),
+  });
+}
+
 export function setPartyRoomAgentMemberAccess(roomId, partyAgentMemberEnabled) {
   const safeRoomId = String(roomId || "").trim();
   return request(`/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/party-agent-access`, {

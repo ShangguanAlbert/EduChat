@@ -60,6 +60,10 @@ services:
       EDUCHAT_BASE_PATH: ${EDUCHAT_BASE_PATH:-/}
       MONGO_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME:-admin}:${MONGO_INITDB_ROOT_PASSWORD:-change_me}@mongo:27017/${MONGO_DB_NAME:-educhat}?authSource=admin
       GROUP_CHAT_AI_REDIS_URL: redis://redis:6379
+      PYTHON_RUNNER_URL: http://python-runner:8790
+    networks:
+      - default
+      - python_runner_internal
     ports:
       - "3080:8787"
     healthcheck:
@@ -99,6 +103,43 @@ services:
       MONGO_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME:-admin}:${MONGO_INITDB_ROOT_PASSWORD:-change_me}@mongo:27017/${MONGO_DB_NAME:-educhat}?authSource=admin
       GROUP_CHAT_AI_REDIS_URL: redis://redis:6379
 
+  python-runner:
+    build:
+      context: ./python-runner
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8790:8790"
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: ${PYTHON_RUNNER_PIDS_LIMIT:-256}
+    mem_limit: ${PYTHON_RUNNER_CONTAINER_MEMORY_LIMIT:-96g}
+    environment:
+      PYTHON_RUNNER_REDIS_URL: redis://redis:6379
+      PYTHON_RUNNER_REDIS_REQUIRED: "true"
+      PYTHON_RUNNER_REDIS_PREFIX: ${PYTHON_RUNNER_REDIS_PREFIX:-educhat:python-runner}
+      PYTHON_RUNNER_MAX_CONCURRENCY: ${PYTHON_RUNNER_MAX_CONCURRENCY:-64}
+      PYTHON_RUNNER_PROCESS_LIMIT: ${PYTHON_RUNNER_PROCESS_LIMIT:-80}
+      PYTHON_RUNNER_GLOBAL_MAX_CONCURRENCY: ${PYTHON_RUNNER_GLOBAL_MAX_CONCURRENCY:-64}
+      PYTHON_RUNNER_QUEUE_MAX_SIZE: ${PYTHON_RUNNER_QUEUE_MAX_SIZE:-512}
+      PYTHON_RUNNER_MAX_QUEUE_WAIT_SECONDS: ${PYTHON_RUNNER_MAX_QUEUE_WAIT_SECONDS:-600}
+      PYTHON_RUNNER_MEMORY_BYTES: ${PYTHON_RUNNER_MEMORY_BYTES:-1073741824}
+    networks:
+      - default
+      - python_runner_internal
+
 volumes:
   mongo_data:
   redis_data:
+
+networks:
+  python_runner_internal:
+    internal: true

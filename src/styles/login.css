@@ -234,6 +234,21 @@
   transform: translateY(-1px);
 }
 
+.login-select {
+  appearance: auto;
+  cursor: pointer;
+}
+
+.login-profile-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
+  gap: 12px;
+}
+
+.login-profile-fields .login-field {
+  min-width: 0;
+}
+
 .login-portal-select .portal-select-trigger {
   min-height: 48px;
   border-radius: 16px;
@@ -596,6 +611,15 @@
   line-height: 1.6;
 }
 
+.login-modal-section-title {
+  margin: 20px 0 2px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(110, 83, 59, 0.1);
+  color: #5a5647;
+  font-size: 14px;
+  font-weight: 700;
+}
+
 .login-modal-error {
   margin: 8px 0 0;
   min-height: 18px;
@@ -608,6 +632,22 @@
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+
+@media (max-width: 560px) {
+  .login-modal-overlay {
+    align-items: flex-start;
+    overflow: auto;
+  }
+
+  .login-modal-card {
+    margin: auto 0;
+  }
+
+  .login-profile-fields {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
 }
 
 .login-modal-btn {

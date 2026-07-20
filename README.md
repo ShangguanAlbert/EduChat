@@ -15,8 +15,11 @@
    - 如需使用 MiniMax 原生聊天、歌词生成与音乐生成：配置 `MINIMAX_API_KEY`；可选覆盖 `MINIMAX_CHAT_ENDPOINT`、`MINIMAX_MUSIC_ENDPOINT` 与 `MINIMAX_LYRICS_ENDPOINT`
    - 如启用文件 OSS 存储：配置 `ALIYUN_OSS_*` 与 `ALIYUN_ACCESS_KEY_*`；公共读桶请设 `ALIYUN_OSS_PUBLIC_READ=true`，私有桶保持 `false`；网络路由建议使用 `ALIYUN_OSS_NETWORK_MODE`：`public`（本地）/`internal_prefer`（ECS 生产）/`internal_only`（严格内网）。`ALIYUN_OSS_INTERNAL` 仍兼容旧配置
    - 默认启用启动自检（Bucket 可达性 + 写删探测），可通过 `ALIYUN_OSS_STARTUP_CHECK_*` 开关调整
-   - `docker compose` 会一并启动 `mongo`、`redis`、`app` 与 `group-chat-ai-worker`
+   - `docker compose` 会一并启动 `mongo`、`redis`、`app`、`group-chat-ai-worker` 与 Python 执行器
    - 容器内群聊 `@AI` 队列固定连接 `redis://redis:6379`，不使用 `.env` 里写给本机调试的 `127.0.0.1`
+   - Python 协作编程执行器使用 Redis 统一限制所有派的并发运行数：默认最多 `64` 个任务并行、其余任务按 FIFO 排队，单派仍始终只允许一个任务运行。可通过 `PYTHON_RUNNER_MAX_CONCURRENCY`、`PYTHON_RUNNER_GLOBAL_MAX_CONCURRENCY`、`PYTHON_RUNNER_QUEUE_MAX_SIZE` 调整；`PYTHON_RUNNER_PROCESS_LIMIT` 默认留有 NumPy、Matplotlib 所需的少量线程余量。
+   - Python 执行器镜像内置独立的“基础与数据分析环境”，学生可使用 `numpy`、`pandas`、`matplotlib`、`openpyxl`。受控库清单在 `python-runner/requirements.student.txt`：修改后重新构建并发布 Runner 镜像；不要开放学生运行时执行 `pip install`。
+   - 教师后台的“Python 环境质控”显示执行器健康、实时队列、当前环境版本和协作编程运行审计。审计仅保存代码指纹、长度、耗时、队列等待和错误摘要，不保存完整代码或标准输入；默认保存 `30` 天，可用 `PARTY_CODING_RUN_LOG_RETENTION_DAYS` 调整。
 2. 启动服务：
    - `docker compose up -d --build`
 3. 查看状态：
@@ -34,6 +37,9 @@
    - 如需使用期末测试回退或重新开始功能，请设置 `FINAL_TEST_TURNBACK_PASSPHRASE` 和 `FINAL_TEST_RESTART_PASSPHRASE`
    - 如需本地模拟子路径部署，可额外设置 `EDUCHAT_BASE_PATH=/hznu/metaxfang/`
    - 本地调试群聊 `@AI` 时，建议单独启动 Mongo 和 Redis，再用 `npm run dev`
+   - 本地执行 `npm run dev` 会自动启动 Python 执行器，并通过 `PYTHON_RUNNER_URL=http://127.0.0.1:8790` 调用它；不要为了本地调试额外启动一套 Compose Redis。
+   - 本地直接执行 `npm run python-runner:dev` 时，如未配置 `PYTHON_RUNNER_REDIS_URL`，执行器会明确使用单实例并发池；完整 Docker 部署则强制使用 Redis 全局容量令牌。
+   - 本地 `npm run dev` 默认使用本机标准库。若需调试数据分析库，请自行创建独立虚拟环境、安装 `python-runner/requirements.student.txt`，再设置 `PYTHON_RUNNER_STUDENT_PYTHON` 指向该虚拟环境的 Python。
    - 本地默认 Redis 地址可直接使用 `.env` 里的 `GROUP_CHAT_AI_REDIS_URL=redis://127.0.0.1:6380`
    - 如同时部署了 Dify 等也占用宿主机 `6379` 的服务，EduChat 的 Docker Redis 默认映射到宿主机 `6380`
 3. 启动服务：

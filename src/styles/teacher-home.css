@@ -5712,3 +5712,373 @@
     max-width: calc(100vw - 24px);
   }
 }
+
+/* Python collaboration quality console */
+.teacher-python-quality-stack {
+  min-height: 0;
+}
+
+.teacher-python-quality-actions {
+  align-items: center;
+}
+
+.teacher-python-quality-windows {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--teacher-border-soft);
+  border-radius: 10px;
+  background: var(--teacher-surface-muted);
+}
+
+.teacher-python-quality-windows button {
+  min-height: 28px;
+  border: 0;
+  border-radius: 7px;
+  padding: 0 9px;
+  background: transparent;
+  color: var(--teacher-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.teacher-python-quality-windows button:hover,
+.teacher-python-quality-windows button.active {
+  background: var(--teacher-surface);
+  color: var(--teacher-text);
+  box-shadow: 0 1px 3px rgba(95, 74, 56, 0.1);
+}
+
+.teacher-python-quality-windows button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.teacher-python-quality-health-grid,
+.teacher-python-quality-content-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.teacher-python-quality-health-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.teacher-python-quality-health,
+.teacher-python-quality-environment {
+  min-height: 132px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.teacher-python-quality-health {
+  border-color: rgba(91, 155, 111, 0.28);
+}
+
+.teacher-python-quality-health.unavailable {
+  border-color: rgba(202, 111, 75, 0.34);
+}
+
+.teacher-python-quality-health-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: #398253;
+}
+
+.teacher-python-quality-health.unavailable .teacher-python-quality-health-title {
+  color: #bd6340;
+}
+
+.teacher-python-quality-environment .teacher-python-quality-health-title {
+  color: var(--teacher-accent-text);
+}
+
+.teacher-python-quality-health-title > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.teacher-python-quality-health-title strong {
+  color: var(--teacher-text);
+  font-size: 15px;
+}
+
+.teacher-python-quality-health-title span,
+.teacher-python-quality-environment > p {
+  color: var(--teacher-text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.teacher-python-quality-environment > p {
+  margin: -2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.teacher-python-quality-health-values,
+.teacher-python-quality-policy {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--teacher-text-soft);
+  font-size: 12px;
+}
+
+.teacher-python-quality-health-values span,
+.teacher-python-quality-policy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.teacher-python-quality-policy {
+  color: var(--teacher-text-muted);
+}
+
+.teacher-python-quality-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.teacher-python-quality-metric {
+  min-height: 104px;
+  padding: 13px 14px;
+  border: 1px solid var(--teacher-border-soft);
+  border-radius: 13px;
+  background: var(--teacher-surface);
+  display: grid;
+  align-content: space-between;
+  gap: 6px;
+}
+
+.teacher-python-quality-metric span,
+.teacher-python-quality-metric small {
+  color: var(--teacher-text-muted);
+  font-size: 12px;
+}
+
+.teacher-python-quality-metric strong {
+  color: var(--teacher-text);
+  font-size: 23px;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+}
+
+.teacher-python-quality-metric.success strong {
+  color: #267342;
+}
+
+.teacher-python-quality-metric.warning strong {
+  color: #b16425;
+}
+
+.teacher-python-quality-content-grid {
+  grid-template-columns: minmax(0, 1.7fr) minmax(260px, 0.8fr);
+  align-items: start;
+}
+
+.teacher-python-quality-log-card,
+.teacher-python-quality-errors-card {
+  min-width: 0;
+}
+
+.teacher-python-quality-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.teacher-python-quality-card-head h3 {
+  margin: 0;
+  color: var(--teacher-text);
+  font-size: 15px;
+}
+
+.teacher-python-quality-card-head p {
+  margin: 5px 0 0;
+  color: var(--teacher-text-muted);
+  font-size: 12px;
+}
+
+.teacher-python-quality-card-head > span {
+  color: var(--teacher-text-muted);
+  font-size: 12px;
+}
+
+.teacher-python-quality-table-wrap {
+  margin-top: 13px;
+  border: 1px solid var(--teacher-border-soft);
+  border-radius: 11px;
+  overflow: auto;
+}
+
+.teacher-python-quality-table {
+  min-width: 700px;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.teacher-python-quality-table th,
+.teacher-python-quality-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--teacher-border-soft) 78%, white);
+  text-align: left;
+  vertical-align: top;
+}
+
+.teacher-python-quality-table th {
+  background: var(--teacher-surface-muted);
+  color: var(--teacher-text-soft);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.teacher-python-quality-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.teacher-python-quality-table td:nth-child(1),
+.teacher-python-quality-table td:nth-child(4),
+.teacher-python-quality-table td:nth-child(5) {
+  color: var(--teacher-text-muted);
+  white-space: nowrap;
+}
+
+.teacher-python-quality-table td strong,
+.teacher-python-quality-table td small {
+  display: block;
+}
+
+.teacher-python-quality-table td strong {
+  color: var(--teacher-text);
+  font-weight: 600;
+}
+
+.teacher-python-quality-table td small {
+  margin-top: 3px;
+  color: var(--teacher-text-muted);
+}
+
+.teacher-python-quality-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.teacher-python-quality-status.success {
+  color: #287442;
+}
+
+.teacher-python-quality-status.warning {
+  color: #a96024;
+}
+
+.teacher-python-quality-status.danger {
+  color: #b6503e;
+}
+
+.teacher-python-quality-error {
+  min-width: 180px;
+  max-width: 340px;
+  color: var(--teacher-text-muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.teacher-python-quality-error-list {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.teacher-python-quality-error-list li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--teacher-border-soft);
+  color: var(--teacher-text-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.teacher-python-quality-error-list li:last-child {
+  border-bottom: 0;
+}
+
+.teacher-python-quality-error-list b {
+  color: #b16425;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.teacher-python-quality-guardrail {
+  margin-top: 18px;
+  padding: 11px;
+  border: 1px solid rgba(193, 95, 60, 0.2);
+  border-radius: 10px;
+  background: rgba(193, 95, 60, 0.045);
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--teacher-accent-text);
+}
+
+.teacher-python-quality-guardrail p {
+  margin: 0;
+  color: var(--teacher-text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.teacher-python-quality-guardrail strong {
+  color: var(--teacher-text-soft);
+  margin-right: 5px;
+}
+
+@media (max-width: 1180px) {
+  .teacher-python-quality-metric-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 880px) {
+  .teacher-python-quality-health-grid,
+  .teacher-python-quality-content-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .teacher-python-quality-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .teacher-python-quality-windows {
+    flex: 1;
+  }
+
+  .teacher-python-quality-windows button {
+    flex: 1;
+    padding: 0 5px;
+  }
+
+  .teacher-python-quality-metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   ArrowUpDown,
+  Activity,
   Bot,
   CalendarDays,
   CircleHelp,
@@ -47,6 +48,7 @@ import {
 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import PortalSelect from "../components/PortalSelect.jsx";
+import PythonQualityPanel from "../features/admin/components/PythonQualityPanel.jsx";
 import {
   CLASSROOM_FILE_KIND_TASK,
   getClassroomFileDownloadErrorText,
@@ -150,6 +152,7 @@ const TEACHER_HOME_PANEL_KEYS = Object.freeze(
     "export-center",
     "image-library",
     "party-manage",
+    "python-quality",
     "online",
   ]),
 );
@@ -2269,6 +2272,7 @@ export default function TeacherHomePage() {
           { key: "export-center", label: "导出中心", icon: Download },
           { key: "image-library", label: "图片管理", icon: Image },
           { key: "party-manage", label: "群聊管理", icon: MessageCircleMore },
+          { key: "python-quality", label: "Python 环境质控", icon: Activity },
           { key: "online", label: "在线状态", icon: Eye },
         ],
       },
@@ -9011,6 +9015,16 @@ export default function TeacherHomePage() {
                   </div>
                 </section>
               </div>
+            ) : null}
+
+            {activePanel === "python-quality" ? (
+              <PythonQualityPanel
+                adminToken={adminToken}
+                onError={(rawError) => {
+                  if (handleAuthError(rawError)) return;
+                  setError(readErrorMessage(rawError));
+                }}
+              />
             ) : null}
 
             {activePanel === "online" ? (

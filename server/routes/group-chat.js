@@ -14,23 +14,7 @@ import {
 
 export function registerGroupChatRoutes(app, deps) {
   const {
-    express,
-    cors,
-    multer,
-    dotenv,
-    http,
-    existsSync,
-    mkdtemp,
-    mkdir,
-    readFileAsync,
-    rm,
-    writeFileAsync,
-    path,
-    tmpdir,
     crypto,
-    execFile,
-    promisify,
-    mammoth,
     XLSX,
     PDFParse,
     mongoose,
@@ -38,40 +22,15 @@ export function registerGroupChatRoutes(app, deps) {
     WebSocketServer,
     SYSTEM_PROMPT_LEAK_PROTECTION_TOP_PROMPT,
     PROMPT_LEAK_PROBE_KEYWORDS,
-    buildAliyunChatPayload,
-    buildAliyunDashScopePayload,
-    buildAliyunHeaders,
-    buildAliyunProviderConfig,
-    buildAliyunResponsesPayload,
-    formatAliyunUpstreamError,
-    pipeAliyunDashScopeSse,
-    resolveAliyunModelPolicy,
-    resolveAliyunProtocol,
-    resolveAliyunWebSearchRuntime,
-    shouldUseAliyunDashScopeMultimodalEndpoint,
     ALIYUN_SEARCH_CITATION_FORMATS,
     ALIYUN_SEARCH_FRESHNESS_OPTIONS,
     ALIYUN_SEARCH_STRATEGIES,
     DEFAULT_TEACHER_SCOPE_KEY,
     SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
     YANG_JUNFENG_TEACHER_SCOPE_KEY,
-    buildTeacherScopedStorageUserId,
-    getTeacherScopeLabel,
-    isDefaultTeacherScopeKey,
-    sanitizeTeacherScopeKey,
     FIXED_STUDENT_ACCOUNTS,
     FIXED_STUDENT_ACCOUNT_TAG,
     FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
-    groupChatWsRoomSockets,
-    groupChatWsMetaBySocket,
-    groupChatWsOnlineCountsByRoom,
-    userOnlinePresenceByUserId,
-    chatPreparedAttachmentCache,
-    groupChatExpiredFileCleanupTimer,
-    generatedImageExpiredCleanupTimer,
-    port,
-    mongoUri,
-    authSecret,
     MAX_FILE_SIZE_BYTES,
     MAX_FILES,
     CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS,
@@ -167,9 +126,7 @@ export function registerGroupChatRoutes(app, deps) {
     GROUP_CHAT_WS_AUTH_TIMEOUT_MS,
     GROUP_CHAT_WS_MAX_PAYLOAD_BYTES,
     groupChatOssConfig,
-    groupChatOssClients,
     groupChatOssClient,
-    groupChatOssFallbackClient,
     AGENT_D_FIXED_PROVIDER,
     AGENT_D_FIXED_MODEL,
     AGENT_D_FIXED_MAX_OUTPUT_TOKENS,
@@ -182,8 +139,6 @@ export function registerGroupChatRoutes(app, deps) {
     RESPONSE_MODEL_TOKEN_PROFILES,
     VOLCENGINE_WEB_SEARCH_MODEL_CAPABILITIES,
     VOLCENGINE_WEB_SEARCH_THINKING_PROMPT,
-    scryptAsync,
-    execFileAsync,
     CRC32_TABLE,
     TEXT_EXTENSIONS,
     WORD_EXTENSIONS,
@@ -194,398 +149,55 @@ export function registerGroupChatRoutes(app, deps) {
     OPENROUTER_AUDIO_FORMATS,
     OPENROUTER_AUDIO_EXTENSIONS,
     OPENROUTER_AUDIO_MIME_TO_FORMAT,
-    upload,
-    imageGenerationUpload,
     groupChatImageUpload,
     groupChatFileUpload,
-    authUserSchema,
     AuthUser,
-    chatStateSchema,
     ChatState,
-    uploadedFileContextSchema,
     UploadedFileContext,
-    generatedImageHistorySchema,
     GeneratedImageHistory,
-    groupChatRoomReadStateSchema,
-    groupChatRoomSchema,
     GroupChatRoom,
-    groupChatMessageReactionSchema,
-    groupChatStoredFileSchema,
     GroupChatStoredFile,
-    groupChatMessageSchema,
     GroupChatMessage,
-    runtimeConfigSchema,
-    adminClassroomCourseFileSchema,
-    adminClassroomTaskSchema,
-    adminClassroomCoursePlanSchema,
-    adminConfigSchema,
     AdminConfig,
-    adminClassroomLessonFileSchema,
     AdminClassroomLessonFile,
-    classroomHomeworkFileSchema,
     ClassroomHomeworkFile,
-    getDefaultRuntimeConfigByAgent,
-    createDefaultAgentRuntimeConfigMap,
-    normalizeMessages,
-    normalizeMessageContent,
-    hasUsableMessageContent,
-    hasImageInputInMessages,
-    messageContainsImageInput,
-    isImageUploadFile,
-    cloneNormalizedMessageContent,
-    resolveUploadedFileContextIdentity,
-    buildUploadedFileContextExpireAt,
-    sanitizeUploadedFileContextOssSource,
-    normalizeUploadedFileContextOssFiles,
-    resolveUploadedContextOssFileForInputFile,
-    dedupeUploadedFileContextOssFiles,
-    buildUploadedAttachmentLinksForClient,
-    saveUploadedFileContext,
-    pruneUploadedFileContextsForSession,
-    extractTextPartsForAliyunContext,
-    buildAliyunDashScopeMediaPartsFromOssFiles,
-    buildAliyunDashScopeRehydratedContent,
-    rehydrateUploadedFileContexts,
-    sanitizeVolcengineFileRefsPayload,
-    sanitizePreparedAttachmentRefsPayload,
-    sanitizePreparedAttachmentTokens,
-    pruneExpiredChatPreparedAttachmentCache,
-    trimChatPreparedAttachmentCache,
-    createChatPreparedAttachmentToken,
-    savePreparedAttachmentToCache,
-    resolvePreparedAttachmentRefsFromCache,
-    attachVolcengineFileRefsToLatestUserMessage,
-    attachPreparedAttachmentPartsToLatestUserMessage,
-    attachFilesToLatestUserMessage,
-    stripAliyunDocumentUrlPartsFromMessages,
-    isAliyunDashScopeUnsupportedNativeFileErrorText,
-    resolveLatestUserMessage,
-    buildInitialAttachmentParts,
-    buildDataUrlForBuffer,
-    resolveOpenRouterAudioFormat,
-    resolveOpenRouterVideoMime,
-    buildOpenRouterFileInputPart,
-    resolveAliyunVideoMime,
-    resolveAliyunDashScopeAttachmentUrl,
-    buildAliyunDashScopeDocumentUrlPart,
-    shouldForceAliyunDashScopeLocalParseForFile,
-    renderPdfToAliyunDashScopeImagesWithPython,
-    buildAliyunDashScopePdfImageParts,
-    buildAliyunDashScopeFileInputParts,
-    buildParsedFilePreviewTextPart,
-    attachFilesToLatestUserMessageForOpenRouter,
-    attachFilesToLatestUserMessageForAliyunDashScope,
-    attachFilesToLatestUserMessageByLocalParsing,
-    streamAgentResponse,
-    streamSeedreamImageGeneration,
-    buildSeedreamImageGenerationRequest,
-    normalizeSeedreamGenerationModel,
-    normalizeSeedreamSize,
-    normalizeSeedreamSequentialMode,
-    normalizeSeedreamResponseFormat,
-    parseSeedreamImageInputs,
-    isSeedreamImageInputUrl,
-    buildSeedreamFileImageInputs,
-    normalizeSeedreamImageMimeType,
-    extractSeedreamImageResultEntries,
-    pipeVolcengineImageGenerationSse,
-    emitSeedreamImageGenerationNonStreamEvents,
-    buildGeneratedImageHistoryExpireAt,
-    normalizeGeneratedImageHistoryResponseFormat,
-    normalizeGeneratedImageStoreUrl,
-    normalizeGeneratedImageStorageType,
-    normalizeGeneratedImageMimeType,
     extractGeneratedImageDataBuffer,
-    parseGeneratedImageDataUrl,
-    buildGeneratedImageHistoryContentPath,
-    buildAdminGeneratedImageHistoryContentPath,
-    parseTeacherScopedStorageUserId,
-    resolveGeneratedImageOutputUrl,
-    fetchGeneratedImageBinaryFromUrl,
-    buildGeneratedImageBinaryPayload,
-    saveGeneratedImageHistory,
-    toGeneratedImageHistoryItem,
-    toAdminGeneratedImageHistoryItem,
-    sanitizeImageGenerationUsage,
-    mapVolcengineImageGenerationEventError,
-    buildImageGenerationHeaders,
-    getVolcengineImageGenerationConfig,
-    buildChatRequestPayload,
-    buildOpenRouterPlugins,
-    buildResponsesRequestPayload,
-    resolveProviderWebSearchRuntime,
-    resolveVolcengineWebSearchRuntime,
-    buildWebSearchToolFromRuntimeConfig,
-    resolveVolcengineWebSearchCapability,
-    findVolcengineWebSearchCapabilityByModel,
-    getNormalizedModelCandidates,
-    readModelAllowlistFromEnv,
-    matchModelCandidates,
-    resolveRuntimeTokenProfileByModel,
-    isVolcengineFixedSamplingModel,
-    buildResponsesInputItems,
-    normalizeResponsesMessageContent,
-    keepVolcengineResponsesFileRefsOnly,
-    extractInputImageUrl,
-    extractInputVideoUrl,
-    extractAliyunFileUrl,
-    normalizeOpenRouterFilePart,
-    normalizeOpenRouterAudioPart,
-    mapReasoningEffortToResponses,
-    supportsVolcengineResponsesReasoningEffort,
-    resolveRequestProtocol,
-    extractSmartContextIncrementalMessages,
-    isPromptLeakProbeRequest,
-    extractMessagePlainText,
-    resolveSmartContextRuntime,
-    readSessionContextRef,
-    saveSessionContextRef,
-    clearSessionContextRef,
-    shouldResetSmartContextReference,
-    pickRecentUserRounds,
-    parseFileContent,
-    classifyVolcengineFileInputType,
     normalizeMultipartUploadFile,
-    uploadVolcengineMultipartFilesAsRefs,
-    uploadVolcengineFileAndWaitActive,
-    waitForVolcengineFileActive,
-    retrieveVolcengineFileMeta,
-    sleepMs,
-    getFileExtension,
-    normalizeMultipartFileName,
-    isWordFile,
-    isExcelFile,
-    isPdfFile,
-    isTextLikeFile,
-    isProbablyBinary,
-    decodeTextFile,
-    parseDocx,
-    parseExcel,
-    normalizeRow,
-    parsePdf,
-    clipText,
-    pipeOpenRouterSse,
-    pipeResponsesSse,
-    extractResponsesOutputTextFromCompleted,
-    extractResponsesReasoningTextFromCompleted,
-    extractResponsesTokenUsage,
-    extractResponsesWebSearchUsage,
-    extractNamedToolUsageCount,
-    extractNamedToolUsageDetails,
-    normalizeUsageCount,
-    sumNumericUsage,
-    sanitizeUsageCountNumber,
-    formatWebSearchUsageText,
-    extractResponsesErrorMessage,
-    extractOpenRouterStreamErrorMessage,
-    extractDeltaText,
-    extractSseDataPayload,
-    findSseEventBoundary,
-    writeEvent,
-    safeReadText,
-    safeReadJson,
-    getModelByAgent,
-    getSystemPromptByAgent,
-    getResolvedAgentRuntimeConfig,
-    getDefaultSystemPrompt,
-    readAdminAgentConfig,
-    sanitizeAdminClassroomTaskType,
-    sanitizeAdminClassroomTaskPayload,
-    sanitizeAdminClassroomCourseFilePayload,
-    sanitizeAdminClassroomCourseFilesPayload,
-    normalizeAdminClassroomLessonDateTimeInput,
-    parseAdminClassroomLegacyCourseTimeRange,
-    buildAdminClassroomCourseTimeText,
-    sortAdminClassroomCoursePlans,
-    sanitizeAdminClassroomCoursePlanPayload,
-    sanitizeAdminClassroomCoursePlansPayload,
-    createAdminClassroomLessonFileId,
-    createClassroomHomeworkFileId,
-    normalizeAdminClassroomLessonFileDoc,
-    normalizeClassroomHomeworkFileDoc,
-    compareClassroomRosterStudent,
-    iterateAdminClassroomTaskFiles,
-    collectAdminClassroomFileIdsFromLesson,
-    findAdminClassroomLessonTaskById,
-    findAdminClassroomLessonByFileId,
-    normalizeAdminConfigDoc,
-    sanitizeAgentPromptPayload,
-    resolveAgentSystemPrompts,
-    sanitizeAgentRuntimeConfigsPayload,
-    sanitizeSingleAgentRuntimeConfig,
-    resolveAgentRuntimeConfigs,
-    normalizeRuntimeConfigFromPreset,
-    getRuntimePresetDefaults,
-    sanitizeRuntimeProtocol,
-    sanitizeRuntimeProvider,
-    sanitizeRuntimeModel,
-    sanitizeOpenRouterPreset,
-    sanitizeOpenRouterWebPluginEngine,
-    sanitizeOpenRouterPdfEngine,
-    sanitizeAliyunSearchStrategy,
-    sanitizeAliyunSearchCitationFormat,
-    sanitizeAliyunSearchFreshness,
-    sanitizeAliyunAssignedSiteList,
-    normalizeAliyunAssignedSite,
-    sanitizeAliyunPromptIntervene,
-    sanitizeAliyunFileProcessMode,
-    sanitizeEnableThinking,
-    sanitizeCreativityMode,
-    sanitizeRuntimeNumber,
     sanitizeRuntimeInteger,
     sanitizeRuntimeBoolean,
-    sanitizeReasoningEffort,
-    sanitizeSmartContextMode,
-    buildAdminAgentSettingsResponse,
-    buildAgentProviderDefaults,
-    buildAgentModelDefaults,
-    sanitizeSystemPrompt,
-    getProviderByAgent,
-    resolveReasoningPolicy,
-    modelSupportsReasoning,
-    modelRequiresReasoning,
-    providerSupportsReasoning,
-    normalizeProvider,
-    getProviderConfig,
-    readEnvApiKey,
-    isPlaceholderApiKey,
-    buildProviderHeaders,
-    extractRequestFailureCode,
-    isRetryableRequestFailure,
-    formatProviderRequestFailure,
-    sendProviderRequestWithRetry,
-    formatProviderUpstreamError,
-    parseUpstreamErrorDetail,
-    mapVolcengineUpstreamError,
-    pruneExpiredUserOnlinePresence,
-    markUserOnlinePresence,
-    markUserOnlineBrowserHeartbeat,
-    setUserOnlineSocketPresence,
-    collectOnlinePresenceEntries,
     requireChatAuth,
-    resolveImageHistoryAuthUserId,
-    requireAdminAuth,
-    readJsonLikeField,
-    readRequestMessages,
-    readRequestVolcengineFileRefs,
-    readRequestPreparedAttachmentRefs,
-    defaultChatState,
-    readChatStateShape,
-    readTeacherScopedChatStateRaw,
-    normalizeChatStateDoc,
-    getTeacherScopedChatStatePath,
-    readTeacherScopedSessionContextRefs,
-    sanitizeChatStatePayload,
-    sanitizeChatStateMetaPayload,
-    sanitizeSessionMessageUpsertsPayload,
-    sanitizeSmartContextMapAgentId,
-    buildSmartContextEnabledMapKey,
-    sanitizeSmartContextEnabledBySessionAgent,
-    sanitizeAgentBySession,
-    sanitizeStateSettings,
-    sanitizeGroups,
-    sanitizeSessions,
-    sanitizeSessionMessages,
-    sanitizeMessage,
-    resolveActiveId,
-    sanitizeUserProfile,
-    validateUserProfile,
-    isUserProfileComplete,
     sanitizeId,
-    sanitizePreparedAttachmentToken,
     sanitizeText,
     sanitizeIsoDate,
-    sanitizeAgent,
-    resolveTeacherScopedLockedAgentId,
-    sanitizeReasoning,
-    sanitizeNumber,
     sanitizeGroupChatRoomName,
     sanitizeGroupChatText,
     sanitizeGroupChatCode,
     sanitizeGroupChatAfterDate,
     buildGroupChatDisplayName,
-    createGroupChatRoomCodeCandidate,
     generateUniqueGroupChatRoomCode,
-    sanitizeGroupChatMemberUserIds,
     sanitizeGroupChatMutedMemberUserIds,
-    normalizeGroupChatReadStates,
-    getGroupChatOnlineUserIdsByRoom,
     normalizeGroupChatRoomDoc,
     isGroupChatMemberMuted,
-    normalizeGroupChatFilesApiInputType,
-    normalizeGroupChatFilesApiStatus,
-    normalizeGroupChatFilesApiMeta,
-    normalizeGroupChatFileOssMeta,
-    isGroupChatFilesApiExpired,
-    resolveGroupChatFileExtension,
     classifyGroupChatVolcengineSupportedInputType,
     normalizeGroupChatRoomFileItemFromMessageDoc,
     normalizeGroupChatMessageDoc,
     sanitizeGroupChatImageFileName,
     sanitizeGroupChatFileName,
     buildAttachmentContentDisposition,
-    toAsciiHeaderFileName,
-    encodeRfc5987ValueChars,
     sanitizeGroupChatFileMimeType,
-    normalizeGroupChatUploadedFileName,
-    decodeGroupChatMaybeUriComponent,
-    decodeGroupChatMaybeRfc2047,
-    decodeGroupChatLatin1ToUtf8,
-    looksLikeGroupChatMojibake,
-    scoreGroupChatFileNameCandidate,
     buildGroupChatFileExpireAt,
-    sanitizeAliyunOssNetworkMode,
-    resolveAliyunOssNetworkMode,
-    buildGroupChatOssConfig,
-    createGroupChatOssClient,
-    createGroupChatOssClients,
-    isGroupChatOssConnectionTimeoutError,
-    isGroupChatOssAccessDeniedError,
-    callGroupChatOssWithTimeoutFallback,
     sanitizeAliyunOssBucket,
     sanitizeAliyunOssRegion,
-    sanitizeAliyunOssEndpoint,
-    sanitizeAliyunOssObjectPrefix,
     sanitizeGroupChatFileStorageType,
     sanitizeGroupChatOssObjectKey,
     sanitizeGroupChatHttpUrl,
-    resolveGroupChatOssBucketHost,
-    normalizeGroupChatOssPublicEndpoint,
-    encodeGroupChatOssObjectKeyPath,
-    buildGroupChatOssObjectKey,
-    sanitizeGroupChatOssScopeSegment,
-    resolveFileExtensionByMimeType,
-    buildRuntimeOssObjectKey,
-    formatTeacherLessonOssTimeSegment,
-    buildTeacherLessonOssLessonSegment,
-    sanitizeStudentHomeworkOssFolderSegment,
-    buildStudentHomeworkLessonFolderName,
-    buildStudentHomeworkStudentFolderName,
-    buildStudentHomeworkOssObjectKey,
-    uploadTeacherLessonFileToOss,
-    uploadStudentHomeworkFileToOss,
-    uploadBufferToGroupChatOss,
-    sanitizeChatAttachmentOssSource,
     uploadChatAttachmentsToOss,
-    backupChatAttachmentsToOssInBackground,
     buildGroupChatOssObjectUrl,
     buildGroupChatFileSignedDownloadUrl,
-    buildTeacherLessonFileDownloadUrl,
     buildGroupChatStoredFileStoragePayload,
     deleteGroupChatOssObject,
-    readGroupChatOssStartupCheckConfig,
-    buildGroupChatOssStartupProbeObjectKey,
-    formatGroupChatOssError,
-    runGroupChatOssStartupHealthCheck,
     deleteGroupChatStoredFileObjects,
-    deleteGeneratedImageHistoryOssObjects,
-    isGroupChatOssNotFoundError,
     findGroupChatStoredFileByRoomAndId,
-    cleanupExpiredGroupChatStoredFiles,
-    startGroupChatExpiredFileCleanupTask,
-    cleanupExpiredGeneratedImageHistories,
-    startGeneratedImageExpiredCleanupTask,
-    migrateOssFilesToPermanentRetention,
     sanitizeGroupChatReactionEmoji,
     normalizeGroupChatReactions,
     toGroupChatDateTimestamp,
@@ -594,87 +206,15 @@ export function registerGroupChatRoutes(app, deps) {
     createGroupChatSystemMessage,
     collectMentionNames,
     resolveGroupChatReplyMeta,
-    buildGroupChatReadStateMap,
-    buildGroupChatRoomReadStatesFromMap,
-    updateGroupChatRoomReadState,
     markGroupChatRoomReadByMessageId,
     isMongoObjectIdLike,
-    initGroupChatWebSocketServer,
-    handleGroupChatWsMessage,
-    handleGroupChatWsAuth,
-    handleGroupChatWsJoinRoom,
-    handleGroupChatWsLeaveRoom,
-    readGroupChatWsPayload,
-    sendGroupChatWsPayload,
-    sendGroupChatWsError,
-    closeGroupChatSocket,
-    attachSocketToGroupChatRoom,
-    detachSocketFromGroupChatRoom,
-    detachSocketFromAllGroupChatRooms,
     clearGroupChatRoomSockets,
-    broadcastGroupChatWsPayload,
-    sendGroupChatWsPayloadToUserInRoom,
-    broadcastGroupChatMemberPresenceUpdated,
-    broadcastGroupChatRoomReadStateUpdated,
     broadcastGroupChatMessageCreated,
     broadcastGroupChatMessageReactionsUpdated,
     broadcastGroupChatMessageDeleted,
     broadcastGroupChatRoomUpdated,
-    assertPartyAgentPanelRoomAccess,
     broadcastGroupChatRoomDissolved,
     broadcastGroupChatMemberJoined,
-    startServer,
-    runStartupMaintenanceTasks,
-    ensureUploadedFileContextIndexes,
-    ensureGeneratedImageHistoryIndexes,
-    ensureGroupChatStoredFileIndexes,
-    hasEquivalentMongoIndex,
-    hasSameMongoIndexKey,
-    readCollectionIndexesSafe,
-    isMongoNamespaceMissingError,
-    ensureUploadedFileContextTtlIndex,
-    ensureGeneratedImageHistoryTtlIndex,
-    ensureGroupChatStoredFileTtlIndex,
-    findMongoIndexByKey,
-    normalizeUsername,
-    toUsernameKey,
-    isReservedAdminUsernameKey,
-    isFixedAdminUsernameKey,
-    isFixedAdminUser,
-    isFixedStudentUsernameKey,
-    isFixedStudentUser,
-    readLockedTeacherScopeKey,
-    isJiaoji231ClassName,
-    resolveLoginLockedTeacherScopeKey,
-    validatePassword,
-    hashPassword,
-    verifyPassword,
-    ensureFixedAdminAccounts,
-    ensureFixedStudentAccounts,
-    signToken,
-    verifyToken,
-    readBearerToken,
-    authenticateAdminRequest,
-    authenticateAdminRequestFromHeaderOrQuery,
-    buildAdminUsersExportTxt,
-    buildAdminChatsExportTxt,
-    buildSingleUserChatExportTxt,
-    appendUserChatSection,
-    appendIndentedBlock,
-    formatDisplayTime,
-    formatSystemDateYmd,
-    formatFileStamp,
-    normalizeExportRole,
-    normalizeFeedbackLabel,
-    formatMaybeNumber,
-    buildZipReadme,
-    sanitizeZipFileNamePart,
-    buildZipBuffer,
-    sanitizeZipEntryName,
-    toDosDateTime,
-    crc32Buffer,
-    createCrc32Table,
-    toPublicUser,
   } = deps;
 
   app.get("/api/group-chat/bootstrap", requireChatAuth, async (req, res) => {
@@ -984,6 +524,220 @@ export function registerGroupChatRoutes(app, deps) {
       });
     }
   });
+
+  app.patch("/api/group-chat/rooms/:roomId/announcement", requireChatAuth, async (req, res) => {
+    const userId = sanitizeId(req.authUser?._id, "");
+    const roomId = sanitizeId(req.params?.roomId, "");
+    const announcement = sanitizeText(req.body?.announcement, "", 500);
+    if (!userId || !roomId) {
+      res.status(400).json({ error: "无效参数。" });
+      return;
+    }
+    if (!isMongoObjectIdLike(roomId)) {
+      res.status(400).json({ error: "无效群聊 ID。" });
+      return;
+    }
+
+    try {
+      const room = await GroupChatRoom.findById(roomId).lean();
+      const normalizedRoom = normalizeGroupChatRoomDoc(room, {
+        viewerUserId: userId,
+      });
+      if (!normalizedRoom) {
+        res.status(404).json({ error: "群聊不存在或已失效。" });
+        return;
+      }
+      if (normalizedRoom.ownerUserId !== userId) {
+        res.status(403).json({ error: "仅派主可编辑群公告。" });
+        return;
+      }
+      if (normalizedRoom.announcement === announcement) {
+        res.json({ ok: true, room: normalizedRoom });
+        return;
+      }
+
+      const updated = await GroupChatRoom.findByIdAndUpdate(
+        roomId,
+        {
+          $set: {
+            announcement,
+            updatedAt: new Date(),
+          },
+        },
+        { new: true },
+      ).lean();
+      const updatedRoom = normalizeGroupChatRoomDoc(updated, {
+        viewerUserId: userId,
+      });
+      if (!updatedRoom) {
+        res.status(404).json({ error: "群聊不存在或已失效。" });
+        return;
+      }
+
+      broadcastGroupChatRoomUpdated(roomId, updatedRoom);
+      res.json({ ok: true, room: updatedRoom });
+    } catch (error) {
+      res.status(500).json({
+        error: error?.message || "保存群公告失败，请稍后重试。",
+      });
+    }
+  });
+
+  app.post(
+    "/api/group-chat/rooms/:roomId/announcement/attachments",
+    requireChatAuth,
+    groupChatFileUpload.single("file"),
+    async (req, res) => {
+      const userId = sanitizeId(req.authUser?._id, "");
+      const roomId = sanitizeId(req.params?.roomId, "");
+      const file = req.file;
+      if (!userId || !roomId || !file) {
+        res.status(400).json({ error: "请选择要上传的公告附件。" });
+        return;
+      }
+      if (!isMongoObjectIdLike(roomId)) {
+        res.status(400).json({ error: "无效群聊 ID。" });
+        return;
+      }
+      if (!Buffer.isBuffer(file.buffer) || file.buffer.length === 0) {
+        res.status(400).json({ error: "文件内容为空，无法上传。" });
+        return;
+      }
+
+      let storedFileDoc = null;
+      let uploadedOssKey = "";
+      try {
+        const room = await GroupChatRoom.findById(roomId).lean();
+        const normalizedRoom = normalizeGroupChatRoomDoc(room, { viewerUserId: userId });
+        if (!normalizedRoom) {
+          res.status(404).json({ error: "群聊不存在或已失效。" });
+          return;
+        }
+        if (normalizedRoom.ownerUserId !== userId) {
+          res.status(403).json({ error: "仅派主可上传群公告附件。" });
+          return;
+        }
+        if (normalizedRoom.announcementAttachments.length >= 5) {
+          res.status(400).json({ error: "群公告最多保留 5 个附件。" });
+          return;
+        }
+
+        const fileName = sanitizeGroupChatFileName(req.body?.fileName || file.originalname);
+        const mimeType = sanitizeGroupChatFileMimeType(file.mimetype);
+        const size = sanitizeRuntimeInteger(
+          file.size,
+          file.buffer.length,
+          1,
+          GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES,
+        );
+        const storagePayload = await buildGroupChatStoredFileStoragePayload({
+          roomId,
+          fileName,
+          mimeType,
+          fileBuffer: file.buffer,
+        });
+        uploadedOssKey = sanitizeGroupChatOssObjectKey(storagePayload?.ossKey);
+        storedFileDoc = await GroupChatStoredFile.create({
+          roomId,
+          messageId: "",
+          uploaderUserId: userId,
+          fileName,
+          mimeType,
+          size,
+          storageType: sanitizeGroupChatFileStorageType(storagePayload?.storageType),
+          ossKey: uploadedOssKey,
+          ossBucket: sanitizeAliyunOssBucket(storagePayload?.ossBucket),
+          ossRegion: sanitizeAliyunOssRegion(storagePayload?.ossRegion),
+          fileUrl: sanitizeGroupChatHttpUrl(storagePayload?.fileUrl),
+          data: Buffer.alloc(0),
+          expiresAt: null,
+        });
+        const attachment = {
+          fileId: sanitizeId(storedFileDoc?._id, ""),
+          fileName,
+          mimeType,
+          size,
+        };
+        if (!attachment.fileId) throw new Error("公告附件存储失败");
+
+        const updated = await GroupChatRoom.findByIdAndUpdate(
+          roomId,
+          {
+            $push: { announcementAttachments: attachment },
+            $set: { updatedAt: new Date() },
+          },
+          { new: true },
+        ).lean();
+        const updatedRoom = normalizeGroupChatRoomDoc(updated, { viewerUserId: userId });
+        if (!updatedRoom) throw new Error("群聊不存在或已失效。");
+        broadcastGroupChatRoomUpdated(roomId, updatedRoom);
+        res.json({ ok: true, room: updatedRoom });
+      } catch (error) {
+        if (storedFileDoc?._id) {
+          await GroupChatStoredFile.deleteOne({ _id: storedFileDoc._id }).catch(() => {});
+        }
+        if (uploadedOssKey) {
+          await deleteGroupChatOssObject(uploadedOssKey).catch(() => {});
+        }
+        res.status(500).json({ error: error?.message || "上传公告附件失败，请稍后重试。" });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/group-chat/rooms/:roomId/announcement/attachments/:fileId",
+    requireChatAuth,
+    async (req, res) => {
+      const userId = sanitizeId(req.authUser?._id, "");
+      const roomId = sanitizeId(req.params?.roomId, "");
+      const fileId = sanitizeId(req.params?.fileId, "");
+      if (!userId || !roomId || !fileId || !isMongoObjectIdLike(roomId) || !isMongoObjectIdLike(fileId)) {
+        res.status(400).json({ error: "无效参数。" });
+        return;
+      }
+      try {
+        const room = await GroupChatRoom.findById(roomId).lean();
+        const normalizedRoom = normalizeGroupChatRoomDoc(room, { viewerUserId: userId });
+        if (!normalizedRoom) {
+          res.status(404).json({ error: "群聊不存在或已失效。" });
+          return;
+        }
+        if (normalizedRoom.ownerUserId !== userId) {
+          res.status(403).json({ error: "仅派主可删除群公告附件。" });
+          return;
+        }
+        if (!normalizedRoom.announcementAttachments.some((item) => item.fileId === fileId)) {
+          res.status(404).json({ error: "公告附件不存在或已删除。" });
+          return;
+        }
+        const storedFileDoc = await findGroupChatStoredFileByRoomAndId({
+          roomId,
+          fileId,
+          projection: { _id: 1, ossKey: 1 },
+        });
+        const updated = await GroupChatRoom.findByIdAndUpdate(
+          roomId,
+          {
+            $pull: { announcementAttachments: { fileId } },
+            $set: { updatedAt: new Date() },
+          },
+          { new: true },
+        ).lean();
+        if (storedFileDoc?._id) {
+          await Promise.all([
+            deleteGroupChatStoredFileObjects([storedFileDoc]),
+            GroupChatStoredFile.deleteOne({ _id: storedFileDoc._id }),
+          ]);
+        }
+        const updatedRoom = normalizeGroupChatRoomDoc(updated, { viewerUserId: userId });
+        if (!updatedRoom) throw new Error("群聊不存在或已失效。");
+        broadcastGroupChatRoomUpdated(roomId, updatedRoom);
+        res.json({ ok: true, room: updatedRoom });
+      } catch (error) {
+        res.status(500).json({ error: error?.message || "删除公告附件失败，请稍后重试。" });
+      }
+    },
+  );
 
   app.patch("/api/group-chat/rooms/:roomId/party-agent-access", requireChatAuth, async (req, res) => {
     const userId = sanitizeId(req.authUser?._id, "");

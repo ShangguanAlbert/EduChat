@@ -83,6 +83,8 @@ const app = express();
 const groupChatWsRoomSockets = new Map();
 const groupChatWsMetaBySocket = new Map();
 const groupChatWsOnlineCountsByRoom = new Map();
+const groupChatWsCodingEditorsByRoom = new Map();
+let partyCodingRealtime = null;
 const userOnlinePresenceByUserId = new Map();
 const chatPreparedAttachmentCache = new Map();
 const chatStagedAttachmentCache = new Map();
@@ -1338,10 +1340,25 @@ const groupChatRoomReadStateSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const groupChatAnnouncementAttachmentSchema = new mongoose.Schema(
+  {
+    fileId: { type: String, required: true },
+    fileName: { type: String, default: "group-file.bin" },
+    mimeType: { type: String, default: "application/octet-stream" },
+    size: { type: Number, default: 0 },
+  },
+  { _id: false },
+);
+
 const groupChatRoomSchema = new mongoose.Schema(
   {
     roomCode: { type: String, required: true, unique: true, index: true },
     name: { type: String, required: true, trim: true },
+    announcement: { type: String, default: "" },
+    announcementAttachments: {
+      type: [groupChatAnnouncementAttachmentSchema],
+      default: () => [],
+    },
     ownerUserId: { type: String, required: true, index: true },
     partyAgentMemberEnabled: { type: Boolean, default: true },
     memberUserIds: {
@@ -13991,6 +14008,23 @@ function normalizeGroupChatRoomDoc(doc, options = {}) {
     id,
     roomCode: sanitizeGroupChatCode(doc.roomCode),
     name: sanitizeGroupChatRoomName(doc.name),
+    announcement: sanitizeText(doc.announcement, "", 500),
+    announcementAttachments: (Array.isArray(doc.announcementAttachments)
+      ? doc.announcementAttachments
+      : []
+    )
+      .map((item) => {
+        const fileId = sanitizeId(item?.fileId, "");
+        if (!fileId) return null;
+        return {
+          fileId,
+          fileName: sanitizeGroupChatFileName(item?.fileName),
+          mimeType: sanitizeGroupChatFileMimeType(item?.mimeType),
+          size: sanitizeRuntimeInteger(item?.size, 0, 0, GROUP_CHAT_FILE_MAX_FILE_SIZE_BYTES),
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 5),
     ownerUserId,
     partyAgentMemberEnabled: sanitizeRuntimeBoolean(
       doc.partyAgentMemberEnabled,
@@ -16241,6 +16275,7 @@ function initGroupChatWebSocketServer(server) {
         currentMeta.presenceTracked = false;
       }
       detachSocketFromAllGroupChatRooms(socket);
+      partyCodingRealtime?.handleSocketClosed?.(socket);
       groupChatWsMetaBySocket.delete(socket);
     });
   });
@@ -16272,6 +16307,15 @@ async function handleGroupChatWsMessage(socket, rawData) {
     }
     if (type === "leave_room") {
       handleGroupChatWsLeaveRoom(socket, payload);
+      return;
+    }
+    if (type === "coding_editor_presence") {
+      handleGroupChatWsCodingEditorPresence(socket, payload);
+      return;
+    }
+    if (type.startsWith("coding_collab_")) {
+      const meta = groupChatWsMetaBySocket.get(socket);
+      await partyCodingRealtime?.handleWsMessage?.({ socket, payload, meta });
       return;
     }
     if (type === "ping") {
@@ -16398,12 +16442,24 @@ async function handleGroupChatWsJoinRoom(socket, payload) {
     roomId,
     onlineUserIds: getGroupChatOnlineUserIdsByRoom(roomId),
   });
+  sendGroupChatWsPayload(socket, {
+    type: "coding_editor_presence_updated",
+    roomId,
+    editors: getGroupChatCodingEditorsByRoom(roomId),
+  });
 }
 
 function handleGroupChatWsLeaveRoom(socket, payload) {
   const roomId = sanitizeId(payload?.roomId, "");
   if (!roomId) return;
   detachSocketFromGroupChatRoom(socket, roomId);
+}
+
+function handleGroupChatWsCodingEditorPresence(socket, payload) {
+  const roomId = sanitizeId(payload?.roomId, "");
+  const meta = groupChatWsMetaBySocket.get(socket);
+  if (!roomId || !meta?.authed || !meta.userId || !meta.joinedRooms?.has(roomId)) return;
+  setGroupChatCodingEditorPresence(socket, roomId, payload?.active === true);
 }
 
 function readGroupChatWsPayload(rawData) {
@@ -16502,6 +16558,9 @@ function detachSocketFromGroupChatRoom(socket, roomId) {
   const meta = groupChatWsMetaBySocket.get(socket);
   if (!meta?.joinedRooms?.has(safeRoomId)) return;
 
+  removeSocketFromGroupChatCodingEditorPresence(safeRoomId, socket);
+  partyCodingRealtime?.handleSocketRoomLeft?.(socket, safeRoomId);
+
   const sockets = groupChatWsRoomSockets.get(safeRoomId);
   if (sockets) {
     sockets.delete(socket);
@@ -16533,9 +16592,16 @@ function detachSocketFromGroupChatRoom(socket, roomId) {
   roomOnlineCounter.set(meta.userId, nextCount);
 }
 
+function setPartyCodingRealtime(nextRealtime) {
+  partyCodingRealtime = nextRealtime && typeof nextRealtime === "object" ? nextRealtime : null;
+}
+
 function detachSocketFromAllGroupChatRooms(socket) {
   const meta = groupChatWsMetaBySocket.get(socket);
   if (!meta) {
+    Array.from(groupChatWsCodingEditorsByRoom.keys()).forEach((roomId) => {
+      removeSocketFromGroupChatCodingEditorPresence(roomId, socket);
+    });
     Array.from(groupChatWsRoomSockets.entries()).forEach(
       ([roomId, sockets]) => {
         sockets.delete(socket);
@@ -16566,6 +16632,78 @@ function clearGroupChatRoomSockets(roomId) {
   });
   groupChatWsRoomSockets.delete(safeRoomId);
   groupChatWsOnlineCountsByRoom.delete(safeRoomId);
+  groupChatWsCodingEditorsByRoom.delete(safeRoomId);
+}
+
+function getGroupChatCodingEditorsByRoom(roomId) {
+  const safeRoomId = sanitizeId(roomId, "");
+  if (!safeRoomId) return [];
+  const editors = groupChatWsCodingEditorsByRoom.get(safeRoomId);
+  if (!editors) return [];
+  return Array.from(editors.values()).map((editor) => ({
+    userId: sanitizeId(editor?.userId, ""),
+    name: sanitizeText(editor?.name, "成员", 60),
+  })).filter((editor) => editor.userId);
+}
+
+function broadcastGroupChatCodingEditorPresenceUpdated(roomId) {
+  const safeRoomId = sanitizeId(roomId, "");
+  if (!safeRoomId) return;
+  broadcastGroupChatWsPayload(safeRoomId, {
+    type: "coding_editor_presence_updated",
+    roomId: safeRoomId,
+    editors: getGroupChatCodingEditorsByRoom(safeRoomId),
+  });
+}
+
+function removeSocketFromGroupChatCodingEditorPresence(roomId, socket) {
+  const safeRoomId = sanitizeId(roomId, "");
+  const editors = groupChatWsCodingEditorsByRoom.get(safeRoomId);
+  if (!safeRoomId || !editors) return false;
+  let changed = false;
+  Array.from(editors.entries()).forEach(([userId, editor]) => {
+    if (!editor?.sockets?.delete(socket)) return;
+    changed = true;
+    if (editor.sockets.size === 0) {
+      editors.delete(userId);
+    }
+  });
+  if (editors.size === 0) {
+    groupChatWsCodingEditorsByRoom.delete(safeRoomId);
+  }
+  if (changed) {
+    broadcastGroupChatCodingEditorPresenceUpdated(safeRoomId);
+  }
+  return changed;
+}
+
+function setGroupChatCodingEditorPresence(socket, roomId, active) {
+  const safeRoomId = sanitizeId(roomId, "");
+  const meta = groupChatWsMetaBySocket.get(socket);
+  if (!safeRoomId || !meta?.userId || !meta.joinedRooms?.has(safeRoomId)) return false;
+
+  if (!active) {
+    return removeSocketFromGroupChatCodingEditorPresence(safeRoomId, socket);
+  }
+
+  let editors = groupChatWsCodingEditorsByRoom.get(safeRoomId);
+  if (!editors) {
+    editors = new Map();
+    groupChatWsCodingEditorsByRoom.set(safeRoomId, editors);
+  }
+  let editor = editors.get(meta.userId);
+  if (!editor) {
+    editor = {
+      userId: meta.userId,
+      name: sanitizeText(meta.userName, "成员", 60),
+      sockets: new Set(),
+    };
+    editors.set(meta.userId, editor);
+  }
+  if (editor.sockets.has(socket)) return false;
+  editor.sockets.add(socket);
+  broadcastGroupChatCodingEditorPresenceUpdated(safeRoomId);
+  return true;
 }
 
 function broadcastGroupChatWsPayload(roomId, payload) {
@@ -18554,6 +18692,7 @@ export {
   handleGroupChatWsAuth,
   handleGroupChatWsJoinRoom,
   handleGroupChatWsLeaveRoom,
+  setPartyCodingRealtime,
   readGroupChatWsPayload,
   sendGroupChatWsPayload,
   sendGroupChatWsError,

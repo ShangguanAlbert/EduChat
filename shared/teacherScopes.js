@@ -1,10 +1,12 @@
 export const DEFAULT_TEACHER_SCOPE_KEY = "default";
 export const SHANGGUAN_FUZE_TEACHER_SCOPE_KEY = "shangguan-fuze";
 export const YANG_JUNFENG_TEACHER_SCOPE_KEY = "yang-junfeng";
+export const SHI_GAOJUN_TEACHER_SCOPE_KEY = "shi-gaojun";
 
 export const TEACHER_SCOPE_OPTIONS = Object.freeze([
   { key: SHANGGUAN_FUZE_TEACHER_SCOPE_KEY, label: "上官福泽" },
   { key: YANG_JUNFENG_TEACHER_SCOPE_KEY, label: "杨俊锋" },
+  { key: SHI_GAOJUN_TEACHER_SCOPE_KEY, label: "施高俊" },
   { key: DEFAULT_TEACHER_SCOPE_KEY, label: "默认" },
 ]);
 
@@ -27,6 +29,13 @@ export function isDefaultTeacherScopeKey(value) {
 export function getTeacherScopeLabel(value) {
   const key = sanitizeTeacherScopeKey(value);
   return TEACHER_SCOPE_LABEL_MAP.get(key) || TEACHER_SCOPE_LABEL_MAP.get(DEFAULT_TEACHER_SCOPE_KEY);
+}
+
+export function getTeacherScopeStudentEntryPath(value) {
+  const key = sanitizeTeacherScopeKey(value);
+  if (key === SHANGGUAN_FUZE_TEACHER_SCOPE_KEY) return "/mode-selection";
+  if (key === SHI_GAOJUN_TEACHER_SCOPE_KEY) return "/party";
+  return "/chat";
 }
 
 export function buildTeacherScopedStorageUserId(userId, teacherScopeKey) {

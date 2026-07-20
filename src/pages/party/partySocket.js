@@ -41,11 +41,16 @@ export function createPartySocketClient({
   onMemberJoined,
   onMemberPresenceUpdated,
   onRoomReadStateUpdated,
+  onCodingWorkspaceUpdated,
+  onCodingEditorPresenceUpdated,
+  onCodingCollaborationMessage,
   onError,
   onStatus,
 } = {}) {
   const authToken = String(token || "").trim();
   const desiredRooms = new Set();
+  const desiredCodingCollaborationRooms = new Set();
+  const joinedRooms = new Set();
   let ws = null;
   let authed = false;
   let closedManually = false;
@@ -108,6 +113,13 @@ export function createPartySocketClient({
     }
 
     if (type === "joined") {
+      const roomId = sanitizeRoomId(payload?.roomId);
+      if (roomId) {
+        joinedRooms.add(roomId);
+        if (desiredCodingCollaborationRooms.has(roomId)) {
+          send({ type: "coding_collab_join", roomId });
+        }
+      }
       onJoined?.(payload);
       return;
     }
@@ -157,6 +169,21 @@ export function createPartySocketClient({
       return;
     }
 
+    if (type === "coding_workspace_updated") {
+      onCodingWorkspaceUpdated?.(payload);
+      return;
+    }
+
+    if (type === "coding_editor_presence_updated") {
+      onCodingEditorPresenceUpdated?.(payload);
+      return;
+    }
+
+    if (type.startsWith("coding_collab_")) {
+      onCodingCollaborationMessage?.(payload);
+      return;
+    }
+
     if (type === "error") {
       onError?.(payload);
       return;
@@ -197,6 +224,7 @@ export function createPartySocketClient({
     ws.onclose = () => {
       ws = null;
       authed = false;
+      joinedRooms.clear();
       emitStatus("closed");
       scheduleReconnect();
     };
@@ -227,6 +255,8 @@ export function createPartySocketClient({
     const safeRoomId = sanitizeRoomId(roomId);
     if (!safeRoomId) return;
     desiredRooms.delete(safeRoomId);
+    desiredCodingCollaborationRooms.delete(safeRoomId);
+    joinedRooms.delete(safeRoomId);
     if (authed) {
       send({ type: "leave_room", roomId: safeRoomId });
     }
@@ -240,11 +270,69 @@ export function createPartySocketClient({
     });
   }
 
+  function setCodingEditorPresence(roomId, active) {
+    const safeRoomId = sanitizeRoomId(roomId);
+    if (!safeRoomId || !authed) return false;
+    return send({
+      type: "coding_editor_presence",
+      roomId: safeRoomId,
+      active: Boolean(active),
+    });
+  }
+
+  function joinCodingCollaboration(roomId) {
+    const safeRoomId = sanitizeRoomId(roomId);
+    if (!safeRoomId) return false;
+    const alreadyDesired = desiredCodingCollaborationRooms.has(safeRoomId);
+    desiredCodingCollaborationRooms.add(safeRoomId);
+    if (authed && joinedRooms.has(safeRoomId) && !alreadyDesired) {
+      return send({ type: "coding_collab_join", roomId: safeRoomId });
+    }
+    return true;
+  }
+
+  function leaveCodingCollaboration(roomId) {
+    const safeRoomId = sanitizeRoomId(roomId);
+    if (!safeRoomId) return;
+    desiredCodingCollaborationRooms.delete(safeRoomId);
+  }
+
+  function sendCodingCollaborationUpdate(roomId, update) {
+    const safeRoomId = sanitizeRoomId(roomId);
+    const safeUpdate = String(update || "").trim();
+    if (!safeRoomId || !safeUpdate || !authed) return false;
+    return send({ type: "coding_collab_update", roomId: safeRoomId, update: safeUpdate });
+  }
+
+  function sendCodingCollaborationAwareness(roomId, update, clientIds) {
+    const safeRoomId = sanitizeRoomId(roomId);
+    const safeUpdate = String(update || "").trim();
+    if (!safeRoomId || !safeUpdate || !authed) return false;
+    return send({
+      type: "coding_collab_awareness",
+      roomId: safeRoomId,
+      update: safeUpdate,
+      clientIds: Array.isArray(clientIds) ? clientIds : [],
+    });
+  }
+
+  function clearCodingCollaborationOutput(roomId) {
+    const safeRoomId = sanitizeRoomId(roomId);
+    if (!safeRoomId || !authed) return false;
+    return send({ type: "coding_collab_output_clear", roomId: safeRoomId });
+  }
+
   return {
     connect,
     close,
     joinRoom,
     leaveRoom,
     ping,
+    setCodingEditorPresence,
+    joinCodingCollaboration,
+    leaveCodingCollaboration,
+    sendCodingCollaborationUpdate,
+    sendCodingCollaborationAwareness,
+    clearCodingCollaborationOutput,
   };
 }
