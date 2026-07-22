@@ -358,7 +358,7 @@ export default function ChatDocumentPreview({
         objectUrlRef.current = "";
       }
     };
-  }, [activeDocumentLoadKey]);
+  }, [activeDocument, activeDocumentLoadKey]);
 
   const renderedPageWidth = Math.max(320, Math.floor(Math.max(320, viewportWidth - 40)));
   const isPdfReady = documentMode === "pdf" && !!documentUrl && !loading && !loadError;

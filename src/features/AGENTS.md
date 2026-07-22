@@ -32,3 +32,4 @@
   - 当前 feature 的 `api/`
   - 对应页面
   - `shared/contracts/`
+- 群聊、Python 协作和其教师质控页面如仍由历史 `src/pages/` 承载，feature 仅负责路由入口；不要为了目录形式把稳定的实时逻辑大规模搬迁

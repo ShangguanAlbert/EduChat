@@ -1,5 +1,3 @@
-const DEFAULT_MINIMAX_CHAT_ENDPOINT =
-  "https://api.minimaxi.com/v1/chat/completions";
 const DEFAULT_MINIMAX_MUSIC_ENDPOINT =
   "https://api.minimaxi.com/v1/music_generation";
 const DEFAULT_MINIMAX_LYRICS_ENDPOINT =
@@ -19,18 +17,6 @@ function sanitizeHttpEndpoint(value, fallback = "") {
   }
 }
 
-function sanitizeNumber(value, fallback, min, max) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  return Math.min(max, Math.max(min, numeric));
-}
-
-function sanitizeInteger(value, fallback, min, max) {
-  const numeric = Number.parseInt(value, 10);
-  if (!Number.isFinite(numeric)) return fallback;
-  return Math.min(max, Math.max(min, numeric));
-}
-
 function readApiKey(...candidates) {
   for (const item of candidates) {
     const key = String(item || "").trim();
@@ -42,10 +28,6 @@ function readApiKey(...candidates) {
 export function buildMiniMaxProviderConfig({ env = {}, apiKey = "" } = {}) {
   const sourceEnv = env && typeof env === "object" ? env : {};
   return {
-    chatEndpoint: sanitizeHttpEndpoint(
-      sourceEnv.MINIMAX_CHAT_ENDPOINT,
-      DEFAULT_MINIMAX_CHAT_ENDPOINT,
-    ),
     musicEndpoint: sanitizeHttpEndpoint(
       sourceEnv.MINIMAX_MUSIC_ENDPOINT,
       DEFAULT_MINIMAX_MUSIC_ENDPOINT,
@@ -58,56 +40,6 @@ export function buildMiniMaxProviderConfig({ env = {}, apiKey = "" } = {}) {
     missingKeyMessage:
       "未检测到 MiniMax API Key。请在 .env 中配置 MINIMAX_API_KEY。",
   };
-}
-
-export function buildMiniMaxChatPayload({
-  model,
-  messages,
-  systemPrompt = "",
-  config = {},
-  reasoningEnabled = false,
-} = {}) {
-  const safeMessages = Array.isArray(messages) ? messages : [];
-  const mergedSystemParts = [];
-  const finalMessages = [];
-
-  const safeSystemPrompt = String(systemPrompt || "").trim();
-  if (safeSystemPrompt) {
-    mergedSystemParts.push(safeSystemPrompt);
-  }
-
-  safeMessages.forEach((message) => {
-    if (String(message?.role || "").trim() === "system") {
-      const content = String(message?.content || "").trim();
-      if (content) mergedSystemParts.push(content);
-      return;
-    }
-    finalMessages.push(message);
-  });
-
-  if (mergedSystemParts.length > 0) {
-    finalMessages.unshift({
-      role: "system",
-      content: mergedSystemParts.join("\n\n"),
-    });
-  }
-
-  const payload = {
-    model,
-    stream: true,
-    messages: finalMessages,
-    max_tokens: sanitizeInteger(config?.maxOutputTokens, 4096, 64, 262144),
-    temperature: sanitizeNumber(config?.temperature, 1, 0, 1),
-    top_p: sanitizeNumber(config?.topP, 1, 0, 1),
-  };
-
-  if (reasoningEnabled) {
-    payload.extra_body = {
-      reasoning_split: true,
-    };
-  }
-
-  return payload;
 }
 
 export function formatMiniMaxUpstreamError({

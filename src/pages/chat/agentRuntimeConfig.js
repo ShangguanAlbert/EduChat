@@ -6,9 +6,9 @@ const AGENT_A_FIXED_PROVIDER = "packycode";
 const AGENT_A_FIXED_MODEL = "gpt-5.4";
 const AGENT_A_FIXED_PROTOCOL = "chat";
 const AGENT_A_FIXED_THINKING_EFFORT = "medium";
-const AGENT_B_FIXED_PROVIDER = "minimax";
-const AGENT_B_FIXED_MODEL = "MiniMax-M2.7";
-const AGENT_B_FIXED_PROTOCOL = "chat";
+const AGENT_B_FIXED_PROVIDER = "reserved";
+const AGENT_B_FIXED_MODEL = "reserved";
+const AGENT_B_FIXED_PROTOCOL = "reserved";
 const AGENT_D_FIXED_PROVIDER = "aliyun";
 const AGENT_D_FIXED_MODEL = "qwen3.5-plus";
 const AGENT_D_FIXED_MAX_OUTPUT_TOKENS = 65536;
@@ -387,13 +387,6 @@ export const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   aliyunResponsesEnableWebExtractor: false,
   aliyunResponsesEnableCodeInterpreter: false,
   aliyunFileProcessMode: "local_parse",
-  openrouterPreset: "",
-  openrouterIncludeReasoning: false,
-  openrouterUseWebPlugin: false,
-  openrouterWebPluginEngine: "auto",
-  openrouterWebPluginMaxResults: 5,
-  openrouterUseResponseHealing: false,
-  openrouterPdfEngine: "auto",
 });
 export const PACKYCODE_PROVIDER = "packycode";
 export const PACKYCODE_DEFAULT_MODEL = "gpt-5.4";
@@ -431,10 +424,10 @@ const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
     provider: AGENT_B_FIXED_PROVIDER,
     model: AGENT_B_FIXED_MODEL,
     protocol: AGENT_B_FIXED_PROTOCOL,
-    contextWindowTokens: 204800,
-    maxInputTokens: 204800,
-    maxOutputTokens: 128000,
-    maxReasoningTokens: 128000,
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 4096,
+    maxReasoningTokens: 0,
   }),
   C: Object.freeze({
     provider: AGENT_C_FIXED_PROVIDER,
@@ -855,29 +848,6 @@ export function sanitizeSingleRuntimeConfig(raw, agentId = "A") {
     aliyunFileProcessMode: sanitizeAliyunFileProcessMode(
       source.aliyunFileProcessMode,
     ),
-    openrouterPreset: sanitizeOpenRouterPreset(source.openrouterPreset),
-    openrouterIncludeReasoning: sanitizeBoolean(
-      source.openrouterIncludeReasoning,
-      defaults.openrouterIncludeReasoning,
-    ),
-    openrouterUseWebPlugin: sanitizeBoolean(
-      source.openrouterUseWebPlugin,
-      defaults.openrouterUseWebPlugin,
-    ),
-    openrouterWebPluginEngine: sanitizeOpenRouterWebPluginEngine(
-      source.openrouterWebPluginEngine,
-    ),
-    openrouterWebPluginMaxResults: sanitizeInteger(
-      source.openrouterWebPluginMaxResults,
-      defaults.openrouterWebPluginMaxResults,
-      1,
-      10,
-    ),
-    openrouterUseResponseHealing: sanitizeBoolean(
-      source.openrouterUseResponseHealing,
-      defaults.openrouterUseResponseHealing,
-    ),
-    openrouterPdfEngine: sanitizeOpenRouterPdfEngine(source.openrouterPdfEngine),
   };
 
   if (isVolcengineFixedSamplingModel(modelForMatching)) {
@@ -1025,7 +995,7 @@ function sanitizeProtocol(value) {
     .toLowerCase();
   if (key === "responses" || key === "response") return "responses";
   if (key === "dashscope" || key === "native") return "dashscope";
-  if (key === "minimax" || key === "minimax-native") return "chat";
+  if (key === "reserved") return "reserved";
   return "chat";
 }
 
@@ -1035,11 +1005,10 @@ function sanitizeProvider(value) {
     .toLowerCase();
   if (!key) return DEFAULT_AGENT_RUNTIME_CONFIG.provider;
   if (key === "inherit" || key === "default" || key === "auto") return "inherit";
-  if (key === "openrouter") return "openrouter";
   if (key === "packycode" || key === "packy" || key === "packyapi") {
     return PACKYCODE_PROVIDER;
   }
-  if (key === "minimax" || key === "minimaxi") return "minimax";
+  if (key === "reserved") return "reserved";
   if (key === "aliyun" || key === "alibaba" || key === "dashscope") return "aliyun";
   if (key === "volcengine" || key === "volc" || key === "ark") return "volcengine";
   return DEFAULT_AGENT_RUNTIME_CONFIG.provider;
@@ -1049,29 +1018,6 @@ function sanitizeModel(value) {
   return String(value || "")
     .trim()
     .slice(0, 180);
-}
-
-function sanitizeOpenRouterPreset(value) {
-  return String(value || "")
-    .trim()
-    .slice(0, 120);
-}
-
-function sanitizeOpenRouterWebPluginEngine(value) {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "native") return "native";
-  if (key === "exa") return "exa";
-  return "auto";
-}
-
-function sanitizeOpenRouterPdfEngine(value) {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "pdf-text" || key === "mistral-ocr" || key === "native") return key;
-  return "auto";
 }
 
 function sanitizeAliyunSearchStrategy(value) {

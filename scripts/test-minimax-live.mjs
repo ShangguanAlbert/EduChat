@@ -1,9 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-
 import { config as loadEnv } from "dotenv";
-
-import { readSseStream } from "../src/pages/chat/chatHelpers.js";
 
 loadEnv();
 
@@ -89,84 +85,6 @@ async function registerAndLogin() {
   };
 }
 
-async function testChatStream(token) {
-  const formData = new FormData();
-  formData.append("agentId", "B");
-  formData.append("temperature", "0.1");
-  formData.append("topP", "0.9");
-  formData.append("sessionId", `live-minimax-session-${randomUUID()}`);
-  formData.append("smartContextEnabled", "false");
-  formData.append("contextMode", "append");
-  formData.append(
-    "messages",
-    JSON.stringify([
-      {
-        role: "system",
-        content: "You are a concise assistant. Reply with the marker MINIMAX_ROUTE_OK if possible.",
-      },
-      {
-        role: "user",
-        content: "请用一句中文回答，并尽量包含 MINIMAX_ROUTE_OK。",
-      },
-    ]),
-  );
-
-  const resp = await fetch(`${serverBaseUrl}/api/chat/stream`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-    body: formData,
-    signal: AbortSignal.timeout(180000),
-  });
-
-  if (!resp.ok || !resp.body) {
-    const text = await safeReadText(resp);
-    throw new Error(`聊天流式接口失败 (${resp.status}): ${text || resp.statusText}`);
-  }
-
-  const summary = {
-    content: "",
-    reasoning: "",
-    meta: null,
-    usage: null,
-    errors: [],
-  };
-
-  await readSseStream(resp, {
-    onToken(text) {
-      summary.content += String(text || "");
-    },
-    onReasoningToken(text) {
-      summary.reasoning += String(text || "");
-    },
-    onMeta(meta) {
-      summary.meta = meta;
-    },
-    onUsage(usage) {
-      summary.usage = usage;
-    },
-    onError(message) {
-      summary.errors.push(String(message || "unknown error"));
-    },
-  });
-
-  if (summary.errors.length > 0) {
-    throw new Error(`聊天流式接口返回错误事件: ${summary.errors.join(" | ")}`);
-  }
-
-  assert.ok(summary.content.trim(), "聊天流式接口未返回正文 token。");
-
-  return {
-    contentLength: summary.content.length,
-    preview: summary.content.slice(0, 120),
-    reasoningLength: summary.reasoning.length,
-    provider: String(summary.meta?.provider || ""),
-    model: String(summary.meta?.model || ""),
-    usage: summary.usage || null,
-  };
-}
-
 async function testMusicRoutes(token) {
   const before = await requestJson("/api/music/history", { token });
   const beforeCount = Array.isArray(before?.items) ? before.items.length : 0;
@@ -242,7 +160,6 @@ async function testMusicRoutes(token) {
 
 async function main() {
   assert.ok(process.env.MINIMAX_API_KEY, "缺少 MINIMAX_API_KEY，无法执行真实链路测试。");
-  assert.ok(process.env.MINIMAX_CHAT_ENDPOINT, "缺少 MINIMAX_CHAT_ENDPOINT，无法执行真实链路测试。");
   assert.ok(process.env.MINIMAX_MUSIC_ENDPOINT, "缺少 MINIMAX_MUSIC_ENDPOINT，无法执行真实链路测试。");
 
   console.log(`🔗 Server base: ${serverBaseUrl}`);
@@ -250,23 +167,6 @@ async function main() {
 
   const { account, token } = await registerAndLogin();
   console.log(`✅ 注册并登录测试账号成功: ${account.username}`);
-
-  const chat = await testChatStream(token);
-  console.log("✅ /api/chat/stream 成功");
-  console.log(
-    JSON.stringify(
-      {
-        provider: chat.provider,
-        model: chat.model,
-        contentLength: chat.contentLength,
-        reasoningLength: chat.reasoningLength,
-        preview: chat.preview,
-        usage: chat.usage,
-      },
-      null,
-      2,
-    ),
-  );
 
   const music = await testMusicRoutes(token);
   console.log("✅ /api/music/* 成功");

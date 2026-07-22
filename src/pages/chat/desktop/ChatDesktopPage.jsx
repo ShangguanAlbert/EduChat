@@ -154,7 +154,7 @@ const REMOVED_AGENT_E_NOTICE =
   "该会话原绑定的 SSCI审稿人已下线，当前会话不可继续对话。";
 const DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   A: "volcengine",
-  B: "volcengine",
+  B: "reserved",
   C: "volcengine",
   D: "aliyun",
 });
@@ -451,16 +451,16 @@ function clipSessionTitleText(value, maxLength = 22) {
     : text;
 }
 
-function sanitizeProvider(value, fallback = "openrouter") {
+function sanitizeProvider(value, fallback = "packycode") {
   const key = String(value || "")
     .trim()
     .toLowerCase();
   if (
-    key === "openrouter" ||
     key === "packycode" ||
     key === "packy" ||
     key === "volcengine" ||
-    key === "aliyun"
+    key === "aliyun" ||
+    key === "reserved"
   ) {
     return key === "packy" ? "packycode" : key;
   }
@@ -497,7 +497,7 @@ function resolveAgentProvider(agentId, runtimeConfig, providerDefaults) {
     .trim()
     .toLowerCase();
   if (runtimeProvider && runtimeProvider !== "inherit") {
-    return sanitizeProvider(runtimeProvider, "openrouter");
+    return sanitizeProvider(runtimeProvider, "packycode");
   }
   return sanitizeProvider(
     providerDefaults?.[safeAgentId],

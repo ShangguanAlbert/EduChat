@@ -42,7 +42,6 @@ function runTask(task) {
 const results = [];
 for (const task of TASKS) {
   // 顺序执行，方便看哪一步失败，也避免并发占用同一测试资源。
-  // eslint-disable-next-line no-await-in-loop
   const result = await runTask(task);
   results.push(result);
   if (!result.ok) break;

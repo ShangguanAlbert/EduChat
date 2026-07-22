@@ -116,6 +116,7 @@ runCase("同一消息 id 出现残缺版本时，保留更完整正文并合并�
           createMessage("m1", "user", "帮我总结"),
           createMessage("m2", "assistant", "这是完整回答，正文更长", {
             attachments: [{ name: "proof.png" }],
+            reasoning: "这是完整推理过程，保留更多上下文。",
           }),
         ],
       },
@@ -127,7 +128,9 @@ runCase("同一消息 id 出现残缺版本时，保留更完整正文并合并�
       sessionMessages: {
         s1: [
           createMessage("m1", "user", "帮我总结"),
-          createMessage("m2", "assistant", "短回答"),
+          createMessage("m2", "assistant", "短回答", {
+            reasoning: "短推理",
+          }),
           createMessage("m3", "user", "再细一点"),
         ],
       },
@@ -136,6 +139,10 @@ runCase("同一消息 id 出现残缺版本时，保留更完整正文并合并�
   });
 
   assert.equal(result.sessionMessages.s1[1].content, "这是完整回答，正文更长");
+  assert.equal(
+    result.sessionMessages.s1[1].reasoning,
+    "这是完整推理过程，保留更多上下文。",
+  );
   assert.deepEqual(
     result.sessionMessages.s1.map((item) => item.id),
     ["m1", "m2", "m3"],

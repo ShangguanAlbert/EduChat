@@ -6,6 +6,7 @@
 
 - 本目录承载 Express 服务端实现、领域模块、运行时能力、模型提供商适配与启动装配
 - 服务统一入口为 `server/index.js`
+- 当前还装配 Python 协作编程模块、群聊 AI Redis worker、音乐模块和 DashScope 群聊 AI 配置
 
 ## 架构优先级
 
@@ -40,6 +41,8 @@
   - 不泄漏敏感信息
 - 不要把密钥、token、bucket 信息写死到代码中
 - 启动期逻辑应尽量可失败可报告，不要静默吞错
+- 群聊 AI 默认是阿里云 DashScope / Qwen，教师后台配置保存在 MongoDB；不要恢复 OpenRouter 或 MiniMax 对话链路
+- Python 执行必须交给 `python-runner/`，由 Redis 协调全局容量；服务端不得直接在 Express 进程中执行学生代码
 
 ## 修改建议
 
@@ -48,4 +51,5 @@
   - `server/platform/llm/`
   - `shared/` 中是否有共用契约
 - 改 notes、group chat、auth 等能力时，优先沿着对应子目录继续拆分，不做横向耦合扩散
+- 涉及派协作时同步检查 `server/modules/party-coding/`、群聊 WebSocket 事件、运行审计和教师质控接口
 - 未经明确要求，不要新增全局单例、隐式状态或跨模块循环依赖

@@ -2,9 +2,9 @@ const GROUP_CHAT_AI_MENTION_PATTERN = /(^|[\s(（[{"'“‘])@ai(?=$|[\s,，。�
 
 export const GROUP_CHAT_AI_RUNTIME = Object.freeze({
   agentId: "A",
-  provider: "packycode",
-  model: "gpt-5.4",
-  protocol: "chat",
+  provider: "aliyun",
+  model: "qwen3.7-plus",
+  protocol: "dashscope",
 });
 
 export const GROUP_CHAT_AI_LIMITS = Object.freeze({
@@ -15,6 +15,10 @@ export const GROUP_CHAT_AI_LIMITS = Object.freeze({
   duplicateWindowMs: 10_000,
   taskTimeoutMs: 75_000,
 });
+
+const GROUP_CHAT_AI_TASK_TEXT_MAX_CHARS = 500;
+const GROUP_CHAT_AI_TASK_ATTACHMENT_MAX_CHARS = 8_000;
+const GROUP_CHAT_AI_TASK_ATTACHMENTS_MAX_CHARS = 20_000;
 
 export function isGroupChatAiMentionRequested(content) {
   return GROUP_CHAT_AI_MENTION_PATTERN.test(String(content || ""));
@@ -104,6 +108,7 @@ export function buildGroupChatAiContextSnapshot({
   const requestedByUserId = sanitizeText(safeTrigger.senderUserId);
   const requestedByUserName = sanitizeText(safeTrigger.senderName, "用户");
   const userQuestion = stripGroupChatAiMentions(safeTrigger.content);
+  const taskContext = normalizeTaskContext(safeRoom);
 
   const attachmentMessages = [];
   const seenAttachmentIds = new Set();
@@ -140,15 +145,51 @@ export function buildGroupChatAiContextSnapshot({
     .filter(Boolean);
 
   return {
-    roomId: sanitizeText(safeRoom.id),
+    roomId: sanitizeText(safeRoom.id || safeRoom._id),
     roomName: sanitizeText(safeRoom.name, "群聊"),
     triggerMessageId,
     replyTargetMessageId,
     requestedByUserId,
     requestedByUserName,
     userQuestion,
+    taskContext,
     attachmentMessages,
     transcriptText: transcriptLines.join("\n"),
+  };
+}
+
+function normalizeTaskContext(room) {
+  const taskText = sanitizeText(room?.announcement, "").slice(
+    0,
+    GROUP_CHAT_AI_TASK_TEXT_MAX_CHARS,
+  );
+  let totalAttachmentChars = 0;
+  const attachments = (Array.isArray(room?.announcementAttachments)
+    ? room.announcementAttachments
+    : []
+  )
+    .map((item) => {
+      const remaining = GROUP_CHAT_AI_TASK_ATTACHMENTS_MAX_CHARS - totalAttachmentChars;
+      if (remaining <= 0) return null;
+      const text = sanitizeText(item?.aiContextText, "").slice(
+        0,
+        Math.min(GROUP_CHAT_AI_TASK_ATTACHMENT_MAX_CHARS, remaining),
+      );
+      totalAttachmentChars += text.length;
+      return {
+        fileId: sanitizeText(item?.fileId),
+        fileName: sanitizeText(item?.fileName, "任务附件"),
+        mimeType: sanitizeText(item?.mimeType),
+        text,
+        hint: sanitizeText(item?.aiContextHint, "").slice(0, 240),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 5);
+
+  return {
+    text: taskText,
+    attachments,
   };
 }
 
@@ -162,7 +203,7 @@ export function buildGroupChatAiPendingReplyDraft({
     type: "text",
     senderKind: "ai",
     senderUserId: "",
-    senderName: "AI · GPT-5.4",
+    senderName: "AI · 群聊助手",
     content: "AI 排队中，请稍候…",
     replyToMessageId: sanitizeText(triggerMessageId),
     replyPreviewText: "",
@@ -192,7 +233,7 @@ export function buildGroupChatAiFailedReplyDraft({
     type: "text",
     senderKind: "ai",
     senderUserId: "",
-    senderName: "AI · GPT-5.4",
+    senderName: "AI · 群聊助手",
     content: safeErrorMessage,
     replyToMessageId: sanitizeText(triggerMessageId),
     replyPreviewText: "",

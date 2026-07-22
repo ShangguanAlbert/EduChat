@@ -13,12 +13,12 @@ import {
   stripGroupChatAiMentions,
 } from "../../server/services/group-chat-ai.js";
 
-test("GROUP_CHAT_AI_RUNTIME stays pinned to Agent A GPT-5.4", () => {
+test("GROUP_CHAT_AI_RUNTIME defaults to the Aliyun group-chat route", () => {
   assert.deepEqual(GROUP_CHAT_AI_RUNTIME, {
     agentId: "A",
-    provider: "packycode",
-    model: "gpt-5.4",
-    protocol: "chat",
+    provider: "aliyun",
+    model: "qwen3.7-plus",
+    protocol: "dashscope",
   });
 });
 
@@ -216,6 +216,36 @@ test("buildGroupChatAiContextSnapshot prioritizes the replied attachment and rec
   assert.match(snapshot.transcriptText, /王五：我觉得第三列和成绩更相关。/);
 });
 
+test("buildGroupChatAiContextSnapshot includes the task and parsed task attachments", () => {
+  const snapshot = buildGroupChatAiContextSnapshot({
+    room: {
+      _id: "room-2",
+      name: "Python 协作派",
+      announcement: "完成成绩列表的平均值计算，并解释异常输入。",
+      announcementAttachments: [
+        {
+          fileName: "任务说明.pdf",
+          mimeType: "application/pdf",
+          aiContextText: "学生需要先判断输入是否为空，再计算平均值。",
+          aiContextHint: "PDF 文本解析结果。",
+        },
+      ],
+    },
+    triggerMessage: {
+      id: "msg-task",
+      senderUserId: "student-1",
+      senderName: "小林",
+      content: "@AI 我们下一步该检查什么？",
+    },
+    recentMessages: [],
+  });
+
+  assert.equal(snapshot.roomId, "room-2");
+  assert.equal(snapshot.taskContext.text, "完成成绩列表的平均值计算，并解释异常输入。");
+  assert.equal(snapshot.taskContext.attachments[0].fileName, "任务说明.pdf");
+  assert.match(snapshot.taskContext.attachments[0].text, /判断输入是否为空/);
+});
+
 test("buildGroupChatAiPendingReplyDraft creates an AI placeholder reply", () => {
   const pendingReply = buildGroupChatAiPendingReplyDraft({
     roomId: "room-1",
@@ -229,7 +259,7 @@ test("buildGroupChatAiPendingReplyDraft creates an AI placeholder reply", () => 
   assert.equal(pendingReply.replyToMessageId, "msg-9");
   assert.equal(pendingReply.aiMeta.requestedByUserId, "user-7");
   assert.equal(pendingReply.aiMeta.status, "pending");
-  assert.equal(pendingReply.aiMeta.model, "gpt-5.4");
+  assert.equal(pendingReply.aiMeta.model, "qwen3.7-plus");
   assert.equal(pendingReply.aiMeta.streaming, false);
   assert.match(pendingReply.content, /排队中/);
 });

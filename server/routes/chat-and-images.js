@@ -78,10 +78,7 @@ export function registerChatAndImageRoutes(app, deps) {
     GENERATED_IMAGE_HISTORY_TTL_MS,
     GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES,
     GENERATED_IMAGE_HISTORY_FETCH_TIMEOUT_MS,
-    GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER,
-    GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER,
     GROUP_CHAT_MAX_MEMBERS_PER_ROOM,
-    GROUP_CHAT_MAX_ROOMS_PER_BOOTSTRAP,
     GROUP_CHAT_DEFAULT_MESSAGES_LIMIT,
     GROUP_CHAT_MAX_MESSAGES_LIMIT,
     GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES,
@@ -146,10 +143,6 @@ export function registerChatAndImageRoutes(app, deps) {
     EXCEL_EXTENSIONS,
     PDF_EXTENSIONS,
     VIDEO_EXTENSIONS,
-    OPENROUTER_VIDEO_EXTENSIONS,
-    OPENROUTER_AUDIO_FORMATS,
-    OPENROUTER_AUDIO_EXTENSIONS,
-    OPENROUTER_AUDIO_MIME_TO_FORMAT,
     upload,
     imageGenerationUpload,
     AuthUser,
@@ -633,7 +626,8 @@ export function registerChatAndImageRoutes(app, deps) {
 
   function normalizeGeneratedSessionTitle(title, fallback = "新对话") {
     const cleaned = sanitizeText(title, "", 80)
-      .replace(/^["'“”‘’【\[]+|["'“”‘’】\]]+$/g, "")
+      .replace(/^["'“”‘’【]+|["'“”‘’】]+$/g, "")
+      .replace(/^\[+|\]+$/g, "")
       .replace(/\s+/g, " ")
       .trim();
     if (!cleaned) return fallback;
@@ -1020,7 +1014,6 @@ export function registerChatAndImageRoutes(app, deps) {
       const mime = sanitizeGroupChatFileMimeType(file?.mimetype);
       const safeFileName = sanitizeGroupChatFileName(file?.originalname || "document.pdf");
       const previewFileName = safeFileName.replace(/\.[a-z0-9]+$/i, "") || "document";
-      const lowerExt = String(ext || "").toLowerCase();
       const isHtmlPreview = isHtmlDocumentPreview(ext, mime);
       const isMarkdownPreview = isMarkdownDocumentPreview(ext, mime);
       const isPlainTextPreview = isPlainTextDocumentPreview(ext, mime, file.buffer);

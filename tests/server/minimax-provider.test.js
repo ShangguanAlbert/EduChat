@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildMiniMaxChatPayload,
   buildMiniMaxProviderConfig,
   formatMiniMaxUpstreamError,
 } from "../../server/providers/minimax/index.js";
@@ -41,10 +40,7 @@ test("buildMiniMaxProviderConfig reads defaults and api key", () => {
   });
 
   assert.equal(config.apiKey, "mm-key");
-  assert.equal(
-    config.chatEndpoint,
-    "https://api.minimaxi.com/v1/chat/completions",
-  );
+  assert.equal(config.chatEndpoint, undefined);
   assert.equal(
     config.musicEndpoint,
     "https://api.minimaxi.com/v1/music_generation",
@@ -53,39 +49,6 @@ test("buildMiniMaxProviderConfig reads defaults and api key", () => {
     config.lyricsEndpoint,
     "https://api.minimaxi.com/v1/lyrics_generation",
   );
-});
-
-test("buildMiniMaxChatPayload merges system prompts into a single MiniMax system message", () => {
-  const payload = buildMiniMaxChatPayload({
-    model: "MiniMax-M2.7",
-    messages: [
-      { role: "system", content: "额外规则" },
-      { role: "user", content: "hello" },
-    ],
-    systemPrompt: "你是助手",
-    config: {
-      maxOutputTokens: 8192,
-      temperature: 0.7,
-      topP: 0.8,
-    },
-    reasoningEnabled: true,
-  });
-
-  assert.deepEqual(payload.messages[0], {
-    role: "system",
-    content: "你是助手\n\n额外规则",
-  });
-  assert.equal(
-    payload.messages.filter((message) => message.role === "system").length,
-    1,
-  );
-  assert.equal(payload.messages[1].content, "hello");
-  assert.equal(payload.max_tokens, 8192);
-  assert.equal(payload.temperature, 0.7);
-  assert.equal(payload.top_p, 0.8);
-  assert.deepEqual(payload.extra_body, {
-    reasoning_split: true,
-  });
 });
 
 test("formatMiniMaxUpstreamError maps common upstream codes to stable Chinese messages", () => {

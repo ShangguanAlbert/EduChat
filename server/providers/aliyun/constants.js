@@ -38,6 +38,7 @@ export const ALIYUN_SEARCH_FRESHNESS_OPTIONS = Object.freeze([
  * - 都未命中 -> 交由调用侧回退逻辑处理
  */
 export const ALIYUN_DASHSCOPE_MULTIMODAL_MODEL_PREFIXES = Object.freeze([
+  "qwen3.7-plus",
   "qwen3.5-plus",
   "kimi-k2.5",
   "kimi-2.5",

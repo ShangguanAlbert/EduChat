@@ -1,16 +1,23 @@
-# EduChat 仓库协作说明
+# Metrix（EduChat）仓库协作说明
 
 本文件适用于整个仓库。
 
 ## 项目概览
 
-- 项目名称：`EduChat`
+- 项目名称：`Metrix`（代码与部分部署命名仍兼容 `EduChat`）
 - 主要技术栈：`React 19` + `Vite` + `Express 5` + `MongoDB`
 - 语言与模块系统：当前代码以 `JavaScript / JSX` 为主，统一使用 `ESM`
 - 运行方式：
   - 前端开发服务器：`Vite`
   - 后端服务入口：`server/index.js`
-  - 联调入口：`npm run dev`
+- 联调入口：`npm run dev`
+
+## 当前平台能力
+
+- `npm run dev` 会依次启动 Python Runner、Express（`8787`）、群聊 AI worker 与 Vite（`5173`）；本地 MongoDB、Redis 应复用已独立运行的实例，不要为联调额外启动整套 Docker Compose
+- 派协作路由为 `/party`：群聊、任务发布栏和附件保持原有交互；施高俊授课范围会展示 Python 实时协作区
+- Python 代码、光标感知、标准输入和运行结果在同一派内同步；服务端通过 Python Runner + Redis 做全局队列和单派互斥，学生运行环境不得开放 `pip install`
+- 群聊 `@AI` 默认使用阿里云 DashScope / Qwen 3.7 Plus；模型与苏格拉底式提示词由教师后台写入 MongoDB，`.env` 只提供 DashScope 密钥、Redis 和基础运行配置
 
 ## 开发环境
 
@@ -27,6 +34,8 @@
 - 启动前后端联调：`npm run dev`
 - 仅启动前端：`npm run dev:web`
 - 启动后端：`npm run server`
+- 仅启动 Python Runner：`npm run python-runner:dev`
+- 仅启动群聊 AI worker：`npm run worker:group-chat-ai`
 - 构建前端：`npm run build`
 - 代码检查：`npm run lint`
 - 单元测试：`npm run test:unit`
@@ -45,6 +54,7 @@
   - `server/modules/`：按领域拆分的后端模块（如 chat、images）
   - `server/routes/`：仍在使用的独立路由注册文件
   - `server/services/` / `server/platform/` / `server/providers/`：服务、平台能力与模型/供应商适配
+- `python-runner/`：受限 Python 执行器及其受控依赖清单
 - `tests/`：Node 原生测试
 - `scripts/`：运维、迁移、回填、诊断脚本
 - `docs/`：项目文档
@@ -74,6 +84,8 @@
 - 不要重新引入已被限制的聚合旧路由实现；遵守现有 ESLint 约束
 - API 与 WebSocket 路径需要兼容基础路径重写逻辑；不要假设部署一定在 `/`
 - 任何会访问数据库、对象存储或第三方模型服务的改动，都要尽量保持可降级、可报错、可观测
+- 群聊 AI 的默认配置、持久化配置和执行 worker 要一起检查；不要将群聊 AI 重新接回已移除的 OpenRouter 或 MiniMax 对话 Provider
+- Python Runner 改动必须同时考虑 Docker 限制、Redis 全局容量、每派单任务语义、20 秒执行上限及运行审计不保存完整学生代码
 
 ## 测试与验证
 
@@ -89,6 +101,7 @@
 
 - 项目现有 README 与用户提示以中文为主；新增文档、提示语、报错文案默认使用简体中文，除非目标文件已有明确英文约定
 - 若改动引入新的环境变量、脚本或运行步骤，请同步更新 `README.md` 或相关文档
+- `.env.example` 只允许占位值；`.env` 始终忽略且不得输出、复制或提交真实密钥、账号名单、MongoDB 口令
 
 ## 变更原则
 

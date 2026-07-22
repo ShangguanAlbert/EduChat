@@ -434,6 +434,7 @@ export function useRichNoteEditor({
   const pendingUploadsRef = useRef(new Map());
   const editorRef = useRef(null);
   const linkEditorVisibleRef = useRef(false);
+  const buildTableActionsRef = useRef(null);
 
   useEffect(() => {
     linkEditorVisibleRef.current = linkEditor.visible;
@@ -728,7 +729,7 @@ export function useRichNoteEditor({
         setTableUI((current) => ({
           ...current,
           ...nextPosition,
-          actions: buildTableActions(nextEditor),
+          actions: buildTableActionsRef.current?.(nextEditor) || [],
         }));
       });
     };
@@ -810,6 +811,13 @@ export function useRichNoteEditor({
       },
     ];
   }, []);
+
+  useEffect(() => {
+    buildTableActionsRef.current = buildTableActions;
+    return () => {
+      buildTableActionsRef.current = null;
+    };
+  }, [buildTableActions]);
 
   const refreshTableUI = useCallback(
     (currentEditor) => {
@@ -1061,6 +1069,11 @@ export function useRichNoteEditor({
     setImageUI((current) => ({ ...current, visible: false, position: null }));
   }, []);
 
+  const imagePlaceholderExtension = useMemo(
+    () => ImagePlaceholder.configure({}),
+    [],
+  );
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -1081,7 +1094,7 @@ export function useRichNoteEditor({
           handleTocUpdate(items);
         },
         scrollParent: () =>
-          editorRef.current?.view?.dom?.closest?.(".notes-rich-editor-content") || window,
+          document.querySelector(".notes-rich-editor-content") || window,
       }),
       EnhancedLink.configure({
         openOnClick: false,
@@ -1101,11 +1114,7 @@ export function useRichNoteEditor({
       }),
       Underline,
       NoteImage,
-      // eslint-disable-next-line react-hooks/refs
-      ImagePlaceholder.configure({
-        onRetryUpload: retryImageUpload,
-        onRemoveUpload: removeImagePlaceholder,
-      }),
+      imagePlaceholderExtension,
       TaskList,
       TaskItem.configure({
         nested: true,
@@ -1187,6 +1196,23 @@ export function useRichNoteEditor({
   useEffect(() => {
     editorRef.current = editor || null;
   }, [editor]);
+
+  useEffect(() => {
+    if (!editor) return undefined;
+    const extension = editor.extensionManager.extensions.find(
+      (item) => item.name === "imagePlaceholder",
+    );
+    if (!extension) return undefined;
+
+    extension.options.onRetryUpload = retryImageUpload;
+    extension.options.onRemoveUpload = removeImagePlaceholder;
+    editor.view.updateState(editor.state);
+
+    return () => {
+      extension.options.onRetryUpload = null;
+      extension.options.onRemoveUpload = null;
+    };
+  }, [editor, removeImagePlaceholder, retryImageUpload]);
 
   useEffect(() => {
     if (!editor) return;
@@ -1274,12 +1300,15 @@ export function useRichNoteEditor({
   }, [editor]);
 
   useEffect(() => {
-    setLinkBubble({
-      visible: false,
-      position: null,
-      link: { href: "", text: "" },
-      range: null,
+    const frameId = window.requestAnimationFrame(() => {
+      setLinkBubble({
+        visible: false,
+        position: null,
+        link: { href: "", text: "" },
+        range: null,
+      });
     });
+    return () => window.cancelAnimationFrame(frameId);
   }, [noteId]);
 
   useEffect(() => {
@@ -1288,9 +1317,12 @@ export function useRichNoteEditor({
     editor.commands.setContent(markdownToHtml(normalizedMarkdown), false);
     editor.commands.updateTableOfContents?.();
     lastSyncedMarkdownRef.current = normalizedMarkdown;
-    setLinkBubble((current) => ({ ...current, visible: false, position: null }));
-    refreshTableUI(editor);
-    refreshImageUI(editor);
+    const frameId = window.requestAnimationFrame(() => {
+      setLinkBubble((current) => ({ ...current, visible: false, position: null }));
+      refreshTableUI(editor);
+      refreshImageUI(editor);
+    });
+    return () => window.cancelAnimationFrame(frameId);
   }, [editor, normalizedMarkdown, refreshImageUI, refreshTableUI]);
 
   const formatting = useEditorState({

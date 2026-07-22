@@ -3,8 +3,13 @@ import assert from "node:assert/strict";
 
 import { buildDevProcessSpecs } from "../../scripts/dev-runtime.mjs";
 
-test("buildDevProcessSpecs includes group chat AI worker in the local dev stack", () => {
+test("buildDevProcessSpecs includes Python runner and group chat AI worker in the local dev stack", () => {
   assert.deepEqual(buildDevProcessSpecs(), [
+    {
+      name: "python-runner",
+      npmArgs: ["run", "python-runner:dev"],
+      waitForApiReady: false,
+    },
     {
       name: "server",
       npmArgs: ["run", "server"],

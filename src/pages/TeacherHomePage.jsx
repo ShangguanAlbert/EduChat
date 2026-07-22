@@ -1334,8 +1334,6 @@ export default function TeacherHomePage() {
     [],
   );
   const [homeworkViewMode, setHomeworkViewMode] = useState("card");
-  const [homeworkMissingListExpanded, setHomeworkMissingListExpanded] =
-    useState(false);
   const [downloadingHomeworkFileId, setDownloadingHomeworkFileId] =
     useState("");
   const [exportingHomeworkLessonId, setExportingHomeworkLessonId] =
@@ -2108,7 +2106,6 @@ export default function TeacherHomePage() {
 
   useEffect(() => {
     setExpandedHomeworkStudentIds([]);
-    setHomeworkMissingListExpanded(false);
   }, [selectedHomeworkLessonId]);
 
   useEffect(() => {
@@ -3438,13 +3435,6 @@ export default function TeacherHomePage() {
         : [],
     [selectedHomeworkLesson],
   );
-  const selectedHomeworkMissingStudents = useMemo(
-    () =>
-      Array.isArray(selectedHomeworkLesson?.missingStudents)
-        ? selectedHomeworkLesson.missingStudents
-        : [],
-    [selectedHomeworkLesson],
-  );
   const disciplineBehaviorOptions = useMemo(() => {
     const merged = [];
     const seen = new Set();
@@ -3590,42 +3580,6 @@ export default function TeacherHomePage() {
       ),
     );
   }, [disciplineAllStudentCards, disciplineStudentKeyword]);
-  const selectedDisciplineStudentCard = useMemo(
-    () =>
-      disciplineAllStudentCards.find(
-        (item) =>
-          String(item.userId || "").trim() ===
-          String(selectedDisciplineStudentId || "").trim(),
-      ) || null,
-    [disciplineAllStudentCards, selectedDisciplineStudentId],
-  );
-  const selectedDisciplineStudent = selectedDisciplineStudentCard?.user || null;
-  const selectedDisciplineStudentRecord = useMemo(
-    () =>
-      normalizeDisciplineStudentRecord(
-        selectedDisciplineLessonRecords[
-          String(selectedDisciplineStudent?.id || "").trim()
-        ],
-      ),
-    [selectedDisciplineLessonRecords, selectedDisciplineStudent?.id],
-  );
-  const selectedDisciplineStudentTotalCount = useMemo(
-    () => getDisciplineRecordTotalCount(selectedDisciplineStudentRecord),
-    [selectedDisciplineStudentRecord],
-  );
-  const selectedDisciplineStudentBehaviorCounts = useMemo(
-    () =>
-      disciplineBehaviorOptions.map((behavior) => ({
-        ...behavior,
-        count:
-          Number(
-            selectedDisciplineStudentRecord?.countsByBehavior?.[
-              String(behavior?.id || "").trim()
-            ] || 0,
-          ) || 0,
-      })),
-    [disciplineBehaviorOptions, selectedDisciplineStudentRecord],
-  );
   useEffect(() => {
     if (disciplineAllStudentCards.length === 0) {
       if (selectedDisciplineStudentId) setSelectedDisciplineStudentId("");

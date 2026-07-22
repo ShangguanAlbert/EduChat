@@ -35,15 +35,12 @@ export default function RichTextEditor({
     startLinkTitleEdit,
     insertImageFromFile,
     closeTableMenu,
-    selectTableRowFromHandle,
-    selectTableColumnFromHandle,
     insertTableRowAtHover,
     insertTableColumnAtHover,
     closeImageToolbar,
     setImageAlign,
     setImageSize,
     deleteSelectedImage,
-    toggleTableMenu,
   } = useRichNoteEditor({
     noteId,
     markdown,
@@ -133,13 +130,8 @@ export default function RichTextEditor({
           triggerPosition={tableUI.triggerPosition}
           menuPosition={tableUI.menuPosition}
           tableRect={tableUI.tableRect}
-          rowHandle={tableUI.rowHandle}
-          columnHandle={tableUI.columnHandle}
           hoverInsert={tableUI.hoverInsert}
           actions={tableUI.actions}
-          onToggle={toggleTableMenu}
-          onSelectRow={selectTableRowFromHandle}
-          onSelectColumn={selectTableColumnFromHandle}
           onInsertRow={insertTableRowAtHover}
           onInsertColumn={insertTableColumnAtHover}
           onClose={closeTableMenu}

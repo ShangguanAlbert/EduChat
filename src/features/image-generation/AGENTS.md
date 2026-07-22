@@ -23,3 +23,4 @@
   - 历史记录
   - 图片流式回传
 - 变更字段时，要同步确认服务端 `server/modules/images/` 是否需要配套调整
+- 火山引擎图片生成属于独立 Provider 链路；不要将其配置与 DashScope 群聊 AI 或 MiniMax 音乐生成混用

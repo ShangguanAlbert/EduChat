@@ -1,8 +1,8 @@
 import {
   AtSign,
   ArrowLeft,
-  Bot,
   Copy,
+  CircleHelp,
   Download,
   File as FileIcon,
   FileUp,
@@ -14,6 +14,8 @@ import {
   Smile,
   SmilePlus,
   Plus,
+  PanelLeftClose,
+  PanelLeftOpen,
   SquarePen,
   SendHorizonal,
   Trash2,
@@ -95,23 +97,41 @@ const REMOVED_PARTY_AGENT_E_NOTICE =
   "该 ChatPage 会话原绑定的 SSCI审稿人已下线，当前不可继续对话。";
 const PARTY_DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   A: "volcengine",
-  B: "volcengine",
+  B: "reserved",
   C: "volcengine",
   D: "aliyun",
 });
 const PARTY_MARKDOWN_FORWARD_PREFIX = "\u2063\u2063\u2063";
 const QUICK_REACTION_EMOJIS = Object.freeze(["👍", "👏", "🎉", "😄", "🤝"]);
 const COMPOSER_TOOL_EMOJIS = Object.freeze(buildComposerEmojiCatalog());
+const PARTY_WORKSPACE_SPLIT_STORAGE_KEY = "educhat.party.workspace-split.v1";
+const PARTY_WORKSPACE_MIN_CHAT_RATIO = 0.36;
+const PARTY_WORKSPACE_MAX_CHAT_RATIO = 0.68;
+
+const PARTY_GUIDE_ITEMS = Object.freeze([
+  ["加入协作", "通过左侧“+”创建派，或输入派号加入已有协作组。"],
+  ["发布任务", "派主可在左栏发布任务并上传附件；群聊 AI 会据此理解当前协作目标。"],
+  ["群聊与 AI", "在消息框中输入 @AI 提问。AI 会给出引导、解释错误和局部示例，不会替你完成整题。"],
+  ["Python 协作", "施高俊授课范围内，所有成员共用同一份代码；可运行、查看控制台，并把输出一键发给 AI 提问。"],
+  ["调整布局", "点击左下角边栏按钮可显示或隐藏“我的派”；拖动聊天区和 Python 区之间的分隔条可调整宽度。"],
+]);
+
+function clampPartyWorkspaceSplit(value) {
+  const ratio = Number(value);
+  if (!Number.isFinite(ratio)) return 0.52;
+  return Math.min(PARTY_WORKSPACE_MAX_CHAT_RATIO, Math.max(PARTY_WORKSPACE_MIN_CHAT_RATIO, ratio));
+}
+
+function readPartyWorkspaceSplit() {
+  try {
+    return clampPartyWorkspaceSplit(window.localStorage.getItem(PARTY_WORKSPACE_SPLIT_STORAGE_KEY));
+  } catch {
+    return 0.52;
+  }
+}
 
 const DEFAULT_LIMITS = Object.freeze({
-  maxCreatedRoomsPerUser: null,
-  maxJoinedRoomsPerUser: 8,
   maxMembersPerRoom: 10,
-});
-
-const DEFAULT_COUNTS = Object.freeze({
-  createdRooms: 0,
-  joinedRooms: 0,
 });
 
 const PARTY_MESSAGE_MARKDOWN_REMARK_PLUGINS = [[remarkGfm, { singleTilde: false }]];
@@ -154,19 +174,6 @@ function normalizeRenderedMarkdown(value) {
   }
 
   return lines.join("\n");
-}
-
-function normalizeRoomLimit(value, fallback = null) {
-  if (value == null || value === "") return fallback;
-  const num = Number(value);
-  if (!Number.isFinite(num) || num <= 0) return fallback;
-  return num;
-}
-
-function formatRoomLimit(value) {
-  const normalized = normalizeRoomLimit(value, null);
-  if (normalized == null) return "无限";
-  return String(normalized);
 }
 
 export default function PartyChatDesktopPage({
@@ -259,6 +266,7 @@ export default function PartyChatDesktopPage({
   const sideMenuRef = useRef(null);
   const messageMenuRef = useRef(null);
   const composerToolbarRef = useRef(null);
+  const workspaceRef = useRef(null);
   const composeTextareaRef = useRef(null);
   const composeSelectionRef = useRef({ start: null, end: null });
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
@@ -267,7 +275,6 @@ export default function PartyChatDesktopPage({
 
   const [me, setMe] = useState({ id: "", name: "我", role: "user" });
   const [limits, setLimits] = useState(DEFAULT_LIMITS);
-  const [counts, setCounts] = useState(DEFAULT_COUNTS);
   const [usersById, setUsersById] = useState({});
   const [rooms, setRooms] = useState([]);
   const [activeRoomId, setActiveRoomId] = useState("");
@@ -293,14 +300,15 @@ export default function PartyChatDesktopPage({
   const [partyAgentStreaming, setPartyAgentStreaming] = useState(false);
   const [partyAgentError, setPartyAgentError] = useState("");
   const [partyAgentSelectedAskText, setPartyAgentSelectedAskText] = useState("");
-  const [multiForwardMode, setMultiForwardMode] = useState(false);
-  const [selectedForwardMessageIds, setSelectedForwardMessageIds] = useState([]);
 
   const [createRoomName, setCreateRoomName] = useState("");
   const [createSubmitting, setCreateSubmitting] = useState(false);
   const [joinRoomCode, setJoinRoomCode] = useState("");
   const [joinSubmitting, setJoinSubmitting] = useState(false);
-  const [isSidebarExpanded, setIsSidebarExpanded] = useState(true);
+  const [isSidebarExpanded, setIsSidebarExpanded] = useState(false);
+  const [showPartyGuide, setShowPartyGuide] = useState(false);
+  const [workspaceSplit, setWorkspaceSplit] = useState(readPartyWorkspaceSplit);
+  const [isWorkspaceResizing, setIsWorkspaceResizing] = useState(false);
   const [showSideMenu, setShowSideMenu] = useState(false);
   const [showCreateRoomModal, setShowCreateRoomModal] = useState(false);
   const [showJoinRoomModal, setShowJoinRoomModal] = useState(false);
@@ -517,13 +525,6 @@ export default function PartyChatDesktopPage({
     });
     return map;
   }, [activeRoom, canManageActiveRoom]);
-  const selectedForwardMessageIdSet = useMemo(
-    () => new Set(selectedForwardMessageIds),
-    [selectedForwardMessageIds],
-  );
-  const selectedForwardCount = selectedForwardMessageIds.length;
-  const canForwardToPartyAgent =
-    !!linkedChatSessionId && !partyAgentAccessBlocked && !linkedChatUsesRemovedAgent;
   const showSidebar = isMobileSidebarDrawer ? isSidebarDrawerOpen : isSidebarExpanded;
   const toggleSidebarPanel = useCallback(() => {
     if (isMobileSidebarDrawer) {
@@ -532,6 +533,42 @@ export default function PartyChatDesktopPage({
     }
     setIsSidebarExpanded((prev) => !prev);
   }, [isMobileSidebarDrawer, onToggleSidebarDrawer, showSidebar]);
+  const updateWorkspaceSplit = useCallback((ratio) => {
+    const nextRatio = clampPartyWorkspaceSplit(ratio);
+    setWorkspaceSplit(nextRatio);
+    try {
+      window.localStorage.setItem(PARTY_WORKSPACE_SPLIT_STORAGE_KEY, String(nextRatio));
+    } catch {
+      // 保持当前会话内的布局即可。
+    }
+  }, []);
+  const updateWorkspaceSplitFromPointer = useCallback((clientX) => {
+    const bounds = workspaceRef.current?.getBoundingClientRect();
+    if (!bounds?.width) return;
+    updateWorkspaceSplit((Number(clientX) - bounds.left) / bounds.width);
+  }, [updateWorkspaceSplit]);
+  const handleWorkspaceResizeStart = useCallback((event) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setIsWorkspaceResizing(true);
+    updateWorkspaceSplitFromPointer(event.clientX);
+  }, [updateWorkspaceSplitFromPointer]);
+  const handleWorkspaceResizeMove = useCallback((event) => {
+    if (!isWorkspaceResizing) return;
+    updateWorkspaceSplitFromPointer(event.clientX);
+  }, [isWorkspaceResizing, updateWorkspaceSplitFromPointer]);
+  const handleWorkspaceResizeEnd = useCallback((event) => {
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setIsWorkspaceResizing(false);
+  }, []);
+  const handleWorkspaceResizeKeyDown = useCallback((event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    updateWorkspaceSplit(workspaceSplit + (event.key === "ArrowLeft" ? -0.03 : 0.03));
+  }, [updateWorkspaceSplit, workspaceSplit]);
   const isCurrentUserMutedInRoom = useCallback(
     (roomId) => {
       const safeRoomId = String(roomId || "").trim();
@@ -1233,16 +1270,10 @@ export default function PartyChatDesktopPage({
       controller?.abort();
     }
     setPartyAgentSelectedAskText("");
-    if (multiForwardMode || selectedForwardMessageIds.length > 0) {
-      setSelectedForwardMessageIds([]);
-      setMultiForwardMode(false);
-    }
     setPartyAgentError("");
   }, [
     linkedChatSessionId,
-    multiForwardMode,
     partyAgentAccessBlocked,
-    selectedForwardMessageIds.length,
   ]);
 
   useEffect(() => {
@@ -1693,18 +1724,8 @@ export default function PartyChatDesktopPage({
         role: String(result?.me?.role || "user").toLowerCase() === "admin" ? "admin" : "user",
       });
       setLimits({
-        maxCreatedRoomsPerUser: normalizeRoomLimit(
-          result?.limits?.maxCreatedRoomsPerUser,
-          DEFAULT_LIMITS.maxCreatedRoomsPerUser,
-        ),
-        maxJoinedRoomsPerUser:
-          Number(result?.limits?.maxJoinedRoomsPerUser) || DEFAULT_LIMITS.maxJoinedRoomsPerUser,
         maxMembersPerRoom:
           Number(result?.limits?.maxMembersPerRoom) || DEFAULT_LIMITS.maxMembersPerRoom,
-      });
-      setCounts({
-        createdRooms: Number(result?.counts?.createdRooms) || 0,
-        joinedRooms: Number(result?.counts?.joinedRooms) || 0,
       });
       setUsersById(nextUsers);
       setRooms(nextRooms);
@@ -2098,8 +2119,6 @@ export default function PartyChatDesktopPage({
   }, [activeRoomId]);
 
   useEffect(() => {
-    setMultiForwardMode(false);
-    setSelectedForwardMessageIds([]);
     setMemberMuteSubmittingByUserId({});
   }, [activeRoomId]);
 
@@ -2108,19 +2127,6 @@ export default function PartyChatDesktopPage({
     setShowComposerEmojiPanel(false);
     setShowMentionPicker(false);
   }, [activeRoomSelfMuted]);
-
-  useEffect(() => {
-    if (selectedForwardMessageIds.length === 0) return;
-    const liveMessageIdSet = new Set(
-      activeMessages
-        .map((message) => String(message?.id || "").trim())
-        .filter(Boolean),
-    );
-    setSelectedForwardMessageIds((prev) => {
-      const next = prev.filter((messageId) => liveMessageIdSet.has(messageId));
-      return next.length === prev.length ? prev : next;
-    });
-  }, [activeMessages, selectedForwardMessageIds.length]);
 
   useEffect(() => {
     if (!rooms.length) {
@@ -2189,6 +2195,7 @@ export default function PartyChatDesktopPage({
       !showJoinRoomModal &&
       !showRenameRoomModal &&
       !showDissolveRoomModal &&
+      !showPartyGuide &&
       !readReceiptModal.open
     ) {
       return undefined;
@@ -2207,6 +2214,9 @@ export default function PartyChatDesktopPage({
       }
       if (showDissolveRoomModal && !dissolveSubmitting) {
         setShowDissolveRoomModal(false);
+      }
+      if (showPartyGuide) {
+        setShowPartyGuide(false);
       }
       if (readReceiptModal.open) {
         setReadReceiptModal({
@@ -2227,6 +2237,7 @@ export default function PartyChatDesktopPage({
     showJoinRoomModal,
     showRenameRoomModal,
     showDissolveRoomModal,
+    showPartyGuide,
     readReceiptModal.open,
     createSubmitting,
     joinSubmitting,
@@ -2387,7 +2398,7 @@ export default function PartyChatDesktopPage({
       setIsAnnouncementEditing(false);
       setActionError("");
     } catch (error) {
-      setActionError(error?.message || "保存群公告失败，请稍后重试。");
+      setActionError(error?.message || "保存任务失败，请稍后重试。");
     } finally {
       setAnnouncementSubmitting(false);
     }
@@ -2398,7 +2409,7 @@ export default function PartyChatDesktopPage({
     event.target.value = "";
     if (!activeRoom || !canManageActiveRoom || !(file instanceof File)) return;
     if (Number(file.size || 0) > PARTY_UPLOAD_FILE_MAX_FILE_SIZE_BYTES) {
-      setActionError("公告附件不能超过10MB。");
+      setActionError("任务附件不能超过10MB。");
       return;
     }
     setAnnouncementAttachmentSubmitting(true);
@@ -2407,7 +2418,7 @@ export default function PartyChatDesktopPage({
       applyRoomUpsert(result?.room);
       setActionError("");
     } catch (error) {
-      setActionError(error?.message || "上传公告附件失败，请稍后重试。");
+      setActionError(error?.message || "上传任务附件失败，请稍后重试。");
     } finally {
       setAnnouncementAttachmentSubmitting(false);
     }
@@ -2459,7 +2470,7 @@ export default function PartyChatDesktopPage({
       applyRoomUpsert(result?.room);
       setActionError("");
     } catch (error) {
-      setActionError(error?.message || "删除公告附件失败，请稍后重试。");
+      setActionError(error?.message || "删除任务附件失败，请稍后重试。");
     } finally {
       setAnnouncementAttachmentSubmitting(false);
     }
@@ -2862,6 +2873,38 @@ export default function PartyChatDesktopPage({
     })();
   }
 
+  async function handleAskAiAboutPythonOutput(output) {
+    const roomId = String(activeRoomId || "").trim();
+    const consoleOutput = String(output || "").trim();
+    if (!roomId || !consoleOutput) return;
+    if (activeRoomSelfMuted) {
+      setActionError(PARTY_MEMBER_MUTED_BLOCKED_MESSAGE);
+      return;
+    }
+
+    const safeOutput = consoleOutput.replaceAll("```", "'''");
+    const message = [
+      "@AI 我运行 Python 后得到下面的控制台输出。这个是什么问题？",
+      "请用学生能理解的话解释原因，并告诉我下一步可以检查什么；不要直接给我完整代码。",
+      "",
+      "```text",
+      safeOutput,
+      "```",
+    ].join("\n");
+
+    forceScrollToLatestRef.current = true;
+    requestAnimationFrame(() => {
+      scrollToLatestMessages("auto");
+    });
+    try {
+      await dispatchTextMessage(roomId, message);
+      setActionError("");
+    } catch (error) {
+      setActionError(error?.message || "发送给 AI 失败，请稍后重试。");
+      throw error;
+    }
+  }
+
   function onPickImageFile(event) {
     const files = Array.from(event.target.files || []);
     if (imageInputRef.current) {
@@ -3233,120 +3276,6 @@ export default function PartyChatDesktopPage({
     });
   }
 
-  function clearMultiForwardSelection() {
-    setSelectedForwardMessageIds([]);
-    setMultiForwardMode(false);
-  }
-
-  function toggleForwardMessageSelection(message) {
-    const messageId = String(message?.id || "").trim();
-    const messageType = String(message?.type || "").trim().toLowerCase();
-    if (!messageId || messageType === "system") return;
-    if (messageType !== "text") {
-      setActionError("暂不支持转发图片或文件消息，请仅选择文本消息。");
-      return;
-    }
-    setSelectedForwardMessageIds((prev) => {
-      if (prev.includes(messageId)) {
-        return prev.filter((id) => id !== messageId);
-      }
-      return [...prev, messageId];
-    });
-  }
-
-  function forwardSelectedMessagesToAgentQuote() {
-    if (partyAgentAccessBlocked) return;
-    if (!linkedChatSessionId) {
-      setPartyAgentError("请先在右侧选择可用的 ChatPage 会话。");
-      return;
-    }
-    if (selectedForwardMessageIds.length === 0) {
-      setActionError("请先勾选要转发的聊天记录。");
-      return;
-    }
-    const selectedIdSet = new Set(selectedForwardMessageIds);
-    const selectedMessages = activeMessages.filter((message) => selectedIdSet.has(String(message?.id || "").trim()));
-    if (selectedMessages.length === 0) {
-      setActionError("未找到可转发的聊天记录，请重试。");
-      return;
-    }
-    if (selectedMessages.some((message) => String(message?.type || "").trim().toLowerCase() !== "text")) {
-      setActionError("暂不支持转发图片或文件消息，请仅选择文本消息。");
-      return;
-    }
-    const lines = selectedMessages
-      .map((message) => {
-        const sender = String(message?.senderName || "用户").trim() || "用户";
-        const content = extractPartyMessageForwardText(message);
-        if (!content) return "";
-        return `${sender}：${content}`;
-      })
-      .filter(Boolean);
-    if (lines.length === 0) {
-      setActionError("选中的消息没有可转发文本。");
-      return;
-    }
-    setPartyAgentSelectedAskText(lines.join("\n"));
-    setPartyAgentError("");
-    setActionError("");
-    setSelectedForwardMessageIds([]);
-    setMultiForwardMode(false);
-  }
-
-  function forwardSingleMessageToAgentQuote(message) {
-    if (partyAgentAccessBlocked) return;
-    if (!linkedChatSessionId) {
-      setPartyAgentError("请先在右侧选择可用的 ChatPage 会话。");
-      return;
-    }
-    if (String(message?.type || "").trim().toLowerCase() !== "text") {
-      setActionError("暂不支持转发图片或文件消息，请仅选择文本消息。");
-      return;
-    }
-
-    const sender = String(message?.senderName || "用户").trim() || "用户";
-    const content = extractPartyMessageForwardText(message);
-    if (!content) {
-      setActionError("该消息没有可转发文本。");
-      return;
-    }
-
-    setPartyAgentSelectedAskText(`${sender}：${content}`);
-    setPartyAgentError("");
-    setActionError("");
-    closeMessageMenu();
-  }
-
-  function toggleMultiForwardFromMenu(message) {
-    if (partyAgentAccessBlocked) {
-      setPartyAgentError(PARTY_AGENT_ACCESS_BLOCKED_MESSAGE);
-      return;
-    }
-    const messageId = String(message?.id || "").trim();
-    const messageType = String(message?.type || "").trim().toLowerCase();
-    if (!messageId || messageType === "system") return;
-    if (messageType !== "text") {
-      setActionError("暂不支持转发图片或文件消息，请仅选择文本消息。");
-      return;
-    }
-
-    closeMessageMenu();
-    setMultiForwardMode(true);
-    setSelectedForwardMessageIds((prev) => {
-      if (multiForwardMode) {
-        if (prev.includes(messageId)) {
-          return prev.filter((id) => id !== messageId);
-        }
-        return [...prev, messageId];
-      }
-      if (prev.includes(messageId)) {
-        return prev;
-      }
-      return [...prev, messageId];
-    });
-    setActionError("");
-  }
-
   function handleQuoteMessage(message) {
     setReplyTarget(createReplyTarget(message));
     closeMessageMenu();
@@ -3529,7 +3458,26 @@ export default function PartyChatDesktopPage({
 
   return (
     <div className={`party-page party-page-enter${pageEntered ? " is-page-entered" : ""}`}>
-      <div className={`party-workspace${showSidebar ? "" : " is-side-collapsed"}`}>
+      <div
+        ref={workspaceRef}
+        className={`party-workspace${showSidebar ? "" : " is-side-collapsed"}${
+          isWorkspaceResizing ? " is-resizing" : ""
+        }`}
+        style={{ "--party-chat-column-width": `${Math.round(workspaceSplit * 1000) / 10}%` }}
+      >
+        {!isMobileSidebarDrawer && !showSidebar ? (
+          <button
+            type="button"
+            className="party-sidebar-reveal-btn"
+            aria-controls="party-side-panel"
+            aria-expanded={showSidebar}
+            onClick={toggleSidebarPanel}
+            title={showSidebar ? "隐藏我的派边栏" : "显示我的派边栏"}
+          >
+            {showSidebar ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
+            <span>我的派</span>
+          </button>
+        ) : null}
         <aside
           id="party-side-panel"
           className={`party-side${showSidebar ? "" : " is-collapsed"}${
@@ -3540,14 +3488,15 @@ export default function PartyChatDesktopPage({
           <div className="party-side-head">
             <h2 className="party-side-title">我的派</h2>
             <div className="party-side-head-actions">
-              <div className="party-room-list-chip-group">
-                <span className="party-limit-chip">
-                  已建 {counts.createdRooms}/{formatRoomLimit(limits.maxCreatedRoomsPerUser)}
-                </span>
-                <span className="party-limit-chip">
-                  已加 {counts.joinedRooms}/{limits.maxJoinedRoomsPerUser}
-                </span>
-              </div>
+              <button
+                type="button"
+                className="party-side-help-btn"
+                title="派协作使用说明"
+                aria-label="派协作使用说明"
+                onClick={() => setShowPartyGuide(true)}
+              >
+                <CircleHelp size={17} />
+              </button>
               <div className="party-side-menu-wrap" ref={sideMenuRef}>
                 <button
                   type="button"
@@ -3555,7 +3504,7 @@ export default function PartyChatDesktopPage({
                   title="创建或加入"
                   onClick={() => setShowSideMenu((prev) => !prev)}
                 >
-                  <Plus size={18} />
+                  <Plus size={17} />
                 </button>
 
                 {showSideMenu ? (
@@ -3569,6 +3518,17 @@ export default function PartyChatDesktopPage({
                   </div>
                 ) : null}
               </div>
+              {!isMobileSidebarDrawer ? (
+                <button
+                  type="button"
+                  className="party-side-collapse-btn"
+                  title="隐藏我的派边栏"
+                  aria-label="隐藏我的派边栏"
+                  onClick={toggleSidebarPanel}
+                >
+                  <PanelLeftClose size={17} />
+                </button>
+              ) : null}
             </div>
           </div>
 
@@ -3611,7 +3571,7 @@ export default function PartyChatDesktopPage({
 
           <section className="party-card party-announcement-card">
             <div className="party-announcement-head">
-              <h2 className="party-card-title">群公告</h2>
+              <h2 className="party-card-title">任务发布栏</h2>
               {activeRoom && canManageActiveRoom ? (
                 <button
                   type="button"
@@ -3625,7 +3585,7 @@ export default function PartyChatDesktopPage({
             </div>
 
             {!activeRoom ? (
-              <p className="party-tip">请选择一个派查看公告。</p>
+              <p className="party-tip">请选择一个派查看任务。</p>
             ) : isAnnouncementEditing ? (
               <form className="party-announcement-editor" onSubmit={handleSaveAnnouncement}>
                 <textarea
@@ -3633,8 +3593,8 @@ export default function PartyChatDesktopPage({
                   onChange={(event) => setAnnouncementDraft(event.target.value)}
                   maxLength={500}
                   autoFocus
-                  placeholder="输入群公告，成员进入派后即可查看"
-                  aria-label="编辑群公告"
+                  placeholder="输入当前协作任务，AI 会将其作为回答背景"
+                  aria-label="编辑协作任务"
                 />
                 <div className="party-announcement-editor-meta">
                   <span>{announcementDraft.length}/500</span>
@@ -3659,7 +3619,7 @@ export default function PartyChatDesktopPage({
                     isAnnouncementExpanded ? " is-expanded" : ""
                   }${activeRoom.announcement ? "" : " is-empty"}`}
                 >
-                  {activeRoom.announcement || "暂无群公告"}
+                  {activeRoom.announcement || "暂未发布任务"}
                 </p>
                 {activeRoom.announcement ? (
                   <button
@@ -3675,7 +3635,7 @@ export default function PartyChatDesktopPage({
             {activeRoom ? (
               <div className="party-announcement-attachments">
                 <div className="party-announcement-attachments-head">
-                  <span>附件</span>
+                  <span>任务附件</span>
                   {canManageActiveRoom ? (
                     <>
                       <input
@@ -3697,7 +3657,7 @@ export default function PartyChatDesktopPage({
                   ) : null}
                 </div>
                 {activeRoom.announcementAttachments.length === 0 ? (
-                  <p className="party-announcement-no-attachments">暂无附件</p>
+                  <p className="party-announcement-no-attachments">暂无任务附件</p>
                 ) : (
                   <div className="party-announcement-attachment-list">
                     {activeRoom.announcementAttachments.map((attachment) => (
@@ -3808,7 +3768,7 @@ export default function PartyChatDesktopPage({
           {activeRoom ? (
             <>
               <header className="party-room-header">
-                <div>
+                <div className="party-room-identification">
                   <div className="party-room-title-row">
                     <h2 className="party-room-title">{activeRoom.name}</h2>
                     {canManageActiveRoom ? (
@@ -3822,7 +3782,6 @@ export default function PartyChatDesktopPage({
                       </button>
                     ) : null}
                   </div>
-                  <p className="party-room-code">派号：{activeRoom.roomCode}</p>
                 </div>
                 <div className="party-room-actions">
                   {canManageActiveRoom ? (
@@ -3849,33 +3808,6 @@ export default function PartyChatDesktopPage({
                       </label>
                     </div>
                   ) : null}
-                  {multiForwardMode ? (
-                    <>
-                      <span className="party-forward-count-chip">已选 {selectedForwardCount}</span>
-                      <button
-                        type="button"
-                        className="party-secondary-btn"
-                        onClick={forwardSelectedMessagesToAgentQuote}
-                        disabled={selectedForwardCount === 0 || !canForwardToPartyAgent}
-                        title={
-                          partyAgentAccessBlocked
-                            ? "派主暂未开放成员使用派Agent"
-                            : !linkedChatSessionId
-                              ? "请先在右侧选择可同步会话"
-                              : "转发到右侧派Agent"
-                        }
-                      >
-                        转发到派Agent
-                      </button>
-                      <button
-                        type="button"
-                        className="party-secondary-btn"
-                        onClick={clearMultiForwardSelection}
-                      >
-                        取消
-                      </button>
-                    </>
-                  ) : null}
                   {canManageActiveRoom ? (
                     <button type="button" className="party-room-dissolve-btn" onClick={openDissolveRoomModal}>
                       解散派
@@ -3900,8 +3832,6 @@ export default function PartyChatDesktopPage({
                           const showReactions = isMenuOpen && messageMenuState.showReactions;
                           const messageReactions = Array.isArray(message.reactions) ? message.reactions : [];
                           const readReceipt = buildMessageReadReceipt(message);
-                          const selectedForForward = selectedForwardMessageIdSet.has(String(message.id || "").trim());
-                          const selectableForForward = String(message?.type || "").trim().toLowerCase() === "text";
                           const isAgentForwardMessage = isPartyAgentForwardMessage(message);
 
                           return (
@@ -3915,25 +3845,6 @@ export default function PartyChatDesktopPage({
                                 <p className="party-system-text">{message.content}</p>
                               ) : (
                                 <div className="party-message-row">
-                                  {multiForwardMode ? (
-                                    <button
-                                      type="button"
-                                      className={`party-forward-select-btn${
-                                        selectedForForward ? " is-selected" : ""
-                                      }${!selectableForForward ? " is-disabled" : ""}`}
-                                      onClick={() => toggleForwardMessageSelection(message)}
-                                      title={
-                                        selectableForForward
-                                          ? selectedForForward
-                                            ? "取消选择"
-                                            : "选择转发"
-                                          : "暂不支持转发图片或文件消息"
-                                      }
-                                      aria-label={selectableForForward ? "选择转发消息" : "不支持转发该消息类型"}
-                                    >
-                                      {selectedForForward ? "✓" : ""}
-                                    </button>
-                                  ) : null}
                                   <NameAvatar
                                     name={message.senderName}
                                     tone={isAgentForwardMessage || isAiMessage ? "agent" : "user"}
@@ -3992,13 +3903,7 @@ export default function PartyChatDesktopPage({
                                           <button
                                             type="button"
                                             className="party-image-thumb-btn"
-                                            onClick={() => {
-                                              if (multiForwardMode) {
-                                                toggleForwardMessageSelection(message);
-                                                return;
-                                              }
-                                              setPreviewImage(message.image);
-                                            }}
+                                            onClick={() => setPreviewImage(message.image)}
                                           >
                                             <img
                                               src={message.image?.dataUrl}
@@ -4012,13 +3917,7 @@ export default function PartyChatDesktopPage({
                                           <button
                                             type="button"
                                             className="party-file-msg-btn"
-                                            onClick={() => {
-                                              if (multiForwardMode) {
-                                                toggleForwardMessageSelection(message);
-                                                return;
-                                              }
-                                              void handleDownloadFileMessage(message);
-                                            }}
+                                            onClick={() => void handleDownloadFileMessage(message)}
                                             disabled={downloadingFileMessageId === message.id}
                                           >
                                             <div className="party-file-msg-icon">
@@ -4100,50 +3999,6 @@ export default function PartyChatDesktopPage({
                                               >
                                                 <Copy size={15} />
                                                 复制
-                                              </button>
-                                            ) : null}
-
-                                            {message.type === "text" ? (
-                                              <button
-                                                type="button"
-                                                className="party-msg-menu-item"
-                                                onClick={() => forwardSingleMessageToAgentQuote(message)}
-                                                disabled={!canForwardToPartyAgent}
-                                                title={
-                                                  partyAgentAccessBlocked
-                                                    ? "派主暂未开放成员使用派Agent"
-                                                    : !linkedChatSessionId
-                                                      ? "请先在右侧选择可同步会话"
-                                                      : "将该条消息发给派Agent"
-                                                }
-                                              >
-                                                <Bot size={15} />
-                                                询问派Agent
-                                              </button>
-                                            ) : null}
-
-                                            {message.type === "text" ? (
-                                              <button
-                                                type="button"
-                                                className="party-msg-menu-item"
-                                                onClick={() => toggleMultiForwardFromMenu(message)}
-                                                disabled={partyAgentAccessBlocked}
-                                                title={
-                                                  partyAgentAccessBlocked
-                                                    ? "派主暂未开放成员使用派Agent"
-                                                    : multiForwardMode
-                                                      ? selectedForForward
-                                                        ? "取消该条勾选"
-                                                        : "将该条加入多选转发"
-                                                      : "开启多选并勾选该条"
-                                                }
-                                              >
-                                                <Plus size={15} />
-                                                {multiForwardMode
-                                                  ? selectedForForward
-                                                    ? "取消多选"
-                                                    : "加入多选"
-                                                  : "多选转发"}
                                               </button>
                                             ) : null}
 
@@ -4511,8 +4366,23 @@ export default function PartyChatDesktopPage({
           )}
         </main>
 
+        <div
+          className="party-workspace-resize-handle"
+          role="separator"
+          aria-label="调整群聊与编程区宽度"
+          aria-orientation="vertical"
+          tabIndex={0}
+          onPointerDown={handleWorkspaceResizeStart}
+          onPointerMove={handleWorkspaceResizeMove}
+          onPointerUp={handleWorkspaceResizeEnd}
+          onPointerCancel={handleWorkspaceResizeEnd}
+          onKeyDown={handleWorkspaceResizeKeyDown}
+        >
+          <span aria-hidden="true" />
+        </div>
+
         {String(getStoredAuthUser()?.teacherScopeKey || "").trim().toLowerCase() === SHI_GAOJUN_TEACHER_SCOPE_KEY ? (
-          activeRoom ? <PythonCollabPanel roomId={activeRoom.id} me={me} codingEditors={codingEditorsByRoom[activeRoom.id] || []} onEditingChange={setCodingEditorPresence} onJoinCollaboration={joinCodingCollaboration} onLeaveCollaboration={leaveCodingCollaboration} onCollaborationUpdate={sendCodingCollaborationUpdate} onCollaborationAwareness={sendCodingCollaborationAwareness} onCollaborationOutputClear={clearCodingCollaborationOutput} subscribeToCollaboration={subscribeCodingCollaboration} /> : <aside className="party-agent-column" />
+          activeRoom ? <PythonCollabPanel roomId={activeRoom.id} me={me} codingEditors={codingEditorsByRoom[activeRoom.id] || []} onEditingChange={setCodingEditorPresence} onJoinCollaboration={joinCodingCollaboration} onLeaveCollaboration={leaveCodingCollaboration} onCollaborationUpdate={sendCodingCollaborationUpdate} onCollaborationAwareness={sendCodingCollaborationAwareness} onCollaborationOutputClear={clearCodingCollaborationOutput} onAskAiAboutOutput={handleAskAiAboutPythonOutput} subscribeToCollaboration={subscribeCodingCollaboration} /> : <aside className="party-agent-column" />
         ) : <aside className="party-agent-column" aria-label="派Agent">
           <div className={`party-agent-panel${partyAgentAccessBlocked ? " is-access-blocked" : ""}`}>
             <div className="party-agent-panel-head">
@@ -4574,6 +4444,55 @@ export default function PartyChatDesktopPage({
           </div>
         </aside>}
       </div>
+
+      {showPartyGuide ? (
+        <div className="modal-overlay" role="presentation" onClick={() => setShowPartyGuide(false)}>
+          <section
+            className="group-modal party-guide-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="party-guide-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="party-guide-head">
+              <div>
+                <p className="party-guide-eyebrow">派协作使用说明</p>
+                <h3 id="party-guide-title" className="group-modal-title">从协作到完成任务</h3>
+              </div>
+              <button
+                type="button"
+                className="party-guide-close-btn"
+                aria-label="关闭使用说明"
+                title="关闭"
+                onClick={() => setShowPartyGuide(false)}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <ol className="party-guide-list">
+              {PARTY_GUIDE_ITEMS.map(([title, description], index) => (
+                <li key={title}>
+                  <span className="party-guide-step">{index + 1}</span>
+                  <div>
+                    <strong>{title}</strong>
+                    <p>{description}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            <div className="group-modal-actions">
+              <button
+                type="button"
+                className="group-modal-btn group-modal-btn-primary"
+                autoFocus
+                onClick={() => setShowPartyGuide(false)}
+              >
+                我知道了
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {showCreateRoomModal ? (
         <div className="modal-overlay" role="presentation" onClick={closeCreateRoomModal}>
@@ -5367,13 +5286,6 @@ function formatFileSize(bytes) {
   return `${gb.toFixed(gb >= 100 ? 0 : 1)} GB`;
 }
 
-function extractPartyMessageForwardText(message) {
-  if (!message || String(message?.type || "").trim().toLowerCase() !== "text") return "";
-  const markdownText = decodePartyForwardMarkdown(message?.content);
-  const rawText = markdownText !== null ? markdownText : String(message?.content || "");
-  return rawText.replace(/\s+/g, " ").trim();
-}
-
 function createReplyTarget(message) {
   if (!message) return null;
   const previewText = message.type === "image"
@@ -5702,16 +5614,16 @@ function isRemovedPartyAgentId(value) {
   return sanitizeStoredPartyAgentId(value) === REMOVED_PARTY_AGENT_E_ID;
 }
 
-function sanitizePartyProvider(value, fallback = "openrouter") {
+function sanitizePartyProvider(value, fallback = "packycode") {
   const key = String(value || "")
     .trim()
     .toLowerCase();
   if (
-    key === "openrouter" ||
     key === "packycode" ||
     key === "packy" ||
     key === "volcengine" ||
-    key === "aliyun"
+    key === "aliyun" ||
+    key === "reserved"
   ) {
     return key === "packy" ? "packycode" : key;
   }
@@ -5756,7 +5668,7 @@ function resolvePartyAgentProvider(agentId, runtimeConfigs, providerDefaults) {
     .trim()
     .toLowerCase();
   if (runtimeProvider && runtimeProvider !== "inherit") {
-    return sanitizePartyProvider(runtimeProvider, "openrouter");
+    return sanitizePartyProvider(runtimeProvider, "packycode");
   }
   return sanitizePartyProvider(
     providerDefaults?.[safeAgentId],

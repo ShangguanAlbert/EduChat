@@ -18,6 +18,7 @@ import {
   normalizeFinalTestSession,
   resolveFinalTestVariant,
 } from "../../shared/finalTestState.js";
+import { sanitizeGroupChatAiConfig } from "../services/group-chat-ai-config.js";
 
 export function registerAuthUserClassroomRoutes(app, deps) {
   function readSignedUrlExpiryText(url) {
@@ -105,10 +106,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     GENERATED_IMAGE_HISTORY_TTL_MS,
     GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES,
     GENERATED_IMAGE_HISTORY_FETCH_TIMEOUT_MS,
-    GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER,
-    GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER,
     GROUP_CHAT_MAX_MEMBERS_PER_ROOM,
-    GROUP_CHAT_MAX_ROOMS_PER_BOOTSTRAP,
     GROUP_CHAT_DEFAULT_MESSAGES_LIMIT,
     GROUP_CHAT_MAX_MESSAGES_LIMIT,
     GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES,
@@ -173,10 +171,6 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     EXCEL_EXTENSIONS,
     PDF_EXTENSIONS,
     VIDEO_EXTENSIONS,
-    OPENROUTER_VIDEO_EXTENSIONS,
-    OPENROUTER_AUDIO_FORMATS,
-    OPENROUTER_AUDIO_EXTENSIONS,
-    OPENROUTER_AUDIO_MIME_TO_FORMAT,
     studentHomeworkUpload,
     teacherClassroomFileUpload,
     AuthUser,
@@ -2349,6 +2343,13 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       req.body?.runtimeConfigs,
     );
     const previous = await readAdminAgentConfig();
+    const hasGroupChatAiConfig = Object.prototype.hasOwnProperty.call(
+      req.body || {},
+      "groupChatAiConfig",
+    );
+    const groupChatAiConfig = hasGroupChatAiConfig
+      ? sanitizeGroupChatAiConfig(req.body?.groupChatAiConfig)
+      : previous.groupChatAiConfig;
     const hasClassroomToggle = Object.prototype.hasOwnProperty.call(
       req.body || {},
       "shangguanClassTaskProductImprovementEnabled",
@@ -2364,6 +2365,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
           key: ADMIN_CONFIG_KEY,
           agentSystemPrompts: prompts,
           agentRuntimeConfigs: runtimeConfigs,
+          groupChatAiConfig,
           shangguanClassTaskProductImprovementEnabled,
         },
       },
@@ -2906,7 +2908,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
 
       function sanitizeHomeworkExportSegment(value, fallback = "unknown") {
         const safe = String(value || "")
-          .replace(/[\u0000-\u001f\u007f]/g, "")
+          .replace(/\p{Cc}/gu, "")
           .replace(/[\\/:*?"<>|]/g, "_")
           .replace(/\s+/g, " ")
           .trim()

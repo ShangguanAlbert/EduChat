@@ -482,7 +482,10 @@ export default function NoteEditor({
   }, [tagsExpanded]);
 
   useEffect(() => {
-    setRichHeadings([]);
+    const frameId = window.requestAnimationFrame(() => {
+      setRichHeadings([]);
+    });
+    return () => window.cancelAnimationFrame(frameId);
   }, [note?.id]);
 
   function updateSettings(patch) {
@@ -525,8 +528,6 @@ export default function NoteEditor({
       await navigator.clipboard.writeText(payload);
       setLocalMessage("已复制当前笔记内容。");
       setMenuOpen(false);
-      setMoreSettingsOpen(false);
-      setFontMenuOpen(false);
     } catch {
       setLocalMessage("复制失败，请检查浏览器权限。");
     }

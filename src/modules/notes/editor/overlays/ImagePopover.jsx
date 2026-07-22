@@ -83,19 +83,26 @@ export default function ImagePopover({
     let frameId = 0;
     let timeoutId = 0;
 
-    if (visible) {
-      setShouldRender(true);
-      setAnimationState("entering");
+    if (visible && !shouldRender) {
       frameId = window.requestAnimationFrame(() => {
-        setAnimationState("entered");
+        setShouldRender(true);
+      });
+    } else if (visible) {
+      frameId = window.requestAnimationFrame(() => {
+        setAnimationState("entering");
+        frameId = window.requestAnimationFrame(() => {
+          setAnimationState("entered");
+        });
       });
     } else if (shouldRender) {
-      setAnimationState("leaving");
-      timeoutId = window.setTimeout(() => {
-        setShouldRender(false);
-        setAnimationState("exited");
-        setResolvedStyle(null);
-      }, EXIT_ANIMATION_MS);
+      frameId = window.requestAnimationFrame(() => {
+        setAnimationState("leaving");
+        timeoutId = window.setTimeout(() => {
+          setShouldRender(false);
+          setAnimationState("exited");
+          setResolvedStyle(null);
+        }, EXIT_ANIMATION_MS);
+      });
     }
 
     return () => {

@@ -128,14 +128,14 @@ const depsDouble = {
   },
 };
 
-runCase("MiniMax provider 默认端点与错误映射正确", () => {
+runCase("MiniMax 音乐 Provider 默认端点与错误映射正确", () => {
   const config = buildMiniMaxProviderConfig({
     env: {
       MINIMAX_API_KEY: "mm-key",
     },
   });
 
-  assert.equal(config.chatEndpoint, "https://api.minimaxi.com/v1/chat/completions");
+  assert.equal(config.chatEndpoint, undefined);
   assert.equal(config.musicEndpoint, "https://api.minimaxi.com/v1/music_generation");
   assert.equal(
     formatMiniMaxUpstreamError({ status: 400, code: "1008" }),

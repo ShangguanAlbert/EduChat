@@ -1,4 +1,4 @@
-import { Download, Play, RotateCcw, SquareTerminal } from "lucide-react";
+import { Copy, Download, MessageCircleQuestion, Play, RotateCcw, SquareTerminal } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { python } from "@codemirror/lang-python";
@@ -75,6 +75,7 @@ export default function PythonCollabPanel({
   onCollaborationUpdate,
   onCollaborationAwareness,
   onCollaborationOutputClear,
+  onAskAiAboutOutput,
   subscribeToCollaboration,
 }) {
   const [output, setOutput] = useState("");
@@ -82,9 +83,12 @@ export default function PythonCollabPanel({
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(true);
   const [editorSession, setEditorSession] = useState(null);
+  const [outputCopyStatus, setOutputCopyStatus] = useState("");
+  const [askingAiAboutOutput, setAskingAiAboutOutput] = useState(false);
   const editingRef = useRef(false);
   const sessionRef = useRef(null);
   const stdinSyncTimerRef = useRef(0);
+  const outputCopyStatusTimerRef = useRef(0);
 
   const setEditingPresence = useCallback((active) => {
     if (editingRef.current === active) return;
@@ -171,6 +175,10 @@ export default function PythonCollabPanel({
         window.clearTimeout(stdinSyncTimerRef.current);
         stdinSyncTimerRef.current = 0;
       }
+      if (outputCopyStatusTimerRef.current) {
+        window.clearTimeout(outputCopyStatusTimerRef.current);
+        outputCopyStatusTimerRef.current = 0;
+      }
       awareness.setLocalState(null);
       awareness.off("update", handleAwarenessUpdate);
       doc.off("update", handleDocumentUpdate);
@@ -232,6 +240,43 @@ export default function PythonCollabPanel({
     onCollaborationOutputClear?.(roomId);
   }
 
+  function showOutputCopyStatus(message) {
+    setOutputCopyStatus(message);
+    if (outputCopyStatusTimerRef.current) {
+      window.clearTimeout(outputCopyStatusTimerRef.current);
+    }
+    outputCopyStatusTimerRef.current = window.setTimeout(() => {
+      setOutputCopyStatus("");
+      outputCopyStatusTimerRef.current = 0;
+    }, 1800);
+  }
+
+  async function copyOutput() {
+    const content = output.trim();
+    if (!content) return;
+    if (!navigator.clipboard?.writeText) {
+      showOutputCopyStatus("当前浏览器不支持复制");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(content);
+      showOutputCopyStatus("已复制");
+    } catch {
+      showOutputCopyStatus("复制失败");
+    }
+  }
+
+  async function askAiAboutOutput() {
+    const content = output.trim();
+    if (!content || askingAiAboutOutput) return;
+    setAskingAiAboutOutput(true);
+    try {
+      await onAskAiAboutOutput?.(content);
+    } finally {
+      setAskingAiAboutOutput(false);
+    }
+  }
+
   function downloadCode() {
     const code = sessionRef.current?.text.toString() || "";
     const url = URL.createObjectURL(new Blob([code], { type: "text/x-python;charset=utf-8" }));
@@ -242,9 +287,9 @@ export default function PythonCollabPanel({
     URL.revokeObjectURL(url);
   }
 
-  return <aside className="party-coding-column" aria-label="Python 协作编程">
+  return <aside className="party-coding-column" aria-label="Python编程区">
     <div className="party-coding-head">
-      <div><strong>Python 协作编程</strong><span>{loading ? "正在连接协作代码" : "多人实时协作"}</span></div>
+      <div><strong>Python编程区</strong></div>
       <div className="party-coding-head-actions">
         {codingEditors.length > 0 ? <div className="party-coding-editor-avatars" aria-label={`${codingEditors.map((editor) => editor.name).join("、")}正在编辑`}>
           {codingEditors.slice(0, 3).map((editor) => <span className="party-coding-editor-avatar" key={editor.userId} title={`${editor.name}正在编辑`}>{getEditorInitial(editor.name)}</span>)}
@@ -269,8 +314,17 @@ export default function PythonCollabPanel({
       /> : <div className="party-code-editor-loading">正在同步共享代码…</div>}
     </div>
     <label className="party-coding-stdin">标准输入<textarea value={stdin} onChange={handleStdinChange} placeholder="可选：每行一个输入" /></label>
-    <div className="party-coding-sync-tip">代码、标准输入、运行状态和控制台结果都会同步给全派成员。</div>
-    <div className="party-coding-output-head"><SquareTerminal size={15} />控制台 <button onClick={clearOutput} disabled={running}><RotateCcw size={13} />清空</button></div>
-    <pre className="party-coding-output">{output || "运行结果会显示在这里。"}</pre>
+    <div className="party-coding-output-head">
+      <span className="party-coding-output-title"><SquareTerminal size={15} />控制台</span>
+      <div className="party-coding-output-actions">
+        <span className="party-coding-output-status" role="status" aria-live="polite">{outputCopyStatus}</span>
+        <button onClick={() => void copyOutput()} disabled={!output.trim()} title="复制控制台内容"><Copy size={13} />复制</button>
+        <button onClick={() => void askAiAboutOutput()} disabled={!output.trim() || running || askingAiAboutOutput} title="将控制台内容发到群聊，请 AI 解释"><MessageCircleQuestion size={13} />{askingAiAboutOutput ? "发送中" : "问 AI"}</button>
+        <button onClick={clearOutput} disabled={running}><RotateCcw size={13} />清空</button>
+      </div>
+    </div>
+    <div className="party-coding-output-resizable">
+      <pre className="party-coding-output">{output || "运行结果会显示在这里。"}</pre>
+    </div>
   </aside>;
 }

@@ -8,8 +8,8 @@ export const AGENT_META = {
   B: {
     name: "Agent B",
     shortName: "Agent B",
-    modelLabel: "MiniMax-M2.7",
-    summary: "MiniMax 原生文本模型",
+    modelLabel: "预留中",
+    summary: "预留后续对话 Provider 接入",
   },
   C: {
     name: "Agent C",

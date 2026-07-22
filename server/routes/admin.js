@@ -71,10 +71,7 @@ export function registerAdminRoutes(app, deps) {
     GENERATED_IMAGE_HISTORY_TTL_MS,
     GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES,
     GENERATED_IMAGE_HISTORY_FETCH_TIMEOUT_MS,
-    GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER,
-    GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER,
     GROUP_CHAT_MAX_MEMBERS_PER_ROOM,
-    GROUP_CHAT_MAX_ROOMS_PER_BOOTSTRAP,
     GROUP_CHAT_DEFAULT_MESSAGES_LIMIT,
     GROUP_CHAT_MAX_MESSAGES_LIMIT,
     GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES,
@@ -139,10 +136,6 @@ export function registerAdminRoutes(app, deps) {
     EXCEL_EXTENSIONS,
     PDF_EXTENSIONS,
     VIDEO_EXTENSIONS,
-    OPENROUTER_VIDEO_EXTENSIONS,
-    OPENROUTER_AUDIO_FORMATS,
-    OPENROUTER_AUDIO_EXTENSIONS,
-    OPENROUTER_AUDIO_MIME_TO_FORMAT,
     AuthUser,
     ChatState,
     UploadedFileContext,
@@ -1558,52 +1551,6 @@ export function registerAdminRoutes(app, deps) {
       const ownerUser = usersById.get(ownerUserId);
       if (!ownerUser) {
         res.status(400).json({ error: "群主账号不存在，请刷新后重试。" });
-        return;
-      }
-
-      const [ownerCreatedCount, joinedCountRows] = await Promise.all([
-        GroupChatRoom.countDocuments({ ownerUserId }),
-        Promise.all(
-          finalMemberUserIds.map(async (memberUserId) => ({
-            userId: memberUserId,
-            count: await GroupChatRoom.countDocuments({
-              memberUserIds: memberUserId,
-            }),
-          })),
-        ),
-      ]);
-      if (
-        sanitizeText(ownerUser?.role, "user", 20).toLowerCase() !== "admin" &&
-        ownerCreatedCount >= GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER
-      ) {
-        const ownerProfile = sanitizeUserProfile(ownerUser?.profile);
-        const ownerDisplayName = sanitizeText(
-          ownerProfile.name || ownerUser?.username,
-          ownerUser?.username || "该用户",
-          64,
-        );
-        res.status(400).json({
-          error: `群主「${ownerDisplayName}」已达到可创建群聊上限（${GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER} 个）。`,
-        });
-        return;
-      }
-      const exceededMember = joinedCountRows.find(
-        (item) =>
-          Number(item?.count || 0) >= GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER,
-      );
-      if (exceededMember) {
-        const exceededUser = usersById.get(
-          sanitizeId(exceededMember?.userId, ""),
-        );
-        const profile = sanitizeUserProfile(exceededUser?.profile);
-        const displayName = sanitizeText(
-          profile.name || exceededUser?.username,
-          exceededUser?.username || "该成员",
-          64,
-        );
-        res.status(400).json({
-          error: `成员「${displayName}」已达到可加入群聊上限（${GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER} 个）。`,
-        });
         return;
       }
 

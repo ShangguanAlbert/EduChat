@@ -114,6 +114,7 @@ export default function NotesPage() {
   const draftRef = useRef(createDraftSnapshot());
   const lastSavedSnapshotRef = useRef(null);
   const savePromiseRef = useRef(null);
+  const flushPendingSaveRef = useRef(null);
   const imageMigrationTriggeredRef = useRef(false);
   const [pageEntered, setPageEntered] = useState(false);
 
@@ -193,7 +194,7 @@ export default function NotesPage() {
     if (areSnapshotsEqual(draftRef.current, lastSavedSnapshotRef.current)) return;
     autosaveTimerRef.current = window.setTimeout(() => {
       if (!savePromiseRef.current) {
-        void flushPendingSave();
+        void flushPendingSaveRef.current?.();
       }
     }, AUTOSAVE_DELAY);
   }, []);
@@ -268,6 +269,13 @@ export default function NotesPage() {
     if (areSnapshotsEqual(draftRef.current, lastSavedSnapshotRef.current)) return true;
     return performSave();
   }, [performSave]);
+
+  useEffect(() => {
+    flushPendingSaveRef.current = flushPendingSave;
+    return () => {
+      flushPendingSaveRef.current = null;
+    };
+  }, [flushPendingSave]);
 
   const openNote = useCallback(
     async (noteId = "", { skipFlush = false } = {}) => {

@@ -37,6 +37,8 @@
 - 修改 `shared/` 契约时，优先补 `tests/contracts/`
 - 修改 `server/platform/` 或路由过滤逻辑时，优先补对应平台或服务端测试
 - 修改聊天或图片模块时，先找现有相关测试文件，优先扩展而不是重复新建相似测试
+- 群聊 AI 配置、提示词边界、附件解析、Python 运行审计与队列行为优先放入 `tests/server/`；测试不得使用真实 Provider Key、Redis、MongoDB、OSS 或学生账号名单
+- 修改 `scripts/dev-runtime.mjs` 时，同步更新 `tests/scripts/dev-runtime.test.js`，确保 `npm run dev` 仍启动 Python Runner、服务端、群聊 AI worker 和 Vite
 
 ## 结果要求
 

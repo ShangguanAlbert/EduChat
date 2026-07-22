@@ -16,9 +16,6 @@ import { tmpdir } from "node:os";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import mammoth from "mammoth";
-import XLSX from "xlsx";
-import { PDFParse } from "pdf-parse";
 import mongoose from "mongoose";
 import OSS from "ali-oss";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
@@ -49,7 +46,6 @@ import {
   shouldUseAliyunDashScopeMultimodalEndpoint,
 } from "../providers/aliyun/index.js";
 import {
-  buildMiniMaxChatPayload,
   buildMiniMaxProviderConfig,
   formatMiniMaxUpstreamError,
 } from "../providers/minimax/index.js";
@@ -76,6 +72,36 @@ import {
   createReasoningTagStreamResolver,
   resolveReasoningTaggedText,
 } from "../../shared/reasoningTags.js";
+import {
+  EXCEL_EXTENSIONS,
+  EXCEL_PREVIEW_MAX_COLS,
+  EXCEL_PREVIEW_MAX_ROWS,
+  EXCEL_PREVIEW_MAX_SHEETS,
+  MAX_PARSED_CHARS_PER_FILE,
+  PDF_EXTENSIONS,
+  TEXT_EXTENSIONS,
+  WORD_EXTENSIONS,
+  PDFParse,
+  XLSX,
+  clipText,
+  decodeTextFile,
+  getFileExtension,
+  isExcelFile,
+  isPdfFile,
+  isProbablyBinary,
+  isTextLikeFile,
+  isWordFile,
+  normalizeMultipartFileName,
+  normalizeRow,
+  parseDocx,
+  parseExcel,
+  parseFileContent,
+  parsePdf,
+} from "../platform/files/content-parser.js";
+import {
+  DEFAULT_GROUP_CHAT_AI_CONFIG,
+  sanitizeGroupChatAiConfig,
+} from "./group-chat-ai-config.js";
 
 dotenv.config();
 
@@ -101,11 +127,7 @@ const CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS = 45 * 60 * 1000;
 const CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS = 320;
 const CHAT_PREPARED_ATTACHMENT_MAX_REFS = MAX_FILES;
 const MAX_IMAGE_GENERATION_INPUT_FILES = 14;
-const MAX_PARSED_CHARS_PER_FILE = 12000;
 const ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS = 48000;
-const EXCEL_PREVIEW_MAX_ROWS = 120;
-const EXCEL_PREVIEW_MAX_COLS = 30;
-const EXCEL_PREVIEW_MAX_SHEETS = 8;
 const PASSWORD_MIN_LENGTH = 6;
 const AUTH_TOKEN_TTL_SECONDS = 12 * 60 * 60;
 const ADMIN_TOKEN_TTL_SECONDS = 2 * 60 * 60;
@@ -180,10 +202,7 @@ const GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const GENERATED_IMAGE_HISTORY_FETCH_TIMEOUT_MS = 15 * 1000;
 const GENERATED_IMAGE_THUMBNAIL_MAX_EDGE = 360;
 const GENERATED_IMAGE_THUMBNAIL_MIME_TYPE = "image/webp";
-const GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER = 2;
-const GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER = 8;
 const GROUP_CHAT_MAX_MEMBERS_PER_ROOM = 10;
-const GROUP_CHAT_MAX_ROOMS_PER_BOOTSTRAP = 16;
 const GROUP_CHAT_DEFAULT_MESSAGES_LIMIT = 80;
 const GROUP_CHAT_MAX_MESSAGES_LIMIT = 200;
 const GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES = 6 * 1024 * 1024;
@@ -286,9 +305,9 @@ if (!groupChatOssClient) {
 const AGENT_D_FIXED_PROVIDER = "aliyun";
 const AGENT_D_FIXED_MODEL = "qwen3.5-plus";
 const AGENT_D_FIXED_MAX_OUTPUT_TOKENS = 65536;
-const AGENT_B_FIXED_PROVIDER = "minimax";
-const AGENT_B_FIXED_MODEL = "MiniMax-M2.7";
-const AGENT_B_FIXED_PROTOCOL = "chat";
+const AGENT_B_FIXED_PROVIDER = "reserved";
+const AGENT_B_FIXED_MODEL = "reserved";
+const AGENT_B_FIXED_PROTOCOL = "reserved";
 const AGENT_A_FIXED_PROVIDER = "packycode";
 const AGENT_A_FIXED_MODEL = "gpt-5.4";
 const AGENT_A_FIXED_PROTOCOL = "chat";
@@ -367,13 +386,6 @@ const DEFAULT_AGENT_RUNTIME_CONFIG = Object.freeze({
   aliyunResponsesEnableWebExtractor: false,
   aliyunResponsesEnableCodeInterpreter: false,
   aliyunFileProcessMode: "local_parse",
-  openrouterPreset: "",
-  openrouterIncludeReasoning: false,
-  openrouterUseWebPlugin: false,
-  openrouterWebPluginEngine: "auto",
-  openrouterWebPluginMaxResults: 5,
-  openrouterUseResponseHealing: false,
-  openrouterPdfEngine: "auto",
 });
 const AGENT_C_ALWAYS_ON_WEB_SEARCH_MODEL_ALIASES = new Set([
   "doubao-seed-2-0-pro-260215",
@@ -404,10 +416,10 @@ const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
     provider: AGENT_B_FIXED_PROVIDER,
     model: AGENT_B_FIXED_MODEL,
     protocol: AGENT_B_FIXED_PROTOCOL,
-    contextWindowTokens: 204800,
-    maxInputTokens: 204800,
-    maxOutputTokens: 128000,
-    maxReasoningTokens: 128000,
+    contextWindowTokens: 128000,
+    maxInputTokens: 96000,
+    maxOutputTokens: 4096,
+    maxReasoningTokens: 0,
   }),
   C: Object.freeze({
     provider: AGENT_C_FIXED_PROVIDER,
@@ -844,62 +856,9 @@ const scryptAsync = promisify(crypto.scrypt);
 const execFileAsync = promisify(execFile);
 const CRC32_TABLE = createCrc32Table();
 
-const TEXT_EXTENSIONS = new Set([
-  "txt",
-  "md",
-  "markdown",
-  "c",
-  "h",
-  "cc",
-  "hh",
-  "cpp",
-  "hpp",
-  "cxx",
-  "hxx",
-  "py",
-  "python",
-  "xml",
-  "json",
-  "yaml",
-  "yml",
-  "js",
-  "jsx",
-  "ts",
-  "tsx",
-  "java",
-  "go",
-  "rs",
-  "sh",
-  "bash",
-  "zsh",
-  "sql",
-  "html",
-  "css",
-  "scss",
-  "less",
-  "csv",
-  "tsv",
-  "toml",
-  "ini",
-  "log",
-  "tex",
-  "r",
-  "rb",
-  "php",
-  "swift",
-  "kt",
-  "m",
-  "mm",
-  "vue",
-  "svelte",
-]);
-
-const WORD_EXTENSIONS = new Set(["docx", "doc"]);
-const EXCEL_EXTENSIONS = new Set(["xlsx", "xls"]);
-const PDF_EXTENSIONS = new Set(["pdf"]);
 const VIDEO_EXTENSIONS = new Set(["mp4", "avi", "mov"]);
-const OPENROUTER_VIDEO_EXTENSIONS = new Set(["mp4", "mpeg", "mov", "webm"]);
-const OPENROUTER_AUDIO_FORMATS = new Set([
+const CHAT_VIDEO_EXTENSIONS = new Set(["mp4", "mpeg", "mov", "webm"]);
+const CHAT_AUDIO_FORMATS = new Set([
   "wav",
   "mp3",
   "aiff",
@@ -910,7 +869,7 @@ const OPENROUTER_AUDIO_FORMATS = new Set([
   "pcm16",
   "pcm24",
 ]);
-const OPENROUTER_AUDIO_EXTENSIONS = new Set([
+const CHAT_AUDIO_EXTENSIONS = new Set([
   "wav",
   "mp3",
   "aiff",
@@ -921,7 +880,7 @@ const OPENROUTER_AUDIO_EXTENSIONS = new Set([
   "pcm16",
   "pcm24",
 ]);
-const OPENROUTER_AUDIO_MIME_TO_FORMAT = Object.freeze({
+const CHAT_AUDIO_MIME_TO_FORMAT = Object.freeze({
   "audio/wav": "wav",
   "audio/x-wav": "wav",
   "audio/wave": "wav",
@@ -1346,6 +1305,8 @@ const groupChatAnnouncementAttachmentSchema = new mongoose.Schema(
     fileName: { type: String, default: "group-file.bin" },
     mimeType: { type: String, default: "application/octet-stream" },
     size: { type: Number, default: 0 },
+    aiContextText: { type: String, default: "" },
+    aiContextHint: { type: String, default: "" },
   },
   { _id: false },
 );
@@ -1725,34 +1686,6 @@ const runtimeConfigSchema = new mongoose.Schema(
       type: String,
       default: DEFAULT_AGENT_RUNTIME_CONFIG.aliyunFileProcessMode,
     },
-    openrouterPreset: {
-      type: String,
-      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterPreset,
-    },
-    openrouterIncludeReasoning: {
-      type: Boolean,
-      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterIncludeReasoning,
-    },
-    openrouterUseWebPlugin: {
-      type: Boolean,
-      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterUseWebPlugin,
-    },
-    openrouterWebPluginEngine: {
-      type: String,
-      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterWebPluginEngine,
-    },
-    openrouterWebPluginMaxResults: {
-      type: Number,
-      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterWebPluginMaxResults,
-    },
-    openrouterUseResponseHealing: {
-      type: Boolean,
-      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterUseResponseHealing,
-    },
-    openrouterPdfEngine: {
-      type: String,
-      default: DEFAULT_AGENT_RUNTIME_CONFIG.openrouterPdfEngine,
-    },
   },
   { _id: false },
 );
@@ -1838,6 +1771,30 @@ const adminConfigSchema = new mongoose.Schema(
         { _id: false },
       ),
       default: () => createDefaultAgentRuntimeConfigMap(),
+    },
+    groupChatAiConfig: {
+      type: new mongoose.Schema(
+        {
+          provider: {
+            type: String,
+            default: DEFAULT_GROUP_CHAT_AI_CONFIG.provider,
+          },
+          model: {
+            type: String,
+            default: DEFAULT_GROUP_CHAT_AI_CONFIG.model,
+          },
+          protocol: {
+            type: String,
+            default: DEFAULT_GROUP_CHAT_AI_CONFIG.protocol,
+          },
+          systemPrompt: {
+            type: String,
+            default: DEFAULT_GROUP_CHAT_AI_CONFIG.systemPrompt,
+          },
+        },
+        { _id: false },
+      ),
+      default: () => ({ ...DEFAULT_GROUP_CHAT_AI_CONFIG }),
     },
     shangguanClassTaskProductImprovementEnabled: {
       type: Boolean,
@@ -2098,7 +2055,7 @@ function normalizeMessageContent(content) {
     }
 
     if (type === "file") {
-      const filePayload = normalizeOpenRouterFilePart(part);
+      const filePayload = normalizeChatFilePart(part);
       if (filePayload) {
         parts.push({ type: "file", file: filePayload });
       }
@@ -2106,7 +2063,7 @@ function normalizeMessageContent(content) {
     }
 
     if (type === "input_audio") {
-      const audioPayload = normalizeOpenRouterAudioPart(part);
+      const audioPayload = normalizeChatAudioPart(part);
       if (audioPayload) {
         parts.push({ type: "input_audio", input_audio: audioPayload });
       }
@@ -2220,14 +2177,14 @@ function cloneNormalizedMessageContent(content) {
       }
 
       if (type === "file") {
-        const filePayload = normalizeOpenRouterFilePart(part);
+        const filePayload = normalizeChatFilePart(part);
         if (filePayload) {
           return { type: "file", file: filePayload };
         }
       }
 
       if (type === "input_audio") {
-        const audioPayload = normalizeOpenRouterAudioPart(part);
+        const audioPayload = normalizeChatAudioPart(part);
         if (audioPayload) {
           return { type: "input_audio", input_audio: audioPayload };
         }
@@ -3964,7 +3921,7 @@ async function attachFilesToLatestUserMessage(
   messages,
   files,
   {
-    provider = "openrouter",
+    provider = "packycode",
     protocol = "chat",
     ossFiles = [],
     userId = "",
@@ -3974,11 +3931,6 @@ async function attachFilesToLatestUserMessage(
 ) {
   if (!files || files.length === 0) return null;
 
-  if (provider === "openrouter" && protocol === "chat") {
-    return attachFilesToLatestUserMessageForOpenRouter(messages, files, {
-      ossFiles,
-    });
-  }
   if (provider === "packycode" && protocol === "chat") {
     return attachFilesToLatestUserMessageForPacky(messages, files, {
       ossFiles,
@@ -4195,11 +4147,11 @@ async function hydratePackyImagePartsToInlineData(content, ossFiles = []) {
   return next;
 }
 
-function resolveOpenRouterAudioFormat({ mime, ext }) {
+function resolveChatAudioFormat({ mime, ext }) {
   const normalizedExt = String(ext || "")
     .trim()
     .toLowerCase();
-  if (OPENROUTER_AUDIO_EXTENSIONS.has(normalizedExt)) {
+  if (CHAT_AUDIO_EXTENSIONS.has(normalizedExt)) {
     return normalizedExt;
   }
 
@@ -4207,19 +4159,19 @@ function resolveOpenRouterAudioFormat({ mime, ext }) {
     .trim()
     .toLowerCase();
   if (!normalizedMime) return "";
-  const mapped = OPENROUTER_AUDIO_MIME_TO_FORMAT[normalizedMime];
+  const mapped = CHAT_AUDIO_MIME_TO_FORMAT[normalizedMime];
   if (mapped) return mapped;
   if (!normalizedMime.startsWith("audio/")) return "";
 
   const subtype = normalizedMime.split("/")[1]?.split(";")[0] || "";
   if (!subtype) return "";
-  if (OPENROUTER_AUDIO_FORMATS.has(subtype)) return subtype;
+  if (CHAT_AUDIO_FORMATS.has(subtype)) return subtype;
   if (subtype === "x-wav") return "wav";
   if (subtype === "mp4") return "m4a";
   return "";
 }
 
-function resolveOpenRouterVideoMime({ mime, ext }) {
+function resolveChatVideoMime({ mime, ext }) {
   const normalizedMime = String(mime || "")
     .trim()
     .toLowerCase();
@@ -4243,70 +4195,6 @@ function resolveOpenRouterVideoMime({ mime, ext }) {
   if (normalizedExt === "mov") return "video/mov";
   if (normalizedExt === "webm") return "video/webm";
   return "";
-}
-
-async function buildOpenRouterFileInputPart(file, { ossFile = null } = {}) {
-  const safeBuffer = Buffer.isBuffer(file?.buffer)
-    ? file.buffer
-    : Buffer.from([]);
-  if (safeBuffer.length === 0) return null;
-
-  const mime = String(file?.mimetype || "")
-    .trim()
-    .toLowerCase();
-  const ext = getFileExtension(file?.originalname);
-  const safeName = sanitizeText(file?.originalname, "upload.bin", 180);
-
-  if (mime.startsWith("image/")) {
-    void ossFile;
-    void safeName;
-    const inlineImageUrl = buildDataUrlForBuffer(
-      safeBuffer,
-      mime || "application/octet-stream",
-    );
-    if (!inlineImageUrl) return null;
-    return { type: "image_url", image_url: { url: inlineImageUrl } };
-  }
-
-  if (isPdfFile(ext, mime)) {
-    const fileData = buildDataUrlForBuffer(safeBuffer, "application/pdf");
-    if (!fileData) return null;
-    return {
-      type: "file",
-      file: {
-        filename: safeName || "document.pdf",
-        file_data: fileData,
-      },
-    };
-  }
-
-  const audioFormat = resolveOpenRouterAudioFormat({ mime, ext });
-  if (audioFormat) {
-    return {
-      type: "input_audio",
-      input_audio: {
-        data: safeBuffer.toString("base64"),
-        format: audioFormat,
-      },
-    };
-  }
-
-  const videoMime = resolveOpenRouterVideoMime({ mime, ext });
-  if (
-    videoMime &&
-    OPENROUTER_VIDEO_EXTENSIONS.has(videoMime.replace("video/", ""))
-  ) {
-    const videoUrlFromOss = await resolveAliyunDashScopeAttachmentUrl({
-      ossFile,
-      fallbackFileName: safeName,
-    });
-    const videoUrl =
-      videoUrlFromOss || buildDataUrlForBuffer(safeBuffer, videoMime);
-    if (!videoUrl) return null;
-    return { type: "video_url", video_url: { url: videoUrl } };
-  }
-
-  return null;
 }
 
 function resolveAliyunVideoMime({ mime, ext }) {
@@ -4726,43 +4614,6 @@ async function buildParsedFilePreviewTextPart(
   };
 }
 
-async function attachFilesToLatestUserMessageForOpenRouter(
-  messages,
-  files,
-  { ossFiles = [] } = {},
-) {
-  const msg = resolveLatestUserMessage(messages);
-  if (!msg) return null;
-
-  const parts = buildInitialAttachmentParts(msg.content);
-  const safeOssFiles = Array.isArray(ossFiles) ? ossFiles : [];
-  for (const file of files) {
-    const openRouterPart = await buildOpenRouterFileInputPart(file, {
-      ossFile: resolveUploadedContextOssFileForInputFile(file, safeOssFiles),
-    });
-    if (openRouterPart) {
-      parts.push(openRouterPart);
-      continue;
-    }
-    const mime = String(file?.mimetype || "")
-      .trim()
-      .toLowerCase();
-    if (mime.startsWith("image/")) {
-      throw new Error("图片附件上传到 OSS 失败，请重试。");
-    }
-
-    const fallback = await buildParsedFilePreviewTextPart(file);
-    if (fallback) parts.push(fallback);
-  }
-
-  if (parts.length === 0) return null;
-  msg.content = parts;
-  return {
-    messageId: sanitizeId(msg.id, ""),
-    content: parts,
-  };
-}
-
 async function buildPackyFileInputPart(file, { ossFile = null } = {}) {
   const safeBuffer = Buffer.isBuffer(file?.buffer)
     ? file.buffer
@@ -4787,10 +4638,10 @@ async function buildPackyFileInputPart(file, { ossFile = null } = {}) {
     return { type: "image_url", image_url: { url: inlineImageUrl } };
   }
 
-  const audioFormat = resolveOpenRouterAudioFormat({ mime, ext });
+  const audioFormat = resolveChatAudioFormat({ mime, ext });
   if (audioFormat) return null;
 
-  const videoMime = resolveOpenRouterVideoMime({ mime, ext });
+  const videoMime = resolveChatVideoMime({ mime, ext });
   if (videoMime) return null;
 
   const fileData = buildDataUrlForBuffer(
@@ -4996,7 +4847,6 @@ async function streamAgentResponse({
   );
   const shouldUsePersistentFileContext =
     (provider === "volcengine" && protocol === "responses") ||
-    (provider === "openrouter" && protocol === "chat") ||
     (provider === "packycode" && protocol === "chat") ||
     provider === "aliyun";
   const shouldKeepOnlyLatestAliyunFileContext =
@@ -6143,7 +5993,7 @@ async function streamAgentResponse({
         },
       );
     } else {
-      await pipeOpenRouterSse(upstream, res, reasoning.enabled);
+      await pipeChatCompletionsSse(upstream, res, reasoning.enabled);
     }
     if (smartContextRuntime.enabled && protocol === "responses") {
       const nextResponseId = sanitizeText(responsesResult?.responseId, "", 160);
@@ -7578,16 +7428,6 @@ function buildChatRequestPayload({
   config,
   reasoning,
 }) {
-  if (provider === "minimax") {
-    return buildMiniMaxChatPayload({
-      model,
-      messages,
-      systemPrompt,
-      config,
-      reasoningEnabled: !!reasoning?.enabled,
-    });
-  }
-
   const fixedSampling = isVolcengineFixedSamplingModel(model);
   const finalMessages = [];
   if (systemPrompt) {
@@ -7655,15 +7495,6 @@ function buildChatRequestPayload({
     payload.stream_options = { include_usage: true };
   }
 
-  if (provider === "openrouter") {
-    payload.include_reasoning = !!reasoning.enabled;
-
-    const plugins = buildOpenRouterPlugins({ config });
-    if (plugins.length > 0) {
-      payload.plugins = plugins;
-    }
-  }
-
   return payload;
 }
 
@@ -7695,7 +7526,7 @@ function normalizePackyChatMessageContent(content) {
     }
 
     if (type === "file") {
-      const filePayload = normalizeOpenRouterFilePart(part);
+      const filePayload = normalizeChatFilePart(part);
       if (filePayload?.filename && filePayload?.file_data) {
         parts.push({
           type: "input_file",
@@ -7712,20 +7543,6 @@ function normalizePackyChatMessageContent(content) {
     return parts[0].text;
   }
   return parts;
-}
-
-function buildOpenRouterPlugins({ config }) {
-  const plugins = [];
-
-  const pdfEngine = sanitizeOpenRouterPdfEngine(config?.openrouterPdfEngine);
-  if (pdfEngine !== "auto") {
-    plugins.push({
-      id: "file-parser",
-      pdf: { engine: pdfEngine },
-    });
-  }
-
-  return plugins;
 }
 
 function buildResponsesRequestPayload({
@@ -8250,7 +8067,7 @@ function extractAliyunFileUrl(part) {
   return url || "";
 }
 
-function normalizeOpenRouterFilePart(part) {
+function normalizeChatFilePart(part) {
   const file = part?.file && typeof part.file === "object" ? part.file : {};
   const rawFileData =
     file.file_data ??
@@ -8271,7 +8088,7 @@ function normalizeOpenRouterFilePart(part) {
   return payload;
 }
 
-function normalizeOpenRouterAudioPart(part) {
+function normalizeChatAudioPart(part) {
   const audio =
     part?.input_audio && typeof part.input_audio === "object"
       ? part.input_audio
@@ -8355,16 +8172,17 @@ function resolveRequestProtocol(requestedProtocol, provider, model = "") {
     return { supported: true, value, forced: value !== protocol };
   }
 
-  if (provider === "openrouter") {
-    return { supported: true, value: "chat", forced: protocol !== "chat" };
-  }
-
   if (provider === "packycode") {
     return { supported: true, value: "chat", forced: protocol !== "chat" };
   }
 
-  if (provider === "minimax") {
-    return { supported: true, value: "chat", forced: protocol !== "chat" };
+  if (provider === "reserved") {
+    return {
+      supported: false,
+      value: "reserved",
+      forced: protocol !== "reserved",
+      message: "Agent B 暂未接入对话 Provider，当前仅作为后续扩展占位。",
+    };
   }
 
   return { supported: true, value: "chat", forced: protocol !== "chat" };
@@ -8660,42 +8478,6 @@ function pickRecentUserRounds(messages, maxRounds = 10) {
   return messages.slice(startIdx);
 }
 
-async function parseFileContent(file) {
-  const mime = String(file.mimetype || "").toLowerCase();
-  const ext = getFileExtension(file.originalname);
-
-  if (isWordFile(ext, mime)) {
-    const isDocx = ext === "docx" || mime.includes("wordprocessingml");
-    if (!isDocx) {
-      return {
-        text: "",
-        hint: `${GROUP_CHAT_LOCAL_PARSE_HINT_TEXT}；检测到 .doc（旧版 Word），请另存为 .docx 后再上传。`,
-      };
-    }
-    const text = await parseDocx(file.buffer);
-    return { text, hint: `Word 文档仅解析文字中的文本（.docx）。` };
-  }
-
-  if (isExcelFile(ext, mime)) {
-    const text = parseExcel(file.buffer);
-    return { text, hint: "Excel 表格仅解析文字中的文本（按工作表展开）。" };
-  }
-
-  if (isPdfFile(ext, mime)) {
-    const text = await parsePdf(file.buffer);
-    return { text, hint: "PDF 文本解析结果。" };
-  }
-
-  if (isTextLikeFile(ext, mime, file.buffer)) {
-    return {
-      text: decodeTextFile(file.buffer),
-      hint: "文本/代码文件仅解析文字中的文本。",
-    };
-  }
-
-  return { text: "", hint: `${GROUP_CHAT_LOCAL_PARSE_HINT_TEXT}。` };
-}
-
 function classifyVolcengineFileInputType(file) {
   const mime = String(file?.mimetype || "")
     .trim()
@@ -8915,162 +8697,7 @@ async function sleepMs(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function getFileExtension(filename) {
-  const raw = path.extname(String(filename || "")).toLowerCase();
-  return raw.startsWith(".") ? raw.slice(1) : raw;
-}
-
-function normalizeMultipartFileName(filename) {
-  const raw = String(filename || "").trim();
-  if (!raw) return "";
-
-  try {
-    const repaired = Buffer.from(raw, "latin1").toString("utf8");
-    if (!repaired || repaired.includes("\u0000")) return raw;
-    const roundtrip = Buffer.from(repaired, "utf8").toString("latin1");
-    if (roundtrip === raw) {
-      return repaired;
-    }
-  } catch {
-    return raw;
-  }
-
-  return raw;
-}
-
-function isWordFile(ext, mime) {
-  if (WORD_EXTENSIONS.has(ext)) return true;
-  return mime.includes("wordprocessingml") || mime.includes("msword");
-}
-
-function isExcelFile(ext, mime) {
-  if (EXCEL_EXTENSIONS.has(ext)) return true;
-  return (
-    mime.includes("spreadsheetml") ||
-    mime.includes("excel") ||
-    mime.includes("sheet")
-  );
-}
-
-function isPdfFile(ext, mime) {
-  return PDF_EXTENSIONS.has(ext) || mime.includes("pdf");
-}
-
-function isTextLikeFile(ext, mime, buffer) {
-  if (TEXT_EXTENSIONS.has(ext)) return true;
-  if (
-    mime.startsWith("text/") ||
-    mime.includes("json") ||
-    mime.includes("xml") ||
-    mime.includes("javascript") ||
-    mime.includes("typescript") ||
-    mime.includes("markdown") ||
-    mime.includes("x-python") ||
-    mime.includes("x-c")
-  ) {
-    return !isProbablyBinary(buffer);
-  }
-  return false;
-}
-
-function isProbablyBinary(buffer) {
-  if (!buffer || buffer.length === 0) return false;
-  const sampleSize = Math.min(buffer.length, 2048);
-  let suspicious = 0;
-
-  for (let i = 0; i < sampleSize; i += 1) {
-    const byte = buffer[i];
-    if (byte === 0) suspicious += 3;
-    else if ((byte < 7 || (byte > 14 && byte < 32)) && byte !== 9)
-      suspicious += 1;
-  }
-
-  return suspicious / sampleSize > 0.12;
-}
-
-function decodeTextFile(buffer) {
-  return String(buffer.toString("utf8") || "").replace(/\u0000/g, "");
-}
-
-async function parseDocx(buffer) {
-  const result = await mammoth.extractRawText({ buffer });
-  return String(result?.value || "");
-}
-
-function parseExcel(buffer) {
-  const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
-  const sheetNames = workbook.SheetNames || [];
-  const sections = [];
-
-  for (const name of sheetNames.slice(0, EXCEL_PREVIEW_MAX_SHEETS)) {
-    const sheet = workbook.Sheets[name];
-    const rows = XLSX.utils.sheet_to_json(sheet, {
-      header: 1,
-      raw: false,
-      defval: "",
-    });
-
-    const body = rows
-      .slice(0, EXCEL_PREVIEW_MAX_ROWS)
-      .map((row) => normalizeRow(row))
-      .join("\n");
-
-    const rowOverflow = rows.length > EXCEL_PREVIEW_MAX_ROWS;
-    const sectionLines = [`[工作表: ${name}]`, body || "(空工作表)"];
-    if (rowOverflow) {
-      sectionLines.push(
-        `... 其余 ${rows.length - EXCEL_PREVIEW_MAX_ROWS} 行已省略`,
-      );
-    }
-    sections.push(sectionLines.join("\n"));
-  }
-
-  if (sheetNames.length > EXCEL_PREVIEW_MAX_SHEETS) {
-    sections.push(
-      `... 其余 ${sheetNames.length - EXCEL_PREVIEW_MAX_SHEETS} 个工作表已省略`,
-    );
-  }
-
-  return sections.join("\n\n");
-}
-
-function normalizeRow(row) {
-  if (!Array.isArray(row)) return String(row ?? "");
-  const sliced = row.slice(0, EXCEL_PREVIEW_MAX_COLS).map((cell) =>
-    String(cell ?? "")
-      .replace(/\r?\n/g, " ")
-      .trim(),
-  );
-  let line = sliced.join("\t");
-  if (row.length > EXCEL_PREVIEW_MAX_COLS) {
-    line = `${line}\t...`;
-  }
-  return line;
-}
-
-async function parsePdf(buffer) {
-  const parser = new PDFParse({ data: new Uint8Array(buffer) });
-  try {
-    const result = await parser.getText();
-    return String(result?.text || "");
-  } finally {
-    await parser.destroy();
-  }
-}
-
-function clipText(text, maxChars = MAX_PARSED_CHARS_PER_FILE) {
-  const normalized = String(text || "").trim();
-  if (!normalized) return "";
-  const numeric = Number(maxChars);
-  const safeMax = Number.isFinite(numeric)
-    ? Math.max(200, Math.min(500000, Math.round(numeric)))
-    : MAX_PARSED_CHARS_PER_FILE;
-  if (normalized.length <= safeMax) return normalized;
-  const clipped = normalized.slice(0, safeMax);
-  return `${clipped}\n...（内容过长，已截断）`;
-}
-
-async function pipeOpenRouterSse(upstream, res, reasoningEnabled) {
+async function pipeChatCompletionsSse(upstream, res, reasoningEnabled) {
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
@@ -9095,7 +8722,7 @@ async function pipeOpenRouterSse(upstream, res, reasoningEnabled) {
       return false;
     }
 
-    const streamError = extractOpenRouterStreamErrorMessage(json);
+    const streamError = extractChatCompletionsStreamErrorMessage(json);
     if (streamError) {
       throw new Error(streamError);
     }
@@ -9685,7 +9312,7 @@ function extractResponsesErrorMessage(event) {
   return "Responses API 调用失败";
 }
 
-function extractOpenRouterStreamErrorMessage(payload) {
+function extractChatCompletionsStreamErrorMessage(payload) {
   if (!payload || typeof payload !== "object") return "";
 
   const type = String(payload?.type || "")
@@ -9703,7 +9330,7 @@ function extractOpenRouterStreamErrorMessage(payload) {
       ? errorValue
       : sanitizeText(errorValue?.message, "", 800);
   const topMessage = sanitizeText(payload?.message, "", 800);
-  const message = nestedMessage || topMessage || "OpenRouter 流式调用失败";
+  const message = nestedMessage || topMessage || "Chat Completions 流式调用失败";
   const code = sanitizeText(
     (typeof errorValue === "object" ? errorValue?.code : "") || payload?.code,
     "",
@@ -10545,6 +10172,7 @@ function normalizeAdminConfigDoc(doc) {
     runtimeConfigs: sanitizeAgentRuntimeConfigsPayload(
       doc?.agentRuntimeConfigs,
     ),
+    groupChatAiConfig: sanitizeGroupChatAiConfig(doc?.groupChatAiConfig),
     shangguanClassTaskProductImprovementEnabled: sanitizeRuntimeBoolean(
       doc?.shangguanClassTaskProductImprovementEnabled,
       false,
@@ -10783,32 +10411,6 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
   const aliyunFileProcessMode = sanitizeAliyunFileProcessMode(
     source.aliyunFileProcessMode,
   );
-  const openrouterPreset = sanitizeOpenRouterPreset(source.openrouterPreset);
-  const openrouterIncludeReasoning = sanitizeRuntimeBoolean(
-    source.openrouterIncludeReasoning,
-    defaults.openrouterIncludeReasoning,
-  );
-  const openrouterUseWebPlugin = sanitizeRuntimeBoolean(
-    source.openrouterUseWebPlugin,
-    defaults.openrouterUseWebPlugin,
-  );
-  const openrouterWebPluginEngine = sanitizeOpenRouterWebPluginEngine(
-    source.openrouterWebPluginEngine,
-  );
-  const openrouterWebPluginMaxResults = sanitizeRuntimeInteger(
-    source.openrouterWebPluginMaxResults,
-    defaults.openrouterWebPluginMaxResults,
-    1,
-    10,
-  );
-  const openrouterUseResponseHealing = sanitizeRuntimeBoolean(
-    source.openrouterUseResponseHealing,
-    defaults.openrouterUseResponseHealing,
-  );
-  const openrouterPdfEngine = sanitizeOpenRouterPdfEngine(
-    source.openrouterPdfEngine,
-  );
-
   const next = {
     provider,
     model,
@@ -10849,13 +10451,6 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     aliyunResponsesEnableWebExtractor,
     aliyunResponsesEnableCodeInterpreter,
     aliyunFileProcessMode,
-    openrouterPreset,
-    openrouterIncludeReasoning,
-    openrouterUseWebPlugin,
-    openrouterWebPluginEngine,
-    openrouterWebPluginMaxResults,
-    openrouterUseResponseHealing,
-    openrouterPdfEngine,
   };
 
   if (isVolcengineFixedSamplingModel(modelForMatching)) {
@@ -10922,10 +10517,10 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     next.provider = AGENT_B_FIXED_PROVIDER;
     next.model = AGENT_B_FIXED_MODEL;
     next.protocol = AGENT_B_FIXED_PROTOCOL;
-    next.contextWindowTokens = 204800;
-    next.maxInputTokens = 204800;
-    next.maxOutputTokens = 128000;
-    next.maxReasoningTokens = RUNTIME_MAX_REASONING_TOKENS;
+    next.contextWindowTokens = 128000;
+    next.maxInputTokens = 96000;
+    next.maxOutputTokens = 4096;
+    next.maxReasoningTokens = 0;
   }
 
   if (normalizedAgentId === "D") {
@@ -11081,7 +10676,7 @@ function sanitizeRuntimeProtocol(value) {
     .toLowerCase();
   if (key === "responses" || key === "response") return "responses";
   if (key === "dashscope" || key === "native") return "dashscope";
-  if (key === "minimax" || key === "minimax-native") return "chat";
+  if (key === "reserved") return "reserved";
   return "chat";
 }
 
@@ -11092,10 +10687,9 @@ function sanitizeRuntimeProvider(value) {
   if (!key) return DEFAULT_AGENT_RUNTIME_CONFIG.provider;
   if (key === "inherit" || key === "default" || key === "auto")
     return "inherit";
-  if (key === "openrouter") return "openrouter";
   if (key === "packycode" || key === "packy" || key === "packyapi")
     return "packycode";
-  if (key === "minimax" || key === "minimaxi") return "minimax";
+  if (key === "reserved") return "reserved";
   if (key === "aliyun" || key === "alibaba" || key === "dashscope")
     return "aliyun";
   if (key === "volcengine" || key === "volc" || key === "ark")
@@ -11108,30 +10702,6 @@ function sanitizeRuntimeModel(value) {
     .trim()
     .slice(0, 180);
   return model;
-}
-
-function sanitizeOpenRouterPreset(value) {
-  return String(value || "")
-    .trim()
-    .slice(0, 120);
-}
-
-function sanitizeOpenRouterWebPluginEngine(value) {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "native") return "native";
-  if (key === "exa") return "exa";
-  return "auto";
-}
-
-function sanitizeOpenRouterPdfEngine(value) {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "pdf-text" || key === "mistral-ocr" || key === "native")
-    return key;
-  return "auto";
 }
 
 function sanitizeAliyunSearchStrategy(value) {
@@ -11395,7 +10965,7 @@ function buildPackyEstimatorTextContent(content) {
         return "[视频引用]";
       }
       if (type === "file") {
-        const filePayload = normalizeOpenRouterFilePart(part);
+        const filePayload = normalizeChatFilePart(part);
         const filename = sanitizeText(
           filePayload?.filename || part?.filename || "",
           "附件",
@@ -11442,7 +11012,7 @@ function estimatePackyNonTextPartTokens(content) {
       return total;
     }
 
-    const filePayload = normalizeOpenRouterFilePart(part);
+    const filePayload = normalizeChatFilePart(part);
     const mime = parseDataUrlMime(filePayload?.file_data);
     if (mime.includes("pdf")) return total + 8000;
     if (
@@ -11625,7 +11195,7 @@ function renderPackySummarySourceMessages(messages) {
           return;
         }
         if (type === "file") {
-          const filePayload = normalizeOpenRouterFilePart(part);
+          const filePayload = normalizeChatFilePart(part);
           const filename = sanitizeText(
             filePayload?.filename || part?.filename || "",
             "附件",
@@ -12160,6 +11730,7 @@ function buildAdminAgentSettingsResponse(config) {
     resolvedRuntimeConfigs,
     agentProviderDefaults: buildAgentProviderDefaults(),
     agentModelDefaults: buildAgentModelDefaults(),
+    groupChatAiConfig: sanitizeGroupChatAiConfig(config.groupChatAiConfig),
     shangguanClassTaskProductImprovementEnabled:
       !!config.shangguanClassTaskProductImprovementEnabled,
     updatedAt: config.updatedAt,
@@ -12186,7 +11757,7 @@ function sanitizeSystemPrompt(value) {
   const text = String(value ?? "")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
-    .replace(/\u0000/g, "");
+    .replaceAll("\0", "");
   if (!text.trim()) return "";
   return text.slice(0, SYSTEM_PROMPT_MAX_LENGTH);
 }
@@ -12267,7 +11838,7 @@ function modelRequiresReasoning(model) {
   return false;
 }
 
-function providerSupportsReasoning(provider) {
+function providerSupportsReasoning() {
   return true;
 }
 
@@ -12275,15 +11846,14 @@ function normalizeProvider(value) {
   const key = String(value || "")
     .trim()
     .toLowerCase();
-  if (key === "openrouter") return "openrouter";
   if (key === "packycode" || key === "packy" || key === "packyapi")
     return "packycode";
-  if (key === "minimax" || key === "minimaxi") return "minimax";
   if (key === "aliyun" || key === "alibaba" || key === "dashscope")
     return "aliyun";
   if (key === "volcengine" || key === "volc" || key === "ark")
     return "volcengine";
-  return "openrouter";
+  if (key === "reserved") return "reserved";
+  return "packycode";
 }
 
 function getProviderConfig(provider) {
@@ -12331,17 +11901,10 @@ function getProviderConfig(provider) {
   }
 
   return {
-    chatEndpoint:
-      process.env.OPENROUTER_CHAT_ENDPOINT ||
-      "https://openrouter.ai/api/v1/chat/completions",
+    chatEndpoint: "",
     responsesEndpoint: "",
-    apiKey: readEnvApiKey(
-      "OPENROUTER_API_KEY",
-      "OPEN_ROUTER_API_KEY",
-      "OPENAI_API_KEY",
-    ),
-    missingKeyMessage:
-      "未检测到 OpenRouter API Key。请在 .env 中配置 OPENROUTER_API_KEY（或 OPEN_ROUTER_API_KEY / OPENAI_API_KEY）。",
+    apiKey: "",
+    missingKeyMessage: "当前对话 Provider 不可用。",
   };
 }
 
@@ -12383,12 +11946,6 @@ function buildProviderHeaders(provider, apiKey, protocol = "chat") {
         ? "text/event-stream, application/json"
         : "text/event-stream",
   };
-
-  if (provider === "openrouter") {
-    headers["HTTP-Referer"] =
-      process.env.OPENROUTER_REFERER || "http://localhost:5173";
-    headers["X-Title"] = process.env.OPENROUTER_APP_NAME || "EduChat";
-  }
 
   return headers;
 }
@@ -12578,26 +12135,6 @@ function formatProviderUpstreamError(provider, protocol, status, detail) {
   const errorCode = parsed.code;
   const errorMessage = parsed.message;
   const errorParam = parsed.param;
-
-  if (
-    provider === "openrouter" &&
-    status === 401 &&
-    /cookie auth credentials/i.test(raw)
-  ) {
-    return "OpenRouter 认证失败：未检测到有效 API Key。请在 .env 中配置真实 OPENROUTER_API_KEY（不是示例占位符），然后重启服务。";
-  }
-
-  if (provider === "openrouter" && status === 401) {
-    return "OpenRouter 认证失败：请检查 OPENROUTER_API_KEY 是否正确且仍有效。";
-  }
-
-  if (
-    provider === "openrouter" &&
-    status === 403 &&
-    /not available in your region/i.test(`${errorMessage} ${raw}`)
-  ) {
-    return "OpenRouter 拒绝了当前模型：该模型在你所在地区不可用，请更换模型后重试。";
-  }
 
   if (provider === "packycode" && status === 401) {
     return "PackyCode 认证失败：请检查 PACKYCODE_API_KEY 是否正确且仍有效。";
@@ -13469,6 +13006,15 @@ function mergeSanitizedChatMessageAttachments(existingAttachments, incomingAttac
   });
 }
 
+function chooseMoreCompleteSanitizedChatText(existingValue, incomingValue) {
+  const existingText = String(existingValue || "");
+  const incomingText = String(incomingValue || "");
+
+  if (incomingText.length > existingText.length) return incomingText;
+  if (existingText.length > incomingText.length) return existingText;
+  return incomingText || existingText;
+}
+
 function mergeSanitizedChatMessages(existingMessage, incomingMessage) {
   if (!existingMessage || typeof existingMessage !== "object") {
     return incomingMessage;
@@ -13480,6 +13026,14 @@ function mergeSanitizedChatMessages(existingMessage, incomingMessage) {
   return {
     ...existingMessage,
     ...incomingMessage,
+    content: chooseMoreCompleteSanitizedChatText(
+      existingMessage.content,
+      incomingMessage.content,
+    ),
+    reasoning: chooseMoreCompleteSanitizedChatText(
+      existingMessage.reasoning,
+      incomingMessage.reasoning,
+    ),
     attachments: mergeSanitizedChatMessageAttachments(
       existingMessage.attachments,
       incomingMessage.attachments,
@@ -14445,7 +13999,7 @@ function toAsciiHeaderFileName(fileName) {
   if (!text) return "download.bin";
 
   const ascii = text
-    .replace(/[\u0000-\u001f\u007f]/g, "_")
+    .replace(/\p{Cc}/gu, "_")
     .replace(/[^\x20-\x7e]/g, "_")
     .replace(/["\\]/g, "_")
     .replace(/\s+/g, " ")
@@ -17150,7 +16704,7 @@ async function ensureUploadedFileContextTtlIndex(collection, existingIndexes) {
         },
       });
       return;
-    } catch (error) {
+    } catch {
       // 某些 Mongo 版本不支持把普通索引直接转成 TTL，降级为删旧建新。
       if (String(sameKeyIndex.name) !== "_id_") {
         await collection.dropIndex(sameKeyIndex.name);
@@ -17187,7 +16741,7 @@ async function ensureGeneratedImageHistoryTtlIndex(
         },
       });
       return;
-    } catch (error) {
+    } catch {
       if (String(sameKeyIndex.name) !== "_id_") {
         await collection.dropIndex(sameKeyIndex.name);
       }
@@ -17220,7 +16774,7 @@ async function ensureGroupChatStoredFileTtlIndex(collection, existingIndexes) {
         },
       });
       return;
-    } catch (error) {
+    } catch {
       if (String(sameKeyIndex.name) !== "_id_") {
         await collection.dropIndex(sameKeyIndex.name);
       }
@@ -17902,7 +17456,7 @@ function buildZipReadme(
 function sanitizeZipFileNamePart(value) {
   const raw = String(value || "")
     .trim()
-    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\p{Cc}/gu, "")
     .replace(/[\\/:*?"<>|]/g, "_")
     .replace(/\s+/g, "_")
     .replace(/\.+/g, ".");
@@ -17992,7 +17546,7 @@ function buildZipBuffer(files) {
 
 function sanitizeZipEntryName(rawName, fallback = "file.txt") {
   const normalized = String(rawName || fallback)
-    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\p{Cc}/gu, "")
     .replace(/\\/g, "/")
     .replace(/^\/+/, "")
     .split("/")
@@ -18069,7 +17623,6 @@ export {
   crypto,
   execFile,
   promisify,
-  mammoth,
   XLSX,
   PDFParse,
   mongoose,
@@ -18158,10 +17711,7 @@ export {
   GENERATED_IMAGE_HISTORY_TTL_MS,
   GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES,
   GENERATED_IMAGE_HISTORY_FETCH_TIMEOUT_MS,
-  GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER,
-  GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER,
   GROUP_CHAT_MAX_MEMBERS_PER_ROOM,
-  GROUP_CHAT_MAX_ROOMS_PER_BOOTSTRAP,
   GROUP_CHAT_DEFAULT_MESSAGES_LIMIT,
   GROUP_CHAT_MAX_MESSAGES_LIMIT,
   GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES,
@@ -18232,10 +17782,6 @@ export {
   EXCEL_EXTENSIONS,
   PDF_EXTENSIONS,
   VIDEO_EXTENSIONS,
-  OPENROUTER_VIDEO_EXTENSIONS,
-  OPENROUTER_AUDIO_FORMATS,
-  OPENROUTER_AUDIO_EXTENSIONS,
-  OPENROUTER_AUDIO_MIME_TO_FORMAT,
   upload,
   studentHomeworkUpload,
   teacherClassroomFileUpload,
@@ -18318,9 +17864,6 @@ export {
   resolveLatestUserMessage,
   buildInitialAttachmentParts,
   buildDataUrlForBuffer,
-  resolveOpenRouterAudioFormat,
-  resolveOpenRouterVideoMime,
-  buildOpenRouterFileInputPart,
   resolveAliyunVideoMime,
   resolveAliyunDashScopeAttachmentUrl,
   buildAliyunDashScopeDocumentUrlPart,
@@ -18329,7 +17872,6 @@ export {
   buildAliyunDashScopePdfImageParts,
   buildAliyunDashScopeFileInputParts,
   buildParsedFilePreviewTextPart,
-  attachFilesToLatestUserMessageForOpenRouter,
   attachFilesToLatestUserMessageForAliyunDashScope,
   attachFilesToLatestUserMessageByLocalParsing,
   streamAgentResponse,
@@ -18375,7 +17917,6 @@ export {
   getVolcengineImageGenerationConfig,
   SESSION_NOTES_MAX_ESTIMATED_TOKENS,
   buildChatRequestPayload,
-  buildOpenRouterPlugins,
   buildResponsesRequestPayload,
   resolveProviderWebSearchRuntime,
   resolveVolcengineWebSearchRuntime,
@@ -18393,8 +17934,8 @@ export {
   extractInputImageUrl,
   extractInputVideoUrl,
   extractAliyunFileUrl,
-  normalizeOpenRouterFilePart,
-  normalizeOpenRouterAudioPart,
+  normalizeChatFilePart,
+  normalizeChatAudioPart,
   mapReasoningEffortToResponses,
   supportsVolcengineResponsesReasoningEffort,
   resolveRequestProtocol,
@@ -18440,7 +17981,7 @@ export {
   normalizeRow,
   parsePdf,
   clipText,
-  pipeOpenRouterSse,
+  pipeChatCompletionsSse,
   pipeResponsesSse,
   extractResponsesOutputTextFromCompleted,
   extractResponsesReasoningTextFromCompleted,
@@ -18453,7 +17994,7 @@ export {
   sanitizeUsageCountNumber,
   formatWebSearchUsageText,
   extractResponsesErrorMessage,
-  extractOpenRouterStreamErrorMessage,
+  extractChatCompletionsStreamErrorMessage,
   extractDeltaText,
   extractSseDataPayload,
   findSseEventBoundary,
@@ -18499,9 +18040,6 @@ export {
   sanitizeRuntimeProtocol,
   sanitizeRuntimeProvider,
   sanitizeRuntimeModel,
-  sanitizeOpenRouterPreset,
-  sanitizeOpenRouterWebPluginEngine,
-  sanitizeOpenRouterPdfEngine,
   sanitizeAliyunSearchStrategy,
   sanitizeAliyunSearchCitationFormat,
   sanitizeAliyunSearchFreshness,

@@ -25,19 +25,16 @@ function stripIndexedItem(item) {
   return rest;
 }
 
-function sanitizeProvider(value, fallback = "openrouter") {
+function sanitizeProvider(value, fallback = "packycode") {
   const key = String(value || "").trim().toLowerCase();
   if (
-    key === "openrouter" ||
     key === "packycode" ||
     key === "packy" ||
-    key === "minimax" ||
-    key === "minimaxi" ||
     key === "volcengine" ||
-    key === "aliyun"
+    key === "aliyun" ||
+    key === "reserved"
   ) {
     if (key === "packy") return "packycode";
-    if (key === "minimaxi") return "minimax";
     return key;
   }
   if (key === "packyapi") {
@@ -59,9 +56,9 @@ export function resolveAgentProvider(agentId, runtimeConfig, providerDefaults, l
   }
   const runtimeProvider = String(runtimeConfig?.provider || "").trim().toLowerCase();
   if (runtimeProvider && runtimeProvider !== "inherit") {
-    return sanitizeProvider(runtimeProvider, "openrouter");
+    return sanitizeProvider(runtimeProvider, "packycode");
   }
-  return sanitizeProvider(providerDefaults?.[safeAgentId], "openrouter");
+  return sanitizeProvider(providerDefaults?.[safeAgentId], "packycode");
 }
 
 export function resolveRuntimeModelForProvider(agentId, runtimeConfig, providerDefaults, lockedProvider = "") {

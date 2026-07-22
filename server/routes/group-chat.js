@@ -11,6 +11,27 @@ import {
   reserveGroupChatAiPendingCapacity,
   rollbackGroupChatAiPendingCapacity,
 } from "../runtime/group-chat-ai-redis.js";
+import { clipText, parseFileContent } from "../platform/files/content-parser.js";
+
+const GROUP_CHAT_TASK_ATTACHMENT_CONTEXT_MAX_CHARS = 8_000;
+
+async function parseTaskAttachmentAiContext(file) {
+  try {
+    const parsed = await parseFileContent(file);
+    return {
+      aiContextText: clipText(
+        parsed?.text,
+        GROUP_CHAT_TASK_ATTACHMENT_CONTEXT_MAX_CHARS,
+      ),
+      aiContextHint: String(parsed?.hint || "").trim().slice(0, 240),
+    };
+  } catch (error) {
+    return {
+      aiContextText: "",
+      aiContextHint: `附件文本解析失败：${String(error?.message || "未知错误").slice(0, 180)}`,
+    };
+  }
+}
 
 export function registerGroupChatRoutes(app, deps) {
   const {
@@ -77,10 +98,7 @@ export function registerGroupChatRoutes(app, deps) {
     GENERATED_IMAGE_HISTORY_TTL_MS,
     GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES,
     GENERATED_IMAGE_HISTORY_FETCH_TIMEOUT_MS,
-    GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER,
-    GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER,
     GROUP_CHAT_MAX_MEMBERS_PER_ROOM,
-    GROUP_CHAT_MAX_ROOMS_PER_BOOTSTRAP,
     GROUP_CHAT_DEFAULT_MESSAGES_LIMIT,
     GROUP_CHAT_MAX_MESSAGES_LIMIT,
     GROUP_CHAT_IMAGE_MAX_FILE_SIZE_BYTES,
@@ -145,10 +163,6 @@ export function registerGroupChatRoutes(app, deps) {
     EXCEL_EXTENSIONS,
     PDF_EXTENSIONS,
     VIDEO_EXTENSIONS,
-    OPENROUTER_VIDEO_EXTENSIONS,
-    OPENROUTER_AUDIO_FORMATS,
-    OPENROUTER_AUDIO_EXTENSIONS,
-    OPENROUTER_AUDIO_MIME_TO_FORMAT,
     groupChatImageUpload,
     groupChatFileUpload,
     AuthUser,
@@ -227,7 +241,6 @@ export function registerGroupChatRoutes(app, deps) {
     try {
       const rooms = await GroupChatRoom.find({ memberUserIds: userId })
         .sort({ updatedAt: -1 })
-        .limit(GROUP_CHAT_MAX_ROOMS_PER_BOOTSTRAP)
         .lean();
       const roomItems = rooms
         .map((room) =>
@@ -249,16 +262,7 @@ export function registerGroupChatRoutes(app, deps) {
             : "user",
         },
         limits: {
-          maxCreatedRoomsPerUser:
-            sanitizeText(req.authUser?.role, "user", 20).toLowerCase() === "admin"
-              ? null
-              : GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER,
-          maxJoinedRoomsPerUser: GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER,
           maxMembersPerRoom: GROUP_CHAT_MAX_MEMBERS_PER_ROOM,
-        },
-        counts: {
-          createdRooms: roomItems.filter((room) => room.ownerUserId === userId).length,
-          joinedRooms: roomItems.length,
         },
         users: memberUsers,
         rooms: roomItems,
@@ -272,7 +276,6 @@ export function registerGroupChatRoutes(app, deps) {
 
   app.post("/api/group-chat/rooms", requireChatAuth, async (req, res) => {
     const userId = sanitizeId(req.authUser?._id, "");
-    const userRole = sanitizeText(req.authUser?.role, "user", 20).toLowerCase();
     const roomName = sanitizeGroupChatRoomName(req.body?.name);
     if (!userId) {
       res.status(400).json({ error: "无效用户身份。" });
@@ -284,24 +287,6 @@ export function registerGroupChatRoutes(app, deps) {
     }
 
     try {
-      const [createdCount, joinedCount] = await Promise.all([
-        GroupChatRoom.countDocuments({ ownerUserId: userId }),
-        GroupChatRoom.countDocuments({ memberUserIds: userId }),
-      ]);
-
-      if (userRole !== "admin" && createdCount >= GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER) {
-        res.status(400).json({
-          error: `每个用户最多创建 ${GROUP_CHAT_MAX_CREATED_ROOMS_PER_USER} 个群聊。`,
-        });
-        return;
-      }
-      if (joinedCount >= GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER) {
-        res.status(400).json({
-          error: `每个用户最多加入 ${GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER} 个群聊。`,
-        });
-        return;
-      }
-
       const roomCode = await generateUniqueGroupChatRoomCode();
       const roomDoc = await GroupChatRoom.create({
         roomCode,
@@ -361,14 +346,6 @@ export function registerGroupChatRoutes(app, deps) {
           ok: true,
           joined: false,
           room: normalizedRoom,
-        });
-        return;
-      }
-
-      const joinedCount = await GroupChatRoom.countDocuments({ memberUserIds: userId });
-      if (joinedCount >= GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER) {
-        res.status(400).json({
-          error: `每个用户最多加入 ${GROUP_CHAT_MAX_JOINED_ROOMS_PER_USER} 个群聊。`,
         });
         return;
       }
@@ -548,7 +525,7 @@ export function registerGroupChatRoutes(app, deps) {
         return;
       }
       if (normalizedRoom.ownerUserId !== userId) {
-        res.status(403).json({ error: "仅派主可编辑群公告。" });
+        res.status(403).json({ error: "仅派主可编辑协作任务。" });
         return;
       }
       if (normalizedRoom.announcement === announcement) {
@@ -578,7 +555,7 @@ export function registerGroupChatRoutes(app, deps) {
       res.json({ ok: true, room: updatedRoom });
     } catch (error) {
       res.status(500).json({
-        error: error?.message || "保存群公告失败，请稍后重试。",
+        error: error?.message || "保存协作任务失败，请稍后重试。",
       });
     }
   });
@@ -592,7 +569,7 @@ export function registerGroupChatRoutes(app, deps) {
       const roomId = sanitizeId(req.params?.roomId, "");
       const file = req.file;
       if (!userId || !roomId || !file) {
-        res.status(400).json({ error: "请选择要上传的公告附件。" });
+        res.status(400).json({ error: "请选择要上传的任务附件。" });
         return;
       }
       if (!isMongoObjectIdLike(roomId)) {
@@ -614,11 +591,11 @@ export function registerGroupChatRoutes(app, deps) {
           return;
         }
         if (normalizedRoom.ownerUserId !== userId) {
-          res.status(403).json({ error: "仅派主可上传群公告附件。" });
+          res.status(403).json({ error: "仅派主可上传任务附件。" });
           return;
         }
         if (normalizedRoom.announcementAttachments.length >= 5) {
-          res.status(400).json({ error: "群公告最多保留 5 个附件。" });
+          res.status(400).json({ error: "任务最多保留 5 个附件。" });
           return;
         }
 
@@ -652,11 +629,17 @@ export function registerGroupChatRoutes(app, deps) {
           data: Buffer.alloc(0),
           expiresAt: null,
         });
+        const attachmentAiContext = await parseTaskAttachmentAiContext({
+          originalname: fileName,
+          mimetype: mimeType,
+          buffer: file.buffer,
+        });
         const attachment = {
           fileId: sanitizeId(storedFileDoc?._id, ""),
           fileName,
           mimeType,
           size,
+          ...attachmentAiContext,
         };
         if (!attachment.fileId) throw new Error("公告附件存储失败");
 
@@ -679,7 +662,7 @@ export function registerGroupChatRoutes(app, deps) {
         if (uploadedOssKey) {
           await deleteGroupChatOssObject(uploadedOssKey).catch(() => {});
         }
-        res.status(500).json({ error: error?.message || "上传公告附件失败，请稍后重试。" });
+        res.status(500).json({ error: error?.message || "上传任务附件失败，请稍后重试。" });
       }
     },
   );
@@ -703,11 +686,11 @@ export function registerGroupChatRoutes(app, deps) {
           return;
         }
         if (normalizedRoom.ownerUserId !== userId) {
-          res.status(403).json({ error: "仅派主可删除群公告附件。" });
+          res.status(403).json({ error: "仅派主可删除任务附件。" });
           return;
         }
         if (!normalizedRoom.announcementAttachments.some((item) => item.fileId === fileId)) {
-          res.status(404).json({ error: "公告附件不存在或已删除。" });
+          res.status(404).json({ error: "任务附件不存在或已删除。" });
           return;
         }
         const storedFileDoc = await findGroupChatStoredFileByRoomAndId({
@@ -734,7 +717,7 @@ export function registerGroupChatRoutes(app, deps) {
         broadcastGroupChatRoomUpdated(roomId, updatedRoom);
         res.json({ ok: true, room: updatedRoom });
       } catch (error) {
-        res.status(500).json({ error: error?.message || "删除公告附件失败，请稍后重试。" });
+        res.status(500).json({ error: error?.message || "删除任务附件失败，请稍后重试。" });
       }
     },
   );
@@ -1162,7 +1145,7 @@ export function registerGroupChatRoutes(app, deps) {
           .map((item) => normalizeGroupChatMessageDoc(item))
           .filter(Boolean);
         const contextSnapshot = buildGroupChatAiContextSnapshot({
-          room: normalizedRoom,
+          room,
           triggerMessage: normalizedMessage,
           recentMessages,
         });
