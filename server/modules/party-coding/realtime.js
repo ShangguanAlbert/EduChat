@@ -7,6 +7,7 @@ import {
 } from "y-protocols/awareness";
 import { createPartyLearningService } from "./learning-service.js";
 import { getPartyWebWorkspaceModel } from "./model.js";
+import { ensurePartyPairRoles } from "./pair-roles.js";
 
 const MAX_DOCUMENT_LENGTH = 200_000;
 const MAX_UPDATE_BYTES = 512 * 1024;
@@ -85,6 +86,7 @@ function sanitizeAwarenessClientIds(rawClientIds) {
 export function createPartyCodingRealtime(deps) {
   const {
     mongoose,
+    GroupChatRoom,
     sanitizeId,
     broadcastGroupChatWsPayload,
     sendGroupChatWsPayload,
@@ -247,6 +249,16 @@ export function createPartyCodingRealtime(deps) {
     const room = await getRoom(roomId);
 
     if (type === "coding_collab_join") {
+      const groupRoom = await GroupChatRoom.findOne(
+        { _id: roomId, memberUserIds: meta.userId },
+        { memberUserIds: 1 },
+      ).lean();
+      if (!groupRoom) return true;
+      const workspaceWithRoles = await ensurePartyPairRoles({
+        Workspace,
+        roomId,
+        memberUserIds: groupRoom.memberUserIds,
+      });
       sendGroupChatWsPayload(socket, {
         type: "coding_collab_sync",
         roomId,
@@ -261,14 +273,16 @@ export function createPartyCodingRealtime(deps) {
           update: encodeUpdate(encodeAwarenessUpdate(room.awareness, awarenessClientIds)),
         });
       }
-      const [workspace, intervention] = await Promise.all([
-        Workspace.findOne({ roomId }).lean(),
-        learning.getLatestIntervention(roomId),
-      ]);
+      const intervention = await learning.getLatestIntervention(roomId);
       sendGroupChatWsPayload(socket, {
         type: "coding_collab_workspace_updated",
         roomId,
-        workspace: normalizeWorkspace(workspace),
+        workspace: normalizeWorkspace(workspaceWithRoles),
+      });
+      broadcastGroupChatWsPayload(roomId, {
+        type: "coding_collab_workspace_updated",
+        roomId,
+        workspace: normalizeWorkspace(workspaceWithRoles),
       });
       if (intervention) {
         sendGroupChatWsPayload(socket, {
@@ -281,9 +295,21 @@ export function createPartyCodingRealtime(deps) {
     }
 
     if (type === "coding_collab_update") {
-      const workspace = await Workspace.findOne({ roomId }, { driverUserId: 1 }).lean();
+      const workspace = await Workspace.findOne(
+        { roomId },
+        { driverUserId: 1, navigatorUserId: 1 },
+      ).lean();
       const driverUserId = sanitizeId(workspace?.driverUserId, "");
-      if (driverUserId && driverUserId !== sanitizeId(meta.userId, "")) {
+      const navigatorUserId = sanitizeId(workspace?.navigatorUserId, "");
+      if (!driverUserId || !navigatorUserId) {
+        sendGroupChatWsPayload(socket, {
+          type: "coding_collab_error",
+          roomId,
+          error: "请等待第二名学生加入，结对角色分配后再开始编程。",
+        });
+        return true;
+      }
+      if (driverUserId !== sanitizeId(meta.userId, "")) {
         sendGroupChatWsPayload(socket, {
           type: "coding_collab_error",
           roomId,

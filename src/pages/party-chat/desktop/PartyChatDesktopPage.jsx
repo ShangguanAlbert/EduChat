@@ -4350,6 +4350,7 @@ export default function PartyChatDesktopPage({
             roomId={activeRoom.id}
             me={me}
             members={activeMembers}
+            ownerUserId={activeRoom.ownerUserId}
             taskText={activeRoom.announcement}
             codingEditors={codingEditorsByRoom[activeRoom.id] || []}
             onEditingChange={setCodingEditorPresence}

@@ -1,4 +1,4 @@
-import { Download, Eye, RefreshCcw, Repeat2 } from "lucide-react";
+import { Bot, Crown, Download, Eye, RefreshCcw, Repeat2, UserRound, Users } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { css as cssLanguage } from "@codemirror/lang-css";
@@ -80,6 +80,7 @@ export default function WebCollabPanel({
   roomId,
   me,
   members = [],
+  ownerUserId = "",
   taskText = "",
   codingEditors = [],
   onEditingChange,
@@ -174,7 +175,14 @@ export default function WebCollabPanel({
         return;
       }
       if (type === "coding_collab_workspace_updated") {
-        setWorkspace(payload?.workspace || null);
+        const nextWorkspace = payload?.workspace || null;
+        setWorkspace((previousWorkspace) => {
+          if (previousWorkspace?.taskId && nextWorkspace?.taskId !== previousWorkspace.taskId) {
+            setLatestIntervention(null);
+            setFeedbackNote("");
+          }
+          return nextWorkspace;
+        });
         return;
       }
       if (type === "coding_collab_intervention") {
@@ -206,19 +214,36 @@ export default function WebCollabPanel({
     };
   }, [me?.id, me?.name, roomId]);
 
-  const isDriver = !!workspace && (!workspace.driverUserId || String(workspace.driverUserId) === String(me?.id || ""));
+  const assignedStudentIds = [workspace?.driverUserId, workspace?.navigatorUserId]
+    .map((userId) => String(userId || ""))
+    .filter(Boolean);
+  const studentMembers = assignedStudentIds.length === 2
+    ? assignedStudentIds
+      .map((userId) => members.find((member) => String(member?.id || "") === userId))
+      .filter(Boolean)
+    : members.slice(0, 2);
+  const pairReady = studentMembers.length === 2 && assignedStudentIds.length === 2;
+  const isOwner = String(ownerUserId || "") === String(me?.id || "");
+  const isDriver = pairReady && String(workspace.driverUserId) === String(me?.id || "");
+  const isNavigator = pairReady && String(workspace.navigatorUserId) === String(me?.id || "");
+  const isPairObserver = pairReady && !isDriver && !isNavigator;
   const driverName = resolveMemberName(members, workspace?.driverUserId, "等待分配");
   const navigatorName = resolveMemberName(members, workspace?.navigatorUserId, "等待同伴加入");
+  const feedbackByName = resolveMemberName(
+    members,
+    latestIntervention?.feedbackByUserId,
+    "小组成员",
+  );
   const activeText = activeDocument === "html" ? sessionRef.current?.htmlText : sessionRef.current?.cssText;
   const editorExtensions = useMemo(() => {
     if (!ready || !activeText || !sessionRef.current?.awareness) return [];
     return [
       activeDocument === "html" ? htmlLanguage() : cssLanguage(),
       EditorView.lineWrapping,
-      EditorView.editable.of(isDriver),
+      EditorView.editable.of(pairReady && isDriver),
       yCollab(activeText, sessionRef.current.awareness),
     ];
-  }, [activeDocument, activeText, isDriver, ready]);
+  }, [activeDocument, activeText, isDriver, pairReady, ready]);
 
   async function refreshPreview() {
     if (!isDriver || actionSubmitting) return;
@@ -285,8 +310,45 @@ export default function WebCollabPanel({
 
   return <aside className="party-coding-column party-web-coding-column" aria-label="HTML和CSS结对编程区">
     <div className="party-web-session-bar">
+      <div className="party-web-pair-heading">
+        <span><Users size={15} />本组协作成员</span>
+        <strong>{studentMembers.length}/2 名结对学生 + 琳琳</strong>
+      </div>
+      <div className="party-web-participant-grid">
+        {studentMembers.map((member) => {
+          const memberIsOwner = String(member?.id || "") === String(ownerUserId || "");
+          const memberIsDriver = pairReady && String(member?.id || "") === String(workspace?.driverUserId || "");
+          const memberIsNavigator = pairReady && String(member?.id || "") === String(workspace?.navigatorUserId || "");
+          return <div
+            className={`party-web-participant${String(member?.id || "") === String(me?.id || "") ? " is-me" : ""}`}
+            key={member.id}
+          >
+            <span className="party-web-participant-avatar"><UserRound size={14} /></span>
+            <span className="party-web-participant-name">{member.name}{String(member?.id || "") === String(me?.id || "") ? "（我）" : ""}</span>
+            <span className="party-web-management-role">{memberIsOwner ? "派主" : "成员"}</span>
+            <strong className={memberIsDriver ? "is-driver" : memberIsNavigator ? "is-navigator" : ""}>
+              {memberIsDriver ? "Driver · 编写运行" : memberIsNavigator ? "Navigator · 观察检查" : "等待角色分配"}
+            </strong>
+          </div>;
+        })}
+        {studentMembers.length < 2 ? <div className="party-web-participant is-waiting">
+          <span className="party-web-participant-avatar"><UserRound size={14} /></span>
+          <span className="party-web-participant-name">等待第二名学生加入</span>
+          <span className="party-web-management-role">空位</span>
+          <strong>加入后自动分配角色</strong>
+        </div> : null}
+        <div className="party-web-participant is-paia">
+          <span className="party-web-participant-avatar"><Bot size={14} /></span>
+          <span className="party-web-participant-name">琳琳</span>
+          <span className="party-web-management-role">AI 同伴</span>
+          <strong>观察协作 · 必要时追问</strong>
+        </div>
+      </div>
+      <p className="party-web-identity-note"><Crown size={13} />{isOwner ? "你是派主，只负责邀请和管理；" : "派主只负责邀请和管理；"}派主不固定担任 Driver，结对角色会轮换。</p>
+      {isPairObserver ? <p className="party-web-observer-note">这个派来自旧数据，成员人数超过两人。你当前未分配结对角色，只能观察；请新建一个两人派开展正式任务。</p> : null}
       <div className="party-web-task-summary">
-        <strong>{taskText || "等待发布网页设计任务"}</strong>
+        <span>当前任务</span>
+        <strong>{taskText || "等待派主发布网页设计任务"}</strong>
         <select
           value={workspace?.taskStage || "understand"}
           onChange={(event) => void updateSession({ action: "stage", taskStage: event.target.value })}
@@ -298,13 +360,13 @@ export default function WebCollabPanel({
       </div>
       <div className="party-web-role-summary">
         <span className={isDriver ? "is-current-role" : ""}>Driver：{driverName}</span>
-        <span className={!isDriver ? "is-current-role" : ""}>Navigator：{navigatorName}</span>
-        <button
+        <span className={isNavigator ? "is-current-role" : ""}>Navigator：{navigatorName}</span>
+        {isDriver ? <button
           type="button"
           onClick={() => void updateSession({ action: "rotate" })}
-          disabled={!workspace?.navigatorUserId || actionSubmitting}
-          title="轮换 Driver 与 Navigator"
-        ><Repeat2 size={13} />轮换</button>
+          disabled={!pairReady || actionSubmitting}
+          title={`完成本轮并将 Driver 角色交给${navigatorName}`}
+        ><Repeat2 size={13} />完成本轮，交棒给{navigatorName}</button> : null}
       </div>
     </div>
 
@@ -327,20 +389,23 @@ export default function WebCollabPanel({
           {codingEditors.slice(0, 3).map((editor) => <span className="party-coding-editor-avatar" key={editor.userId} title={`${editor.name}正在编辑`}>{getEditorInitial(editor.name)}</span>)}
         </div> : null}
         <div className="party-coding-head-buttons">
-          <button type="button" onClick={() => void refreshPreview()} disabled={!ready || !isDriver || actionSubmitting}><RefreshCcw size={14} />刷新预览</button>
+          <button type="button" onClick={() => void refreshPreview()} disabled={!ready || !pairReady || !isDriver || actionSubmitting}><RefreshCcw size={14} />刷新预览</button>
           <button type="button" onClick={downloadWebPage} disabled={!ready} title="下载可独立打开的 HTML 文件"><Download size={14} /></button>
         </div>
       </div>
     </div>
 
-    {!isDriver ? <div className="party-web-navigator-notice">你当前是 Navigator：请观察网页结构、提出建议，并与 Driver 共同检查预览结果。</div> : null}
+    {!pairReady ? <div className="party-web-role-notice is-waiting">当前只有一名学生。第二名学生加入后，系统会分配 Driver 和 Navigator，随后才能开始共同编程。</div>
+      : isDriver ? <div className="party-web-role-notice is-driver">你当前是 Driver：根据两人的讨论输入 HTML/CSS、刷新预览；完成一轮后点击“交棒”。</div>
+        : isNavigator ? <div className="party-web-role-notice is-navigator">你当前是 Navigator：暂时不能输入代码，请在群聊中提出建议、发现问题，并和 Driver 一起检查预览。</div>
+          : <div className="party-web-role-notice is-observer">你当前未分配结对角色，只能查看本轮过程。正式任务请进入仅有两名学生的派。</div>}
     <div className="party-code-editor party-web-code-editor">
       {ready && activeText ? <CodeMirror
-        key={`${roomId}:${activeDocument}:${isDriver ? "driver" : "navigator"}`}
+        key={`${roomId}:${activeDocument}:${isDriver ? "driver" : isNavigator ? "navigator" : "observer"}`}
         value={activeText.toString()}
         height="100%"
         extensions={editorExtensions}
-        onFocus={() => isDriver && setEditingPresence(true)}
+        onFocus={() => pairReady && isDriver && setEditingPresence(true)}
         onBlur={() => setEditingPresence(false)}
         basicSetup={{ lineNumbers: true, bracketMatching: true, closeBrackets: true, indentOnInput: true }}
         aria-label={`${activeDocument.toUpperCase()} 共享代码编辑器`}
@@ -358,15 +423,24 @@ export default function WebCollabPanel({
       {diagnostics.map((item) => <li key={item}>{item}</li>)}
     </ul> : null}
 
-    {latestIntervention ? <section className="party-paia-intervention" aria-label="琳琳的协作提示">
-      <div className="party-paia-intervention-head"><strong>琳琳 · PAIA</strong><span>{latestIntervention.feedback ? "已收到纠正" : "协作观察"}</span></div>
-      <p>{latestIntervention.prompt}</p>
-      <small>判断依据：{latestIntervention.evidenceSummary}</small>
-      {!latestIntervention.feedback ? <>
+    <section className={`party-paia-intervention${latestIntervention ? " has-intervention" : " is-observing"}`} aria-label="琳琳的协作状态">
+      <div className="party-paia-intervention-head">
+        <strong><Bot size={14} />琳琳 · PAIA</strong>
+        <span>{latestIntervention ? (latestIntervention.feedback ? "判断已被学生纠正" : "发现可能需要关注的情况") : "正在观察 · 暂不打扰"}</span>
+      </div>
+      {!latestIntervention ? <div className="party-paia-observing">
+        <p>琳琳会观察两人的发言、代码修改、预览、报错和角色轮换。协作顺利时，她会保持安静。</p>
+        <small>需要介入时，会先说明判断依据，再给出一个简短追问。</small>
+      </div> : <>
+        <div className="party-paia-evidence"><span>为什么提醒</span><p>{latestIntervention.evidenceSummary}</p></div>
+        <div className="party-paia-prompt"><span>建议下一步</span><p>{latestIntervention.prompt}</p></div>
+      {!latestIntervention.feedback ? <div className="party-paia-feedback-box">
+        <strong>琳琳判断得准确吗？</strong>
+        <small>你们可以纠正她，反馈会用于调整本任务中的后续提醒。</small>
         <textarea
           value={feedbackNote}
           onChange={(event) => setFeedbackNote(event.target.value)}
-          placeholder="可选：补充说明实际情况"
+          placeholder="可选：说明实际情况，例如“Navigator 已经在口头提出建议”"
           maxLength={500}
         />
         <div className="party-paia-feedback-actions">
@@ -377,8 +451,14 @@ export default function WebCollabPanel({
             disabled={feedbackSubmitting}
           >{option.label}</button>)}
         </div>
-      </> : <p className="party-paia-feedback-result">你的反馈：{FEEDBACK_OPTIONS.find((item) => item.value === latestIntervention.feedback)?.label || latestIntervention.feedback}{latestIntervention.feedbackNote ? `；${latestIntervention.feedbackNote}` : ""}</p>}
-    </section> : null}
+      </div> : <div className="party-paia-feedback-result">
+        <strong>{feedbackByName}的纠正：</strong>
+        {FEEDBACK_OPTIONS.find((item) => item.value === latestIntervention.feedback)?.label || latestIntervention.feedback}
+        {latestIntervention.feedbackNote ? <p>{latestIntervention.feedbackNote}</p> : null}
+        <small>琳琳已记录本次纠正，并会降低同类误判的重复提醒。</small>
+      </div>}
+      </>}
+    </section>
     {actionError ? <div className="party-web-action-error" role="alert">{actionError}</div> : null}
   </aside>;
 }

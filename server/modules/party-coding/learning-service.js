@@ -140,6 +140,7 @@ export function createPartyLearningService(deps) {
       triggerType: safeText(doc.triggerType, 80),
       evidenceSummary: safeText(doc.evidenceSummary, 500),
       prompt: safeText(doc.prompt, 800),
+      targetUserId: safeText(doc.targetUserId, 100),
       feedback: safeText(doc.feedback, 20),
       feedbackNote: safeText(doc.feedbackNote, 500),
       feedbackByUserId: safeText(doc.feedbackByUserId, 100),
@@ -251,7 +252,10 @@ export function createPartyLearningService(deps) {
   }
 
   async function getLatestIntervention(roomId) {
-    const doc = await Intervention.findOne({ roomId: safeText(roomId, 100) }).sort({ createdAt: -1 }).lean();
+    const safeRoomId = safeText(roomId, 100);
+    const workspace = await readWorkspace(safeRoomId);
+    const taskId = `${safeRoomId}:${Math.max(1, Number(workspace?.taskRevision || 1))}`;
+    const doc = await Intervention.findOne({ roomId: safeRoomId, taskId }).sort({ createdAt: -1 }).lean();
     return normalizeIntervention(doc);
   }
 
@@ -296,6 +300,11 @@ export function createPartyLearningService(deps) {
         lastPreviewByUserId: safeText(workspace.lastPreviewByUserId, 100),
         lastDiagnostics: Array.isArray(workspace.lastDiagnostics) ? workspace.lastDiagnostics.map(String).slice(0, 20) : [],
       },
+    });
+    deps.broadcastGroupChatWsPayload?.(safeRoomId, {
+      type: "coding_collab_intervention",
+      roomId: safeRoomId,
+      intervention: null,
     });
     return workspace;
   }

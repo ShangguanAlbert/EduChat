@@ -1,5 +1,6 @@
 import { createPartyLearningService } from "./learning-service.js";
 import { getPartyWebWorkspaceModel } from "./model.js";
+import { ensurePartyPairRoles } from "./pair-roles.js";
 import { createPartyCodingRealtime } from "./realtime.js";
 
 const SHI_GAOJUN_TEACHER_SCOPE_KEY = "shi-gaojun";
@@ -90,23 +91,11 @@ export function registerPartyCodingRoutes(app, deps) {
   }
 
   async function ensurePairRoles(member) {
-    const current = await Workspace.findOneAndUpdate(
-      { roomId: member.roomId },
-      { $setOnInsert: { roomId: member.roomId } },
-      { new: true, upsert: true, setDefaultsOnInsert: true },
-    ).lean();
-    const memberIds = member.memberUserIds;
-    const currentDriver = sanitizeId(current?.driverUserId, "");
-    const driverUserId = memberIds.includes(currentDriver) ? currentDriver : (memberIds[0] || "");
-    const navigatorUserId = memberIds.find((userId) => userId !== driverUserId) || "";
-    if (driverUserId === currentDriver && navigatorUserId === sanitizeId(current?.navigatorUserId, "")) {
-      return current;
-    }
-    return Workspace.findOneAndUpdate(
-      { roomId: member.roomId },
-      { $set: { driverUserId, navigatorUserId, rolesUpdatedAt: new Date() } },
-      { new: true },
-    ).lean();
+    return ensurePartyPairRoles({
+      Workspace,
+      roomId: member.roomId,
+      memberUserIds: member.memberUserIds,
+    });
   }
 
   app.get("/api/group-chat/rooms/:roomId/coding", requireChatAuth, async (req, res) => {
@@ -133,6 +122,10 @@ export function registerPartyCodingRoutes(app, deps) {
       const member = await requireCodingMember(req, res);
       if (!member) return;
       const current = await ensurePairRoles(member);
+      if (!sanitizeId(current?.driverUserId, "") || !sanitizeId(current?.navigatorUserId, "")) {
+        res.status(409).json({ error: "请等待第二名学生加入，结对角色分配后再开始编程。" });
+        return;
+      }
       if (sanitizeId(current?.driverUserId, "") && sanitizeId(current.driverUserId, "") !== member.userId) {
         res.status(403).json({ error: "当前由 Driver 操作代码。" });
         return;
@@ -191,6 +184,10 @@ export function registerPartyCodingRoutes(app, deps) {
           res.status(409).json({ error: "两名学生到齐后才能轮换角色。" });
           return;
         }
+        if (sanitizeId(current.driverUserId, "") !== member.userId) {
+          res.status(403).json({ error: "当前只有 Driver 可以完成本轮并交棒。" });
+          return;
+        }
         update = {
           $set: {
             driverUserId: current.navigatorUserId,
@@ -242,6 +239,10 @@ export function registerPartyCodingRoutes(app, deps) {
       const member = await requireCodingMember(req, res);
       if (!member) return;
       const current = await ensurePairRoles(member);
+      if (!sanitizeId(current?.driverUserId, "") || !sanitizeId(current?.navigatorUserId, "")) {
+        res.status(409).json({ error: "请等待第二名学生加入，结对角色分配后再刷新预览。" });
+        return;
+      }
       if (sanitizeId(current?.driverUserId, "") && sanitizeId(current.driverUserId, "") !== member.userId) {
         res.status(403).json({ error: "当前由 Driver 刷新网页预览。" });
         return;

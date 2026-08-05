@@ -13,6 +13,11 @@ import {
 } from "../runtime/group-chat-ai-redis.js";
 import { clipText, parseFileContent } from "../platform/files/content-parser.js";
 import { createPartyLearningService } from "../modules/party-coding/learning-service.js";
+import {
+  getPartyLearningEventModel,
+  getPartyPaiaInterventionModel,
+  getPartyWebWorkspaceModel,
+} from "../modules/party-coding/model.js";
 
 const GROUP_CHAT_TASK_ATTACHMENT_CONTEXT_MAX_CHARS = 8_000;
 const PAIA_TEACHER_SCOPE_KEY = "shi-gaojun";
@@ -234,6 +239,9 @@ export function registerGroupChatRoutes(app, deps) {
     broadcastGroupChatMemberJoined,
   } = deps;
   const partyLearning = createPartyLearningService(deps);
+  const PartyWebWorkspace = getPartyWebWorkspaceModel(mongoose);
+  const PartyLearningEvent = getPartyLearningEventModel(mongoose);
+  const PartyPaiaIntervention = getPartyPaiaInterventionModel(mongoose);
 
   app.get("/api/group-chat/bootstrap", requireChatAuth, async (req, res) => {
     const userId = sanitizeId(req.authUser?._id, "");
@@ -932,6 +940,9 @@ export function registerGroupChatRoutes(app, deps) {
         GroupChatRoom.deleteOne({ _id: roomId }),
         GroupChatMessage.deleteMany({ roomId }),
         GroupChatStoredFile.deleteMany({ roomId }),
+        PartyWebWorkspace.deleteOne({ roomId }),
+        PartyLearningEvent.deleteMany({ roomId }),
+        PartyPaiaIntervention.deleteMany({ roomId }),
       ]);
 
       broadcastGroupChatRoomDissolved(roomId, {
