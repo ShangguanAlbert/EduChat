@@ -5,53 +5,58 @@ import {
   encodeAwarenessUpdate,
   removeAwarenessStates,
 } from "y-protocols/awareness";
-import { getPartyCodingWorkspaceModel } from "./model.js";
+import { createPartyLearningService } from "./learning-service.js";
+import { getPartyWebWorkspaceModel } from "./model.js";
 
-const MAX_CODE_LENGTH = 200_000;
-const MAX_STDIN_LENGTH = 20_000;
-const MAX_CONSOLE_OUTPUT_LENGTH = 200_000;
+const MAX_DOCUMENT_LENGTH = 200_000;
 const MAX_UPDATE_BYTES = 512 * 1024;
 const VERSION_LIMIT = 20;
 const PERSIST_DELAY_MS = 800;
-const COLLABORATION_TEXT_NAME = "code";
-const SERVER_INITIALIZATION_ORIGIN = { type: "party-coding-server-initialization" };
+const DOCUMENT_NAMES = Object.freeze({ html: "html", css: "css" });
+const SERVER_INITIALIZATION_ORIGIN = { type: "party-web-server-initialization" };
 
-function sanitizeCode(value) {
-  return String(value || "").replace(/\r\n/g, "\n").slice(0, MAX_CODE_LENGTH);
+function sanitizeDocument(value) {
+  return String(value || "").replace(/\r\n/g, "\n").slice(0, MAX_DOCUMENT_LENGTH);
 }
 
-function sanitizeStdin(value) {
-  return String(value || "").replace(/\r\n/g, "\n").slice(0, MAX_STDIN_LENGTH);
-}
-
-function sanitizeConsoleOutput(value) {
-  return String(value || "").replace(/\r\n/g, "\n").slice(0, MAX_CONSOLE_OUTPUT_LENGTH);
+function estimateChangedCharacters(beforeValue, afterValue) {
+  const before = sanitizeDocument(beforeValue);
+  const after = sanitizeDocument(afterValue);
+  let prefix = 0;
+  const prefixLimit = Math.min(before.length, after.length);
+  while (prefix < prefixLimit && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  const suffixLimit = Math.min(before.length - prefix, after.length - prefix);
+  while (suffix < suffixLimit && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) {
+    suffix += 1;
+  }
+  return (before.length - prefix - suffix) + (after.length - prefix - suffix);
 }
 
 function normalizeWorkspace(doc) {
   if (!doc) return null;
   return {
     roomId: String(doc.roomId || ""),
-    code: sanitizeCode(doc.code),
-    stdin: sanitizeStdin(doc.stdin),
+    html: sanitizeDocument(doc.html),
+    css: sanitizeDocument(doc.css),
     revision: Math.max(1, Number(doc.revision || 1)),
+    taskRevision: Math.max(1, Number(doc.taskRevision || 1)),
+    taskId: `${String(doc.roomId || "")}:${Math.max(1, Number(doc.taskRevision || 1))}`,
+    taskStage: String(doc.taskStage || "understand"),
+    driverUserId: String(doc.driverUserId || ""),
+    navigatorUserId: String(doc.navigatorUserId || ""),
+    roleRotationCount: Math.max(0, Number(doc.roleRotationCount || 0)),
+    rolesUpdatedAt: doc.rolesUpdatedAt ? new Date(doc.rolesUpdatedAt).toISOString() : "",
+    lastPreviewAt: doc.lastPreviewAt ? new Date(doc.lastPreviewAt).toISOString() : "",
+    lastPreviewByUserId: String(doc.lastPreviewByUserId || ""),
+    lastDiagnostics: Array.isArray(doc.lastDiagnostics) ? doc.lastDiagnostics.map(String).slice(0, 20) : [],
     versions: (Array.isArray(doc.versions) ? doc.versions : []).map((item) => ({
       revision: Number(item?.revision || 0),
-      code: sanitizeCode(item?.code),
+      html: sanitizeDocument(item?.html),
+      css: sanitizeDocument(item?.css),
       savedByName: String(item?.savedByName || "成员").slice(0, 60),
       createdAt: item?.createdAt ? new Date(item.createdAt).toISOString() : "",
     })),
-    run: {
-      status: String(doc?.run?.status || "idle") === "running" ? "running" : "idle",
-      startedByUserId: String(doc?.run?.startedByUserId || ""),
-      startedByName: String(doc?.run?.startedByName || "成员").slice(0, 60),
-      startedAt: doc?.run?.startedAt ? new Date(doc.run.startedAt).toISOString() : "",
-      completedAt: doc?.run?.completedAt ? new Date(doc.run.completedAt).toISOString() : "",
-      stdout: sanitizeConsoleOutput(doc?.run?.stdout),
-      stderr: sanitizeConsoleOutput(doc?.run?.stderr),
-      exitCode: doc?.run?.exitCode == null || doc.run.exitCode === "" ? null : Number.isFinite(Number(doc.run.exitCode)) ? Number(doc.run.exitCode) : null,
-      durationMs: doc?.run?.durationMs == null || doc.run.durationMs === "" ? null : Number.isFinite(Number(doc.run.durationMs)) ? Number(doc.run.durationMs) : null,
-    },
   };
 }
 
@@ -70,13 +75,11 @@ function decodeUpdate(value) {
 
 function sanitizeAwarenessClientIds(rawClientIds) {
   if (!Array.isArray(rawClientIds)) return [];
-  return Array.from(
-    new Set(
-      rawClientIds
-        .map((value) => Number(value))
-        .filter((value) => Number.isSafeInteger(value) && value >= 0),
-    ),
-  ).slice(0, 8);
+  return Array.from(new Set(
+    rawClientIds
+      .map((value) => Number(value))
+      .filter((value) => Number.isSafeInteger(value) && value >= 0),
+  )).slice(0, 8);
 }
 
 export function createPartyCodingRealtime(deps) {
@@ -86,15 +89,15 @@ export function createPartyCodingRealtime(deps) {
     broadcastGroupChatWsPayload,
     sendGroupChatWsPayload,
   } = deps;
-  const Workspace = getPartyCodingWorkspaceModel(mongoose);
+  const Workspace = getPartyWebWorkspaceModel(mongoose);
+  const learning = createPartyLearningService(deps);
   const rooms = new Map();
 
   async function getRoom(roomId) {
     const safeRoomId = sanitizeId(roomId, "");
-    if (!safeRoomId) throw new Error("无效协作编程房间。");
+    if (!safeRoomId) throw new Error("无效网页协作房间。");
     const existing = rooms.get(safeRoomId);
     if (existing) return existing;
-
     const loading = createRoom(safeRoomId);
     rooms.set(safeRoomId, loading);
     try {
@@ -114,7 +117,8 @@ export function createPartyCodingRealtime(deps) {
       { new: true, upsert: true, setDefaultsOnInsert: true },
     ).lean();
     const doc = new Y.Doc();
-    const text = doc.getText(COLLABORATION_TEXT_NAME);
+    const htmlText = doc.getText(DOCUMENT_NAMES.html);
+    const cssText = doc.getText(DOCUMENT_NAMES.css);
     const storedState = Buffer.isBuffer(workspace?.collaborationState)
       ? workspace.collaborationState
       : null;
@@ -122,14 +126,15 @@ export function createPartyCodingRealtime(deps) {
       Y.applyUpdate(doc, new Uint8Array(storedState), SERVER_INITIALIZATION_ORIGIN);
     } else {
       doc.transact(() => {
-        text.insert(0, sanitizeCode(workspace?.code));
+        htmlText.insert(0, sanitizeDocument(workspace?.html));
+        cssText.insert(0, sanitizeDocument(workspace?.css));
       }, SERVER_INITIALIZATION_ORIGIN);
     }
-
     const room = {
       roomId,
       doc,
-      text,
+      htmlText,
+      cssText,
       awareness: new Awareness(doc),
       clientIdsBySocket: new Map(),
       persistTimer: 0,
@@ -138,9 +143,7 @@ export function createPartyCodingRealtime(deps) {
     };
     doc.on("update", (_update, origin) => {
       if (origin === SERVER_INITIALIZATION_ORIGIN) return;
-      if (origin?.partyCodingAuthor) {
-        room.lastAuthor = origin.partyCodingAuthor;
-      }
+      if (origin?.partyCodingAuthor) room.lastAuthor = origin.partyCodingAuthor;
       schedulePersist(room);
     });
     return room;
@@ -160,53 +163,72 @@ export function createPartyCodingRealtime(deps) {
       room.persistTimer = 0;
     }
     room.persistPromise = room.persistPromise.then(async () => {
-      const code = sanitizeCode(room.text.toString());
-      if (code !== room.text.toString()) {
-        room.doc.transact(() => {
-          room.text.delete(MAX_CODE_LENGTH, room.text.length - MAX_CODE_LENGTH);
-        }, SERVER_INITIALIZATION_ORIGIN);
-      }
+      const html = sanitizeDocument(room.htmlText.toString());
+      const css = sanitizeDocument(room.cssText.toString());
       const current = await Workspace.findOne({ roomId: room.roomId }).lean();
-      const collaborationState = Buffer.from(Y.encodeStateAsUpdate(room.doc));
-      const changedCode = sanitizeCode(current?.code) !== code;
+      const changedHtml = sanitizeDocument(current?.html) !== html;
+      const changedCss = sanitizeDocument(current?.css) !== css;
+      const changed = changedHtml || changedCss;
+      if (!changed) return current;
       const safeAuthor = {
         userId: sanitizeId(author?.userId, ""),
         name: String(author?.name || "成员").trim().slice(0, 60) || "成员",
       };
-      const revision = Math.max(1, Number(current?.revision || 1) + (changedCode ? 1 : 0));
-      const update = {
-        $set: {
-          code,
-          collaborationState,
-          revision,
-        },
-      };
-      if (changedCode) {
-        update.$push = {
-          versions: {
-            $each: [{
-              revision,
-              code,
-              savedByUserId: safeAuthor.userId,
-              savedByName: safeAuthor.name,
-              createdAt: new Date(),
-            }],
-            $slice: -VERSION_LIMIT,
-          },
-        };
-      }
+      const revision = Math.max(1, Number(current?.revision || 1) + 1);
       const workspace = await Workspace.findOneAndUpdate(
         { roomId: room.roomId },
-        update,
+        {
+          $set: {
+            html,
+            css,
+            collaborationState: Buffer.from(Y.encodeStateAsUpdate(room.doc)),
+            revision,
+          },
+          $push: {
+            versions: {
+              $each: [{
+                revision,
+                html,
+                css,
+                savedByUserId: safeAuthor.userId,
+                savedByName: safeAuthor.name,
+                createdAt: new Date(),
+              }],
+              $slice: -VERSION_LIMIT,
+            },
+          },
+        },
         { new: true, upsert: true, setDefaultsOnInsert: true },
       ).lean();
+      const changedCharacters = estimateChangedCharacters(current?.html, html)
+        + estimateChangedCharacters(current?.css, css);
+      await learning.recordEvent({
+        roomId: room.roomId,
+        userId: safeAuthor.userId,
+        userName: safeAuthor.name,
+        eventType: "code_edit",
+        metadata: {
+          revision,
+          documents: [changedHtml ? "html" : "", changedCss ? "css" : ""].filter(Boolean),
+          changedCharacters,
+          htmlLength: html.length,
+          cssLength: css.length,
+        },
+        workspace,
+      });
       broadcastGroupChatWsPayload(room.roomId, {
-        type: "coding_workspace_updated",
+        type: "coding_collab_workspace_updated",
         roomId: room.roomId,
         workspace: normalizeWorkspace(workspace),
       });
+      await learning.maybeIntervene({ roomId: room.roomId }).catch((error) => {
+        console.error("[party-web] PAIA intervention evaluation failed", error);
+      });
       return workspace;
-    }).catch(() => null);
+    }).catch((error) => {
+      console.error("[party-web] failed to persist collaboration state", error);
+      return null;
+    });
     return room.persistPromise;
   }
 
@@ -221,9 +243,7 @@ export function createPartyCodingRealtime(deps) {
     const type = String(payload?.type || "").trim().toLowerCase();
     if (!type.startsWith("coding_collab_")) return false;
     const roomId = sanitizeId(payload?.roomId, "");
-    if (!roomId || !meta?.authed || !meta?.userId || !meta.joinedRooms?.has(roomId)) {
-      return true;
-    }
+    if (!roomId || !meta?.authed || !meta?.userId || !meta.joinedRooms?.has(roomId)) return true;
     const room = await getRoom(roomId);
 
     if (type === "coding_collab_join") {
@@ -241,55 +261,36 @@ export function createPartyCodingRealtime(deps) {
           update: encodeUpdate(encodeAwarenessUpdate(room.awareness, awarenessClientIds)),
         });
       }
-      const workspace = await Workspace.findOne({ roomId }).lean();
+      const [workspace, intervention] = await Promise.all([
+        Workspace.findOne({ roomId }).lean(),
+        learning.getLatestIntervention(roomId),
+      ]);
       sendGroupChatWsPayload(socket, {
-        type: "coding_collab_run_updated",
+        type: "coding_collab_workspace_updated",
         roomId,
         workspace: normalizeWorkspace(workspace),
       });
-      return true;
-    }
-
-    if (type === "coding_collab_stdin") {
-      const stdin = sanitizeStdin(payload?.stdin);
-      await Workspace.updateOne(
-        { roomId },
-        { $set: { stdin } },
-        { upsert: true, setDefaultsOnInsert: true },
-      );
-      broadcastGroupChatWsPayload(roomId, {
-        type: "coding_collab_stdin",
-        roomId,
-        stdin,
-      });
-      return true;
-    }
-
-    if (type === "coding_collab_output_clear") {
-      const workspace = await Workspace.findOneAndUpdate(
-        { roomId, "run.status": { $ne: "running" } },
-        {
-          $set: {
-            "run.stdout": "",
-            "run.stderr": "",
-            "run.exitCode": null,
-            "run.durationMs": null,
-            "run.completedAt": null,
-          },
-        },
-        { new: true, upsert: true, setDefaultsOnInsert: true },
-      ).lean();
-      if (workspace) {
-        broadcastGroupChatWsPayload(roomId, {
-          type: "coding_collab_run_updated",
+      if (intervention) {
+        sendGroupChatWsPayload(socket, {
+          type: "coding_collab_intervention",
           roomId,
-          workspace: normalizeWorkspace(workspace),
+          intervention,
         });
       }
       return true;
     }
 
     if (type === "coding_collab_update") {
+      const workspace = await Workspace.findOne({ roomId }, { driverUserId: 1 }).lean();
+      const driverUserId = sanitizeId(workspace?.driverUserId, "");
+      if (driverUserId && driverUserId !== sanitizeId(meta.userId, "")) {
+        sendGroupChatWsPayload(socket, {
+          type: "coding_collab_error",
+          roomId,
+          error: "当前由 Driver 操作代码，请以 Navigator 身份参与讨论和检查。",
+        });
+        return true;
+      }
       const update = decodeUpdate(payload?.update);
       if (!update) return true;
       Y.applyUpdate(room.doc, update, { partyCodingAuthor: getAuthor(meta) });
@@ -315,17 +316,17 @@ export function createPartyCodingRealtime(deps) {
       });
       return true;
     }
-
     return true;
   }
 
-  async function replaceRoomCode({ roomId, code, author }) {
+  async function replaceRoomDocuments({ roomId, html, css, author }) {
     const room = await getRoom(roomId);
     const before = Y.encodeStateVector(room.doc);
-    const safeCode = sanitizeCode(code);
     room.doc.transact(() => {
-      room.text.delete(0, room.text.length);
-      room.text.insert(0, safeCode);
+      room.htmlText.delete(0, room.htmlText.length);
+      room.cssText.delete(0, room.cssText.length);
+      room.htmlText.insert(0, sanitizeDocument(html));
+      room.cssText.insert(0, sanitizeDocument(css));
     }, { partyCodingAuthor: author });
     const update = Y.encodeStateAsUpdate(room.doc, before);
     if (update.length) {
@@ -362,6 +363,6 @@ export function createPartyCodingRealtime(deps) {
     handleWsMessage,
     handleSocketRoomLeft,
     handleSocketClosed,
-    replaceRoomCode,
+    replaceRoomDocuments,
   };
 }

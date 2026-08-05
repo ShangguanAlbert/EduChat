@@ -4,17 +4,17 @@
 
 ## 职责范围
 
-- 派内 Python 代码、标准输入、运行状态和控制台结果的 HTTP/实时同步
-- Python Runner 请求转发、单派单任务互斥、运行审计和教师环境质控接口
+- 派内 HTML/CSS 双文档、光标、角色、任务阶段和预览状态的 HTTP/实时同步
+- 学习过程事件、PAIA 主动介入和学生判断纠正记录
 
 ## 不可变约束
 
-- 学生代码只能由 `PYTHON_RUNNER_URL` 指向的受限 Runner 执行；不得在 Express worker 中执行
-- Redis 全局容量与每派单任务语义必须同时保留；单次运行上限为 20 秒
-- 全派可编辑和运行；仅派主可恢复版本。实时同步要按 `roomId` 严格隔离
-- 运行审计仅保存代码指纹、长度、耗时、队列等待和错误摘要；不得保存完整代码、标准输入或附件内容
+- 网页预览只能由浏览器受限 iframe 完成；不得在 Express 或 worker 中执行学生脚本
+- 仅 Driver 可编辑和刷新预览，Navigator 负责观察、讨论和检查；仅派主可恢复版本
+- 实时同步要按 `roomId` 严格隔离，HTML/CSS Yjs 状态不得串派
+- 过程事件只保存必要元数据，不在事件表重复保存完整网页代码或附件内容
 
 ## 变更与验证
 
-- 改动路由、`realtime.js` 或 `quality-routes.js` 时，检查前端 `PythonCollabPanel`、WebSocket 事件和 `tests/server/` 相关用例
-- 修改并发、内存、PID、队列参数时同步更新 `.env.example`、README 和 Docker Compose；不得在学生代码中开放 `pip install`
+- 改动路由或 `realtime.js` 时，检查前端 `WebCollabPanel`、WebSocket 事件和 `tests/server/` 相关用例
+- 修改预览能力时同步检查 CSP、iframe sandbox、危险标签和 URL 清理，不得开放脚本权限

@@ -1,11 +1,6 @@
 export function buildDevProcessSpecs() {
   return [
     {
-      name: "python-runner",
-      npmArgs: ["run", "python-runner:dev"],
-      waitForApiReady: false,
-    },
-    {
       name: "server",
       npmArgs: ["run", "server"],
       waitForApiReady: true,

@@ -14,9 +14,9 @@
 
 ## 当前平台能力
 
-- `npm run dev` 会依次启动 Python Runner、Express（`8787`）、群聊 AI worker 与 Vite（`5173`）；本地 MongoDB、Redis 应复用已独立运行的实例，不要为联调额外启动整套 Docker Compose
-- 派协作路由为 `/party`：群聊、任务发布栏和附件保持原有交互；施高俊授课范围会展示 Python 实时协作区
-- Python 代码、光标感知、标准输入和运行结果在同一派内同步；服务端通过 Python Runner + Redis 做全局队列和单派互斥，学生运行环境不得开放 `pip install`
+- `npm run dev` 会依次启动 Express（`8787`）、群聊 AI worker 与 Vite（`5173`）；本地 MongoDB、Redis 应复用已独立运行的实例，不要为联调额外启动整套 Docker Compose
+- 派协作路由为 `/party`：群聊、任务发布栏和附件保持原有交互；施高俊授课范围会展示 PAIA HTML/CSS 结对编程区
+- HTML/CSS、光标感知、Driver/Navigator、任务阶段和网页预览状态在同一派内同步；网页预览只能在受限 iframe 中运行，不得开放脚本执行权限
 - 群聊 `@AI` 默认使用阿里云 DashScope / Qwen 3.7 Plus；模型与苏格拉底式提示词由教师后台写入 MongoDB，`.env` 只提供 DashScope 密钥、Redis 和基础运行配置
 
 ## 开发环境
@@ -34,7 +34,6 @@
 - 启动前后端联调：`npm run dev`
 - 仅启动前端：`npm run dev:web`
 - 启动后端：`npm run server`
-- 仅启动 Python Runner：`npm run python-runner:dev`
 - 仅启动群聊 AI worker：`npm run worker:group-chat-ai`
 - 构建前端：`npm run build`
 - 代码检查：`npm run lint`
@@ -54,7 +53,6 @@
   - `server/modules/`：按领域拆分的后端模块（如 chat、images）
   - `server/routes/`：仍在使用的独立路由注册文件
   - `server/services/` / `server/platform/` / `server/providers/`：服务、平台能力与模型/供应商适配
-- `python-runner/`：受限 Python 执行器及其受控依赖清单
 - `tests/`：Node 原生测试
 - `scripts/`：运维、迁移、回填、诊断脚本
 - `docs/`：项目文档
@@ -85,7 +83,7 @@
 - API 与 WebSocket 路径需要兼容基础路径重写逻辑；不要假设部署一定在 `/`
 - 任何会访问数据库、对象存储或第三方模型服务的改动，都要尽量保持可降级、可报错、可观测
 - 群聊 AI 的默认配置、持久化配置和执行 worker 要一起检查；不要将群聊 AI 重新接回已移除的 OpenRouter 或 MiniMax 对话 Provider
-- Python Runner 改动必须同时考虑 Docker 限制、Redis 全局容量、每派单任务语义、20 秒执行上限及运行审计不保存完整学生代码
+- PAIA 网页协作改动必须同时考虑双文档 Yjs 状态、两人角色语义、预览沙箱、过程事件和学生对 AI 判断的纠正记录
 
 ## 测试与验证
 

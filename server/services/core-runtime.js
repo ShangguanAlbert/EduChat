@@ -1315,6 +1315,7 @@ const groupChatRoomSchema = new mongoose.Schema(
   {
     roomCode: { type: String, required: true, unique: true, index: true },
     name: { type: String, required: true, trim: true },
+    teacherScopeKey: { type: String, default: "", index: true },
     announcement: { type: String, default: "" },
     announcementAttachments: {
       type: [groupChatAnnouncementAttachmentSchema],
@@ -13562,6 +13563,7 @@ function normalizeGroupChatRoomDoc(doc, options = {}) {
     id,
     roomCode: sanitizeGroupChatCode(doc.roomCode),
     name: sanitizeGroupChatRoomName(doc.name),
+    teacherScopeKey: sanitizeText(doc.teacherScopeKey, "", 80).toLowerCase(),
     announcement: sanitizeText(doc.announcement, "", 500),
     announcementAttachments: (Array.isArray(doc.announcementAttachments)
       ? doc.announcementAttachments
@@ -16476,7 +16478,7 @@ function broadcastGroupChatMemberJoined(roomId, user) {
 
 async function startServer() {
   await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 6000 });
-  console.log(`Mongo connected: ${mongoUri}`);
+  console.log("Mongo connected.");
   await ensureFixedAdminAccounts();
   await ensureFixedStudentAccounts();
 

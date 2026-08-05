@@ -220,13 +220,13 @@ test("buildGroupChatAiContextSnapshot includes the task and parsed task attachme
   const snapshot = buildGroupChatAiContextSnapshot({
     room: {
       _id: "room-2",
-      name: "Python 协作派",
-      announcement: "完成成绩列表的平均值计算，并解释异常输入。",
+      name: "网页设计协作派",
+      announcement: "完成校园活动介绍页，并解释布局选择。",
       announcementAttachments: [
         {
           fileName: "任务说明.pdf",
           mimeType: "application/pdf",
-          aiContextText: "学生需要先判断输入是否为空，再计算平均值。",
+          aiContextText: "学生需要先规划页面结构，再设计卡片布局。",
           aiContextHint: "PDF 文本解析结果。",
         },
       ],
@@ -241,9 +241,9 @@ test("buildGroupChatAiContextSnapshot includes the task and parsed task attachme
   });
 
   assert.equal(snapshot.roomId, "room-2");
-  assert.equal(snapshot.taskContext.text, "完成成绩列表的平均值计算，并解释异常输入。");
+  assert.equal(snapshot.taskContext.text, "完成校园活动介绍页，并解释布局选择。");
   assert.equal(snapshot.taskContext.attachments[0].fileName, "任务说明.pdf");
-  assert.match(snapshot.taskContext.attachments[0].text, /判断输入是否为空/);
+  assert.match(snapshot.taskContext.attachments[0].text, /规划页面结构/);
 });
 
 test("buildGroupChatAiPendingReplyDraft creates an AI placeholder reply", () => {
@@ -261,7 +261,8 @@ test("buildGroupChatAiPendingReplyDraft creates an AI placeholder reply", () => 
   assert.equal(pendingReply.aiMeta.status, "pending");
   assert.equal(pendingReply.aiMeta.model, "qwen3.7-plus");
   assert.equal(pendingReply.aiMeta.streaming, false);
-  assert.match(pendingReply.content, /排队中/);
+  assert.equal(pendingReply.senderName, "琳琳 · PAIA");
+  assert.match(pendingReply.content, /整理思路/);
 });
 
 test("buildGroupChatAiFailedReplyDraft creates a failed AI reply bound to the trigger message", () => {

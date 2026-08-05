@@ -18,7 +18,6 @@ import { registerAdminRoutes } from "./routes/admin.js";
 import { registerGroupChatRoutes } from "./routes/group-chat.js";
 import { registerNotesRoutes } from "./routes/notes.js";
 import { registerPartyCodingRoutes } from "./modules/party-coding/routes.js";
-import { registerPartyCodingQualityRoutes } from "./modules/party-coding/quality-routes.js";
 import { createGroupChatRealtimeHub } from "./runtime/group-chat-realtime-hub.js";
 import { subscribeGroupChatAiEvents } from "./runtime/group-chat-ai-events.js";
 
@@ -48,7 +47,6 @@ registerNotesRoutes(app, deps);
 registerGroupChatRoutes(app, deps);
 const partyCodingRealtime = registerPartyCodingRoutes(app, deps);
 deps.setPartyCodingRealtime(partyCodingRealtime);
-registerPartyCodingQualityRoutes(app, deps);
 
 app.use("/uploads", express.static(uploadsDir));
 
@@ -81,7 +79,7 @@ app.use((error, _req, res, next) => {
 
 async function startServer() {
   await deps.mongoose.connect(deps.mongoUri, { serverSelectionTimeoutMS: 6000 });
-  console.log(`Mongo connected: ${deps.mongoUri}`);
+  console.log("Mongo connected.");
   await deps.ensureFixedAdminAccounts();
   await deps.ensureFixedStudentAccounts();
 

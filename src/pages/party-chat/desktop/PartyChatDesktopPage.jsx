@@ -75,7 +75,7 @@ import {
   normalizePartyRoomOnlineUserIds,
 } from "../../party/partyRealtimeState.js";
 import { createPartySocketClient } from "../../party/partySocket.js";
-import PythonCollabPanel from "./PythonCollabPanel.jsx";
+import WebCollabPanel from "./WebCollabPanel.jsx";
 import "../../../styles/chat.css";
 import "../../../styles/party-chat.css";
 
@@ -111,9 +111,9 @@ const PARTY_WORKSPACE_MAX_CHAT_RATIO = 0.68;
 const PARTY_GUIDE_ITEMS = Object.freeze([
   ["加入协作", "通过左侧“+”创建派，或输入派号加入已有协作组。"],
   ["发布任务", "派主可在左栏发布任务并上传附件；群聊 AI 会据此理解当前协作目标。"],
-  ["群聊与 AI", "在消息框中输入 @AI 提问。AI 会给出引导、解释错误和局部示例，不会替你完成整题。"],
-  ["Python 协作", "施高俊授课范围内，所有成员共用同一份代码；可运行、查看控制台，并把输出一键发给 AI 提问。"],
-  ["调整布局", "点击左下角边栏按钮可显示或隐藏“我的派”；拖动聊天区和 Python 区之间的分隔条可调整宽度。"],
+  ["群聊与琳琳", "在消息框中输入 @AI 提问。琳琳会给出追问、概念解释和局部示例，不会替你完成整个网页。"],
+  ["网页结对编程", "两名同学以 Driver 和 Navigator 角色共同编写 HTML/CSS、刷新预览并按任务要求轮换角色。"],
+  ["调整布局", "点击左下角边栏按钮可显示或隐藏“我的派”；拖动聊天区和网页编程区之间的分隔条可调整宽度。"],
 ]);
 
 function clampPartyWorkspaceSplit(value) {
@@ -2093,10 +2093,6 @@ export default function PartyChatDesktopPage({
     socketRef.current?.sendCodingCollaborationAwareness(roomId, update, clientIds);
   }, []);
 
-  const clearCodingCollaborationOutput = useCallback((roomId) => {
-    return socketRef.current?.clearCodingCollaborationOutput(roomId) || false;
-  }, []);
-
   useEffect(() => {
     if (!activeRoomId) return;
     void loadMessages(activeRoomId, { replace: true });
@@ -2871,38 +2867,6 @@ export default function PartyChatDesktopPage({
         setSendingFile(false);
       }
     })();
-  }
-
-  async function handleAskAiAboutPythonOutput(output) {
-    const roomId = String(activeRoomId || "").trim();
-    const consoleOutput = String(output || "").trim();
-    if (!roomId || !consoleOutput) return;
-    if (activeRoomSelfMuted) {
-      setActionError(PARTY_MEMBER_MUTED_BLOCKED_MESSAGE);
-      return;
-    }
-
-    const safeOutput = consoleOutput.replaceAll("```", "'''");
-    const message = [
-      "@AI 我运行 Python 后得到下面的控制台输出。这个是什么问题？",
-      "请用学生能理解的话解释原因，并告诉我下一步可以检查什么；不要直接给我完整代码。",
-      "",
-      "```text",
-      safeOutput,
-      "```",
-    ].join("\n");
-
-    forceScrollToLatestRef.current = true;
-    requestAnimationFrame(() => {
-      scrollToLatestMessages("auto");
-    });
-    try {
-      await dispatchTextMessage(roomId, message);
-      setActionError("");
-    } catch (error) {
-      setActionError(error?.message || "发送给 AI 失败，请稍后重试。");
-      throw error;
-    }
   }
 
   function onPickImageFile(event) {
@@ -4382,7 +4346,19 @@ export default function PartyChatDesktopPage({
         </div>
 
         {String(getStoredAuthUser()?.teacherScopeKey || "").trim().toLowerCase() === SHI_GAOJUN_TEACHER_SCOPE_KEY ? (
-          activeRoom ? <PythonCollabPanel roomId={activeRoom.id} me={me} codingEditors={codingEditorsByRoom[activeRoom.id] || []} onEditingChange={setCodingEditorPresence} onJoinCollaboration={joinCodingCollaboration} onLeaveCollaboration={leaveCodingCollaboration} onCollaborationUpdate={sendCodingCollaborationUpdate} onCollaborationAwareness={sendCodingCollaborationAwareness} onCollaborationOutputClear={clearCodingCollaborationOutput} onAskAiAboutOutput={handleAskAiAboutPythonOutput} subscribeToCollaboration={subscribeCodingCollaboration} /> : <aside className="party-agent-column" />
+          activeRoom ? <WebCollabPanel
+            roomId={activeRoom.id}
+            me={me}
+            members={activeMembers}
+            taskText={activeRoom.announcement}
+            codingEditors={codingEditorsByRoom[activeRoom.id] || []}
+            onEditingChange={setCodingEditorPresence}
+            onJoinCollaboration={joinCodingCollaboration}
+            onLeaveCollaboration={leaveCodingCollaboration}
+            onCollaborationUpdate={sendCodingCollaborationUpdate}
+            onCollaborationAwareness={sendCodingCollaborationAwareness}
+            subscribeToCollaboration={subscribeCodingCollaboration}
+          /> : <aside className="party-agent-column" />
         ) : <aside className="party-agent-column" aria-label="派Agent">
           <div className={`party-agent-panel${partyAgentAccessBlocked ? " is-access-blocked" : ""}`}>
             <div className="party-agent-panel-head">

@@ -12,8 +12,11 @@ import {
   rollbackGroupChatAiPendingCapacity,
 } from "../runtime/group-chat-ai-redis.js";
 import { clipText, parseFileContent } from "../platform/files/content-parser.js";
+import { createPartyLearningService } from "../modules/party-coding/learning-service.js";
 
 const GROUP_CHAT_TASK_ATTACHMENT_CONTEXT_MAX_CHARS = 8_000;
+const PAIA_TEACHER_SCOPE_KEY = "shi-gaojun";
+const PAIA_PAIR_MEMBER_LIMIT = 2;
 
 async function parseTaskAttachmentAiContext(file) {
   try {
@@ -230,6 +233,7 @@ export function registerGroupChatRoutes(app, deps) {
     broadcastGroupChatRoomDissolved,
     broadcastGroupChatMemberJoined,
   } = deps;
+  const partyLearning = createPartyLearningService(deps);
 
   app.get("/api/group-chat/bootstrap", requireChatAuth, async (req, res) => {
     const userId = sanitizeId(req.authUser?._id, "");
@@ -262,7 +266,9 @@ export function registerGroupChatRoutes(app, deps) {
             : "user",
         },
         limits: {
-          maxMembersPerRoom: GROUP_CHAT_MAX_MEMBERS_PER_ROOM,
+          maxMembersPerRoom: String(req.authTeacherScopeKey || "").trim().toLowerCase() === PAIA_TEACHER_SCOPE_KEY
+            ? PAIA_PAIR_MEMBER_LIMIT
+            : GROUP_CHAT_MAX_MEMBERS_PER_ROOM,
         },
         users: memberUsers,
         rooms: roomItems,
@@ -291,6 +297,7 @@ export function registerGroupChatRoutes(app, deps) {
       const roomDoc = await GroupChatRoom.create({
         roomCode,
         name: roomName,
+        teacherScopeKey: String(req.authTeacherScopeKey || "").trim().toLowerCase(),
         ownerUserId: userId,
         memberUserIds: [userId],
         memberCount: 1,
@@ -350,17 +357,24 @@ export function registerGroupChatRoutes(app, deps) {
         return;
       }
 
+      const roomMemberLimit = String(room?.teacherScopeKey || req.authTeacherScopeKey || "").trim().toLowerCase() === PAIA_TEACHER_SCOPE_KEY
+        ? PAIA_PAIR_MEMBER_LIMIT
+        : GROUP_CHAT_MAX_MEMBERS_PER_ROOM;
+
       const updated = await GroupChatRoom.findOneAndUpdate(
         {
           _id: normalizedRoom.id,
           memberUserIds: { $ne: userId },
-          [`memberUserIds.${Math.max(0, GROUP_CHAT_MAX_MEMBERS_PER_ROOM - 1)}`]: { $exists: false },
-          memberCount: { $lt: GROUP_CHAT_MAX_MEMBERS_PER_ROOM },
+          [`memberUserIds.${Math.max(0, roomMemberLimit - 1)}`]: { $exists: false },
+          memberCount: { $lt: roomMemberLimit },
         },
         {
           $addToSet: { memberUserIds: userId },
           $inc: { memberCount: 1 },
-          $set: { updatedAt: new Date() },
+          $set: {
+            updatedAt: new Date(),
+            ...(roomMemberLimit === PAIA_PAIR_MEMBER_LIMIT ? { teacherScopeKey: PAIA_TEACHER_SCOPE_KEY } : {}),
+          },
         },
         { new: true },
       ).lean();
@@ -382,9 +396,9 @@ export function registerGroupChatRoutes(app, deps) {
           });
           return;
         }
-        if (latestRoom.memberCount >= GROUP_CHAT_MAX_MEMBERS_PER_ROOM) {
+        if (latestRoom.memberCount >= roomMemberLimit) {
           res.status(409).json({
-            error: `该群已满（最多 ${GROUP_CHAT_MAX_MEMBERS_PER_ROOM} 人）。`,
+            error: `该群已满（最多 ${roomMemberLimit} 人）。`,
           });
           return;
         }
@@ -552,6 +566,14 @@ export function registerGroupChatRoutes(app, deps) {
       }
 
       broadcastGroupChatRoomUpdated(roomId, updatedRoom);
+      if (String(updatedRoom.teacherScopeKey || req.authTeacherScopeKey || "").trim().toLowerCase() === PAIA_TEACHER_SCOPE_KEY) {
+        await partyLearning.startTask({
+          roomId,
+          userId,
+          userName: buildGroupChatDisplayName(req.authUser),
+          taskText: announcement,
+        });
+      }
       res.json({ ok: true, room: updatedRoom });
     } catch (error) {
       res.status(500).json({
@@ -1134,6 +1156,21 @@ export function registerGroupChatRoutes(app, deps) {
         throw new Error("消息格式化失败");
       }
       broadcastGroupChatMessageCreated(roomId, normalizedMessage);
+
+      if (String(req.authTeacherScopeKey || "").trim().toLowerCase() === PAIA_TEACHER_SCOPE_KEY) {
+        await partyLearning.recordEvent({
+          roomId,
+          userId,
+          userName: senderName,
+          eventType: "chat_message",
+          metadata: { content },
+        }).catch((error) => {
+          console.error("[party-web] failed to record chat learning event", error);
+        });
+        await partyLearning.maybeIntervene({ roomId }).catch((error) => {
+          console.error("[party-web] chat intervention evaluation failed", error);
+        });
+      }
 
       if (isGroupChatAiMentionRequested(content)) {
         const recentDocs = await GroupChatMessage.find({ roomId })

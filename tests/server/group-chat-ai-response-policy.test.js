@@ -12,7 +12,7 @@ test("group-chat response policy allows Socratic explanations and local syntax e
   assert.equal(enforceGroupChatAiSocraticResponse(content), content);
 });
 
-test("group-chat response policy replaces multi-step Python solutions with a Socratic fallback", () => {
+test("group-chat response policy replaces complete code solutions with a Socratic fallback", () => {
   const content = [
     "total = 0",
     "for value in scores:",
@@ -20,5 +20,5 @@ test("group-chat response policy replaces multi-step Python solutions with a Soc
     "print(total / len(scores))",
   ].join("\n");
   assert.equal(isGroupChatAiCompleteSolutionOutput(content), true);
-  assert.match(enforceGroupChatAiSocraticResponse(content), /接近完整解法/);
+  assert.match(enforceGroupChatAiSocraticResponse(content), /接近完整作品/);
 });

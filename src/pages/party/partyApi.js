@@ -106,24 +106,41 @@ export function fetchPartyCodingWorkspace(roomId) {
   return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding`);
 }
 
-export function savePartyCodingWorkspace(roomId, code) {
+export function savePartyCodingWorkspace(roomId, { html, css }) {
   return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding`, {
     method: "PUT",
-    body: JSON.stringify({ code: String(code || "") }),
+    body: JSON.stringify({ html: String(html || ""), css: String(css || "") }),
   });
 }
 
-export function savePartyCodingStdin(roomId, stdin) {
-  return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding/stdin`, {
-    method: "PUT",
-    body: JSON.stringify({ stdin: String(stdin || "") }),
+export function updatePartyCodingSession(roomId, payload) {
+  return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding/session`, {
+    method: "PATCH",
+    body: JSON.stringify(payload || {}),
   });
 }
 
-export function runPartyPython(roomId, { code, stdin }) {
-  return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding/run`, {
+export function recordPartyWebPreview(roomId, diagnostics = []) {
+  return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding/preview`, {
     method: "POST",
-    body: JSON.stringify({ code: String(code || ""), stdin: String(stdin || "") }),
+    body: JSON.stringify({ diagnostics: Array.isArray(diagnostics) ? diagnostics : [] }),
+  });
+}
+
+export function submitPartyPaiaFeedback(roomId, interventionId, { feedback, note = "" }) {
+  return request(
+    `/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding/interventions/${encodeURIComponent(String(interventionId || "").trim())}/feedback`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ feedback: String(feedback || ""), note: String(note || "") }),
+    },
+  );
+}
+
+export function restorePartyWebWorkspace(roomId, revision) {
+  return request(`/api/group-chat/rooms/${encodeURIComponent(String(roomId || "").trim())}/coding/restore`, {
+    method: "POST",
+    body: JSON.stringify({ revision: Number(revision) || 0 }),
   });
 }
 

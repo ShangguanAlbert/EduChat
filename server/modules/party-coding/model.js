@@ -1,8 +1,52 @@
-export function getPartyCodingWorkspaceModel(mongoose) {
+const DEFAULT_HTML = `<main class="page-card">
+  <h1>我们的网页作品</h1>
+  <p>请和同伴一起修改 HTML 与 CSS，然后刷新预览。</p>
+</main>
+`;
+
+const DEFAULT_CSS = `body {
+  margin: 0;
+  padding: 32px;
+  font-family: system-ui, sans-serif;
+  background: #f7f3ea;
+  color: #2f2a24;
+}
+
+.page-card {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 32px;
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: 0 12px 36px rgba(77, 61, 42, 0.12);
+}
+`;
+
+export const PARTY_WEB_DEFAULTS = Object.freeze({
+  html: DEFAULT_HTML,
+  css: DEFAULT_CSS,
+  taskStage: "understand",
+});
+
+const TASK_STAGES = ["understand", "plan", "build", "debug", "reflect"];
+const LEARNING_EVENT_TYPES = [
+  "chat_message",
+  "code_edit",
+  "preview",
+  "diagnostic_error",
+  "task_switch",
+  "task_stage_change",
+  "role_rotation",
+  "paia_intervention",
+  "paia_feedback",
+];
+
+export function getPartyWebWorkspaceModel(mongoose) {
   const versionSchema = new mongoose.Schema(
     {
       revision: { type: Number, required: true },
-      code: { type: String, default: "" },
+      html: { type: String, default: "" },
+      css: { type: String, default: "" },
       savedByUserId: { type: String, default: "" },
       savedByName: { type: String, default: "" },
       createdAt: { type: Date, default: Date.now },
@@ -12,68 +56,69 @@ export function getPartyCodingWorkspaceModel(mongoose) {
   const schema = new mongoose.Schema(
     {
       roomId: { type: String, required: true, unique: true, index: true },
-      code: { type: String, default: "print('你好，Python！')\n" },
+      html: { type: String, default: DEFAULT_HTML },
+      css: { type: String, default: DEFAULT_CSS },
       collaborationState: { type: Buffer, default: null },
-      stdin: { type: String, default: "" },
       revision: { type: Number, default: 1 },
+      taskRevision: { type: Number, default: 1 },
       versions: { type: [versionSchema], default: () => [] },
-      run: {
-        status: { type: String, enum: ["idle", "running"], default: "idle" },
-        runId: { type: String, default: "" },
-        startedAt: { type: Date, default: null },
-        startedByUserId: { type: String, default: "" },
-        startedByName: { type: String, default: "" },
-        stdout: { type: String, default: "" },
-        stderr: { type: String, default: "" },
-        exitCode: { type: Number, default: null },
-        durationMs: { type: Number, default: null },
-        completedAt: { type: Date, default: null },
-      },
+      taskStage: { type: String, enum: TASK_STAGES, default: "understand" },
+      driverUserId: { type: String, default: "", index: true },
+      navigatorUserId: { type: String, default: "", index: true },
+      roleRotationCount: { type: Number, default: 0 },
+      rolesUpdatedAt: { type: Date, default: null },
+      lastPreviewAt: { type: Date, default: null },
+      lastPreviewByUserId: { type: String, default: "" },
+      lastDiagnostics: { type: [String], default: () => [] },
     },
-    { timestamps: true, collection: "party_coding_workspaces" },
+    { timestamps: true, collection: "party_web_workspaces" },
   );
-  return mongoose.models.PartyCodingWorkspace || mongoose.model("PartyCodingWorkspace", schema);
+  return mongoose.models.PartyWebWorkspace || mongoose.model("PartyWebWorkspace", schema);
 }
 
-export function getPartyCodingRunLogModel(mongoose) {
+export function getPartyLearningEventModel(mongoose) {
   const schema = new mongoose.Schema(
     {
       roomId: { type: String, required: true, index: true },
-      runId: { type: String, required: true, unique: true, index: true },
-      teacherScopeKey: { type: String, required: true, index: true },
-      startedByUserId: { type: String, default: "", index: true },
-      startedByName: { type: String, default: "成员" },
-      codeSha256: { type: String, default: "" },
-      codeLength: { type: Number, default: 0 },
-      stdinLength: { type: Number, default: 0 },
-      status: {
+      taskId: { type: String, default: "", index: true },
+      taskStage: { type: String, enum: TASK_STAGES, default: "understand", index: true },
+      userId: { type: String, default: "", index: true },
+      userName: { type: String, default: "成员" },
+      role: { type: String, enum: ["driver", "navigator", "observer", "paia"], default: "observer" },
+      eventType: { type: String, enum: LEARNING_EVENT_TYPES, required: true, index: true },
+      metadata: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+      occurredAt: { type: Date, default: Date.now, required: true, index: true },
+    },
+    { timestamps: true, collection: "party_learning_events" },
+  );
+  schema.index({ roomId: 1, occurredAt: -1 });
+  schema.index({ roomId: 1, eventType: 1, occurredAt: -1 });
+  return mongoose.models.PartyLearningEvent || mongoose.model("PartyLearningEvent", schema);
+}
+
+export function getPartyPaiaInterventionModel(mongoose) {
+  const schema = new mongoose.Schema(
+    {
+      roomId: { type: String, required: true, index: true },
+      taskId: { type: String, default: "", index: true },
+      taskStage: { type: String, enum: TASK_STAGES, default: "understand" },
+      triggerType: {
         type: String,
-        enum: [
-          "succeeded",
-          "failed",
-          "timed_out",
-          "queue_full",
-          "scheduler_unavailable",
-          "runner_unavailable",
-        ],
+        enum: ["participation_imbalance", "quick_agreement", "repeated_trial", "ai_answer_adoption"],
         required: true,
         index: true,
       },
-      exitCode: { type: Number, default: null },
-      durationMs: { type: Number, default: 0 },
-      queueWaitMs: { type: Number, default: 0 },
-      errorSummary: { type: String, default: "" },
-      startedAt: { type: Date, required: true, index: true },
-      completedAt: { type: Date, required: true },
-      expiresAt: {
-        type: Date,
-        required: true,
-        index: { expires: 0 },
-      },
+      evidenceSummary: { type: String, required: true },
+      prompt: { type: String, required: true },
+      targetUserId: { type: String, default: "" },
+      feedback: { type: String, enum: ["", "correct", "partial", "incorrect"], default: "" },
+      feedbackNote: { type: String, default: "" },
+      feedbackByUserId: { type: String, default: "" },
+      feedbackAt: { type: Date, default: null },
+      createdAt: { type: Date, default: Date.now, index: true },
     },
-    { timestamps: true, collection: "party_coding_run_logs" },
+    { timestamps: true, collection: "party_paia_interventions" },
   );
-  schema.index({ teacherScopeKey: 1, startedAt: -1 });
-  schema.index({ roomId: 1, startedAt: -1 });
-  return mongoose.models.PartyCodingRunLog || mongoose.model("PartyCodingRunLog", schema);
+  schema.index({ roomId: 1, createdAt: -1 });
+  return mongoose.models.PartyPaiaIntervention || mongoose.model("PartyPaiaIntervention", schema);
 }

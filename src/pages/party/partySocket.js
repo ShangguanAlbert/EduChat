@@ -316,12 +316,6 @@ export function createPartySocketClient({
     });
   }
 
-  function clearCodingCollaborationOutput(roomId) {
-    const safeRoomId = sanitizeRoomId(roomId);
-    if (!safeRoomId || !authed) return false;
-    return send({ type: "coding_collab_output_clear", roomId: safeRoomId });
-  }
-
   return {
     connect,
     close,
@@ -333,6 +327,5 @@ export function createPartySocketClient({
     leaveCodingCollaboration,
     sendCodingCollaborationUpdate,
     sendCodingCollaborationAwareness,
-    clearCodingCollaborationOutput,
   };
 }
