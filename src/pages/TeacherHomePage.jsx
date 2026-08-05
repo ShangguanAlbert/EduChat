@@ -112,6 +112,7 @@ import {
   saveAdminClassroomSeatLayouts,
   updateAdminUserDirectoryUser,
   uploadAdminClassroomTaskFiles,
+  updateAdminCollaborationClassroomMonitoring,
 } from "./admin/adminApi.js";
 import { clearAdminToken, getAdminToken } from "./login/adminSession.js";
 import {
@@ -150,6 +151,7 @@ const TEACHER_HOME_PANEL_KEYS = Object.freeze(
     "user-manage",
     "export-center",
     "image-library",
+    "group-chat-manage",
     "party-manage",
     "online",
   ]),
@@ -172,6 +174,9 @@ const CLASSROOM_MANAGE_HIDDEN_ADMIN_USERNAME_KEYS = Object.freeze(
   ),
 );
 const TERMINAL_ADMIN_USERNAME_KEY = "上官福泽"
+  .replace(/\s+/g, "")
+  .toLowerCase();
+const SHI_GAOJUN_ADMIN_USERNAME_KEY = "施高俊"
   .replace(/\s+/g, "")
   .toLowerCase();
 const USER_DIRECTORY_DEFAULT_TARGET_CLASSES = Object.freeze([
@@ -212,6 +217,13 @@ const USER_CREATE_DEFAULT_TEACHER_SCOPE_KEY =
       DEFAULT_TEACHER_SCOPE_KEY,
   ).trim() || DEFAULT_TEACHER_SCOPE_KEY;
 const PARTY_ROOM_CREATE_MAX_MEMBERS = 10;
+const PARTY_TASK_STAGE_LABELS = Object.freeze({
+  understand: "理解任务",
+  plan: "设计方案",
+  build: "编写网页",
+  debug: "调试改进",
+  reflect: "总结反思",
+});
 const TEACHER_HOME_REFRESH_SUCCESS_MS = 2000;
 const TASK_FILE_UPLOAD_STATUS_TEXT = "文件正在上传，请稍后。";
 const TASK_FILE_DOWNLOAD_STATUS_TEXT = "文件正在下载，请稍后。";
@@ -1435,6 +1447,7 @@ export default function TeacherHomePage() {
   });
   const [copiedPartyRoomId, setCopiedPartyRoomId] = useState("");
   const [dissolvingPartyRoomId, setDissolvingPartyRoomId] = useState("");
+  const [updatingMonitoringRoomId, setUpdatingMonitoringRoomId] = useState("");
 
   const [onlineLoading, setOnlineLoading] = useState(false);
   const [onlineGeneratedAt, setOnlineGeneratedAt] = useState("");
@@ -1684,9 +1697,9 @@ export default function TeacherHomePage() {
     }
   }, [adminToken, handleAuthError, loadFinalTestSubmissions]);
 
-  const loadPartyRoomManage = useCallback(async () => {
+  const loadPartyRoomManage = useCallback(async ({ silent = false } = {}) => {
     if (!adminToken) return;
-    setPartyRoomManageLoading(true);
+    if (!silent) setPartyRoomManageLoading(true);
     try {
       const data = await fetchAdminGroupChatRooms(adminToken);
       setPartyRoomItems(Array.isArray(data?.rooms) ? data.rooms : []);
@@ -1698,7 +1711,7 @@ export default function TeacherHomePage() {
       if (handleAuthError(rawError)) return;
       setError(readErrorMessage(rawError));
     } finally {
-      setPartyRoomManageLoading(false);
+      if (!silent) setPartyRoomManageLoading(false);
     }
   }, [adminToken, handleAuthError]);
 
@@ -1910,8 +1923,15 @@ export default function TeacherHomePage() {
   }, [activePanel, loadOnlineSummary]);
 
   useEffect(() => {
-    if (activePanel !== "party-manage") return;
+    if (
+      activePanel !== "group-chat-manage" &&
+      activePanel !== "party-manage"
+    ) return;
     void loadPartyRoomManage();
+    const timerId = window.setInterval(() => {
+      void loadPartyRoomManage({ silent: true });
+    }, 5000);
+    return () => window.clearInterval(timerId);
   }, [activePanel, loadPartyRoomManage]);
 
   useEffect(() => {
@@ -2166,6 +2186,10 @@ export default function TeacherHomePage() {
     () => adminUsernameKey === TERMINAL_ADMIN_USERNAME_KEY,
     [adminUsernameKey],
   );
+  const isShiGaojunAdmin = useMemo(
+    () => adminUsernameKey === SHI_GAOJUN_ADMIN_USERNAME_KEY,
+    [adminUsernameKey],
+  );
   const currentAdminUserId = useMemo(
     () => String(adminProfile.id || "").trim(),
     [adminProfile.id],
@@ -2266,7 +2290,10 @@ export default function TeacherHomePage() {
           { key: "user-manage", label: "用户信息", icon: Users },
           { key: "export-center", label: "导出中心", icon: Download },
           { key: "image-library", label: "图片管理", icon: Image },
-          { key: "party-manage", label: "群聊管理", icon: MessageCircleMore },
+          { key: "group-chat-manage", label: "群聊管理", icon: MessageCircleMore },
+          ...(isShiGaojunAdmin
+            ? [{ key: "party-manage", label: "协作小教室", icon: Activity }]
+            : []),
           { key: "online", label: "在线状态", icon: Eye },
         ],
       },
@@ -2305,7 +2332,7 @@ export default function TeacherHomePage() {
         };
       })
       .filter((group) => Array.isArray(group.items) && group.items.length > 0);
-  }, [hideClassroomManagePanels]);
+  }, [hideClassroomManagePanels, isShiGaojunAdmin]);
 
   const availablePanelKeys = useMemo(
     () =>
@@ -3104,8 +3131,29 @@ export default function TeacherHomePage() {
     return groups;
   }, [imageLibraryClassFilter, imageLibraryGroups, imageLibrarySortBy]);
 
+  const collaborationClassroomItems = useMemo(
+    () =>
+      (Array.isArray(partyRoomItems) ? partyRoomItems : []).filter(
+        (room) =>
+          String(room?.teacherScopeKey || "")
+            .trim()
+            .toLowerCase() === "shi-gaojun",
+      ),
+    [partyRoomItems],
+  );
+  const groupChatRoomItems = useMemo(
+    () =>
+      (Array.isArray(partyRoomItems) ? partyRoomItems : []).filter(
+        (room) =>
+          String(room?.teacherScopeKey || "")
+            .trim()
+            .toLowerCase() !== "shi-gaojun",
+      ),
+    [partyRoomItems],
+  );
+
   const partyRoomSummary = useMemo(() => {
-    const rooms = Array.isArray(partyRoomItems) ? partyRoomItems : [];
+    const rooms = groupChatRoomItems;
     const memberIdSet = new Set();
     rooms.forEach((room) => {
       const members = Array.isArray(room?.members) ? room.members : [];
@@ -3118,12 +3166,12 @@ export default function TeacherHomePage() {
       roomCount: rooms.length,
       memberCount: memberIdSet.size,
     };
-  }, [partyRoomItems]);
+  }, [groupChatRoomItems]);
 
   const partyRoomOwnerOptions = useMemo(() => {
     const options = [];
     const seen = new Set();
-    partyRoomItems.forEach((room) => {
+    groupChatRoomItems.forEach((room) => {
       const owner =
         room?.owner && typeof room.owner === "object" ? room.owner : null;
       const ownerId = String(owner?.id || "").trim();
@@ -3141,7 +3189,7 @@ export default function TeacherHomePage() {
       });
     });
     return options;
-  }, [partyRoomItems]);
+  }, [groupChatRoomItems]);
   const partyRoomCreateOwnerOptions = useMemo(
     () =>
       (Array.isArray(partyRoomManageUsers) ? partyRoomManageUsers : [])
@@ -3204,7 +3252,7 @@ export default function TeacherHomePage() {
     partyRoomCreateSelectedMemberCount >= PARTY_ROOM_CREATE_MAX_MEMBERS;
 
   const visiblePartyRoomItems = useMemo(() => {
-    let rooms = Array.isArray(partyRoomItems) ? [...partyRoomItems] : [];
+    let rooms = [...groupChatRoomItems];
     if (partyRoomOwnerFilter !== "all") {
       rooms = rooms.filter(
         (room) => String(room?.owner?.id || "").trim() === partyRoomOwnerFilter,
@@ -3260,7 +3308,7 @@ export default function TeacherHomePage() {
     });
     return rooms;
   }, [
-    partyRoomItems,
+    groupChatRoomItems,
     partyRoomOwnerFilter,
     partyRoomMemberSearchInput,
     partyRoomSortBy,
@@ -5056,6 +5104,42 @@ export default function TeacherHomePage() {
       setError(readErrorMessage(rawError));
     } finally {
       setDissolvingPartyRoomId("");
+    }
+  }
+
+  async function onToggleClassroomMonitoring(room) {
+    const roomId = String(room?.id || "").trim();
+    if (!roomId || !adminToken || updatingMonitoringRoomId) return;
+    const nextEnabled = room?.paiaMonitoringEnabled !== true;
+    setError("");
+    setUpdatingMonitoringRoomId(roomId);
+    try {
+      const data = await updateAdminCollaborationClassroomMonitoring(
+        adminToken,
+        roomId,
+        nextEnabled,
+      );
+      setPartyRoomItems((current) =>
+        current.map((item) =>
+          String(item?.id || "").trim() === roomId
+            ? {
+                ...item,
+                paiaMonitoringEnabled: data?.monitoring?.enabled === true,
+                paiaMonitoringStartedAt: String(
+                  data?.monitoring?.startedAt || "",
+                ),
+                paiaMonitoringUpdatedAt: String(
+                  data?.monitoring?.updatedAt || "",
+                ),
+              }
+            : item,
+        ),
+      );
+    } catch (rawError) {
+      if (handleAuthError(rawError)) return;
+      setError(readErrorMessage(rawError));
+    } finally {
+      setUpdatingMonitoringRoomId("");
     }
   }
 
@@ -8720,6 +8804,187 @@ export default function TeacherHomePage() {
               <div className="teacher-panel-stack teacher-party-manage-stack">
                 <header className="teacher-panel-head">
                   <div>
+                    <h2>协作小教室管理</h2>
+                    <p className="teacher-panel-save-time">
+                      {`最近刷新：${formatDisplayTime(partyRoomManageUpdatedAt)}`}
+                    </p>
+                  </div>
+                  <div className="teacher-panel-actions">
+                    <button
+                      type="button"
+                      className="teacher-ghost-btn teacher-tooltip-btn teacher-action-icon-btn"
+                      onClick={() => void loadPartyRoomManage()}
+                      disabled={partyRoomManageLoading}
+                      aria-label={partyRoomManageLoading ? "刷新中" : "刷新"}
+                      title={partyRoomManageLoading ? "刷新中" : "刷新"}
+                    >
+                      <RefreshCw
+                        size={15}
+                        className={partyRoomManageLoading ? "is-spinning" : ""}
+                      />
+                    </button>
+                  </div>
+                </header>
+
+                <p className="teacher-collab-classroom-note">
+                  这里仅用于查看学生的实时协作进展并控制琳琳状态检测。教师不能进入小教室发言。
+                </p>
+
+                <section className="teacher-card teacher-party-manage-card">
+                  <div className="teacher-party-manage-summary">
+                    <span>{`小教室：${collaborationClassroomItems.length}`}</span>
+                    <span>{`检测中：${collaborationClassroomItems.filter((room) => room?.paiaMonitoringEnabled === true).length}`}</span>
+                  </div>
+
+                  <div className="teacher-party-room-list">
+                    {collaborationClassroomItems.length === 0 ? (
+                      <p className="teacher-empty-text">
+                        {partyRoomManageLoading
+                          ? "正在读取协作小教室..."
+                          : "当前暂无协作小教室。"}
+                      </p>
+                    ) : (
+                      collaborationClassroomItems.map((room, roomIndex) => {
+                        const roomId =
+                          String(room?.id || "").trim() ||
+                          `collaboration-classroom-${roomIndex + 1}`;
+                        const students = (Array.isArray(room?.members)
+                          ? room.members
+                          : []
+                        )
+                          .filter(
+                            (member) =>
+                              String(member?.role || "")
+                                .trim()
+                                .toLowerCase() === "user",
+                          )
+                          .slice(0, 2);
+                        const codingProgress = room?.codingProgress || null;
+                        const monitoringEnabled =
+                          room?.paiaMonitoringEnabled === true;
+                        const updating = updatingMonitoringRoomId === roomId;
+                        const findStudentName = (userId) =>
+                          students.find(
+                            (student) =>
+                              String(student?.id || "") ===
+                              String(userId || ""),
+                          )?.displayName || "未分配";
+                        return (
+                          <article
+                            key={roomId}
+                            className="teacher-party-room-item teacher-collab-classroom-item"
+                          >
+                            <header className="teacher-party-room-head">
+                              <div>
+                                <h3>{room?.name || "未命名小教室"}</h3>
+                                <p>{`学生 ${students.length}/2 · 最近更新 ${formatDisplayTime(room?.updatedAt)}`}</p>
+                              </div>
+                              <span
+                                className={`teacher-collab-monitor-status${monitoringEnabled ? " is-enabled" : ""}`}
+                              >
+                                {monitoringEnabled ? "琳琳检测中" : "琳琳未检测"}
+                              </span>
+                            </header>
+
+                            <div className="teacher-collab-monitor">
+                              <div>
+                                <strong>琳琳状态检测</strong>
+                                <span>
+                                  {monitoringEnabled
+                                    ? `已于 ${formatDisplayTime(room?.paiaMonitoringStartedAt)} 启动，正在分析启动后的协作行为。`
+                                    : "启动后，琳琳才会记录协作行为并在需要时主动提示。"}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                className={
+                                  monitoringEnabled
+                                    ? "teacher-ghost-btn teacher-collab-monitor-toggle"
+                                    : "teacher-primary-btn teacher-collab-monitor-toggle"
+                                }
+                                onClick={() =>
+                                  void onToggleClassroomMonitoring(room)
+                                }
+                                disabled={updatingMonitoringRoomId !== ""}
+                              >
+                                {updating
+                                  ? "处理中..."
+                                  : monitoringEnabled
+                                    ? "停止检测"
+                                    : "启动检测"}
+                              </button>
+                            </div>
+
+                            {codingProgress ? (
+                              <div className="teacher-party-coding-progress">
+                                <div>
+                                  <strong>实时协作进展</strong>
+                                  <span>{PARTY_TASK_STAGE_LABELS[codingProgress.taskStage] || "理解任务"}</span>
+                                  <span>{`代码版本 ${Number(codingProgress.revision || 0)}`}</span>
+                                  <span>{`已交棒 ${Number(codingProgress.roleRotationCount || 0)} 次`}</span>
+                                </div>
+                                <div>
+                                  <span>{`Driver：${findStudentName(codingProgress.driverUserId)}`}</span>
+                                  <span>{`Navigator：${findStudentName(codingProgress.navigatorUserId)}`}</span>
+                                  <span>
+                                    {codingProgress.lastPreviewAt
+                                      ? `最近预览：${formatDisplayTime(codingProgress.lastPreviewAt)}`
+                                      : "尚未预览"}
+                                  </span>
+                                  <span
+                                    className={
+                                      Number(codingProgress.diagnosticCount || 0) > 0
+                                        ? "has-errors"
+                                        : ""
+                                    }
+                                  >
+                                    {Number(codingProgress.diagnosticCount || 0) > 0
+                                      ? `${codingProgress.diagnosticCount} 个待检查问题`
+                                      : "未发现基础结构问题"}
+                                  </span>
+                                </div>
+                              </div>
+                            ) : (
+                              <p className="teacher-collab-waiting-text">
+                                学生尚未开始本次网页协作。
+                              </p>
+                            )}
+
+                            <div className="teacher-party-member-list">
+                              {students.length === 0 ? (
+                                <span className="teacher-party-member-chip muted">
+                                  暂无学生
+                                </span>
+                              ) : (
+                                students.map((student, studentIndex) => (
+                                  <span
+                                    key={
+                                      String(student?.id || "").trim() ||
+                                      `${roomId}-student-${studentIndex + 1}`
+                                    }
+                                    className="teacher-party-member-chip"
+                                    title={formatPartyMemberDetail(student)}
+                                  >
+                                    <span className="teacher-party-member-name">
+                                      {readPartyMemberDisplayName(student)}
+                                    </span>
+                                  </span>
+                                ))
+                              )}
+                            </div>
+                          </article>
+                        );
+                      })
+                    )}
+                  </div>
+                </section>
+              </div>
+            ) : null}
+
+            {activePanel === "group-chat-manage" ? (
+              <div className="teacher-panel-stack teacher-party-manage-stack">
+                <header className="teacher-panel-head">
+                  <div>
                     <h2>群聊管理</h2>
                     <p className="teacher-panel-save-time">
                       {`最近刷新：${formatDisplayTime(partyRoomManageUpdatedAt)}`}
@@ -8755,7 +9020,7 @@ export default function TeacherHomePage() {
 
                 <section className="teacher-card teacher-party-manage-card">
                   <div className="teacher-party-manage-summary">
-                    <span>{`派总数：${visiblePartyRoomSummary.roomCount}/${partyRoomSummary.roomCount}`}</span>
+                    <span>{`群聊总数：${visiblePartyRoomSummary.roomCount}/${partyRoomSummary.roomCount}`}</span>
                     <span>{`参与成员：${visiblePartyRoomSummary.memberCount}`}</span>
                   </div>
 
@@ -8767,7 +9032,7 @@ export default function TeacherHomePage() {
                           className={`teacher-party-owner-chip${partyRoomOwnerFilter === "all" ? " active" : ""}`}
                           onClick={() => setPartyRoomOwnerFilter("all")}
                         >
-                          全部派主
+                          全部群主
                         </button>
                         {partyRoomOwnerOptions.map((option) => (
                           <button
@@ -8829,11 +9094,11 @@ export default function TeacherHomePage() {
                     {visiblePartyRoomItems.length === 0 ? (
                       <p className="teacher-empty-text">
                         {partyRoomManageLoading
-                          ? "正在读取群聊派列表..."
+                          ? "正在读取群聊列表..."
                           : partyRoomOwnerFilter !== "all" ||
                               String(partyRoomMemberSearchInput || "").trim()
-                            ? "未找到符合条件的派，请调整筛选条件。"
-                            : "当前暂无已创建的派。"}
+                            ? "未找到符合条件的群聊，请调整筛选条件。"
+                            : "当前暂无已创建的群聊。"}
                       </p>
                     ) : (
                       visiblePartyRoomItems.map((room, roomIndex) => {
@@ -8846,6 +9111,10 @@ export default function TeacherHomePage() {
                         const roomCode = String(room?.roomCode || "").trim();
                         const dissolvingThisRoom =
                           dissolvingPartyRoomId === roomId;
+                        const codingProgress = room?.codingProgress || null;
+                        const findMemberName = (userId) => members.find(
+                          (member) => String(member?.id || "") === String(userId || ""),
+                        )?.displayName || "未分配";
                         return (
                           <article
                             key={roomId}
@@ -8901,6 +9170,26 @@ export default function TeacherHomePage() {
                                 </div>
                               </div>
                             </header>
+                            {codingProgress ? <div className="teacher-party-coding-progress">
+                              <div>
+                                <strong>网页结对进展</strong>
+                                <span>{PARTY_TASK_STAGE_LABELS[codingProgress.taskStage] || "理解任务"}</span>
+                                <span>{`代码版本 ${Number(codingProgress.revision || 0)}`}</span>
+                                <span>{`已交棒 ${Number(codingProgress.roleRotationCount || 0)} 次`}</span>
+                              </div>
+                              <div>
+                                <span>{`Driver：${findMemberName(codingProgress.driverUserId)}`}</span>
+                                <span>{`Navigator：${findMemberName(codingProgress.navigatorUserId)}`}</span>
+                                <span>{codingProgress.lastPreviewAt
+                                  ? `最近预览：${formatDisplayTime(codingProgress.lastPreviewAt)}`
+                                  : "尚未预览"}</span>
+                                <span className={Number(codingProgress.diagnosticCount || 0) > 0 ? "has-errors" : ""}>
+                                  {Number(codingProgress.diagnosticCount || 0) > 0
+                                    ? `${codingProgress.diagnosticCount} 个待检查问题`
+                                    : "未发现基础结构问题"}
+                                </span>
+                              </div>
+                            </div> : null}
                             <div className="teacher-party-member-list">
                               {members.length === 0 ? (
                                 <span className="teacher-party-member-chip muted">

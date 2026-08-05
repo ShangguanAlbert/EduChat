@@ -88,6 +88,11 @@ async function startServer() {
   const unsubscribeGroupChatAiEvents = subscribeGroupChatAiEvents({
     env: process.env,
     logger: console,
+    onMessageCreated: (payload) => {
+      const roomId = String(payload?.roomId || payload?.message?.roomId || "").trim();
+      if (!roomId || !payload?.message) return;
+      groupChatRealtimeHub.broadcastMessageCreated(roomId, payload.message);
+    },
     onMessageUpdated: (payload) => {
       const roomId = String(payload?.roomId || payload?.message?.roomId || "").trim();
       if (!roomId || !payload?.message) return;

@@ -7,6 +7,7 @@ import {
 
 export function subscribeGroupChatAiEvents({
   env = process.env,
+  onMessageCreated,
   onMessageUpdated,
   logger = console,
 } = {}) {
@@ -25,7 +26,15 @@ export function subscribeGroupChatAiEvents({
   subscriber.on("message", (_channel, payloadText) => {
     try {
       const payload = JSON.parse(String(payloadText || "{}"));
-      if (String(payload?.type || "").trim().toLowerCase() === "message_updated") {
+      const type = String(payload?.type || "").trim().toLowerCase();
+      if (type === "message_created") {
+        logger.info?.(
+          `[group-chat-ai-events] received message_created roomId=${String(
+            payload?.roomId || payload?.message?.roomId || "",
+          ).trim()} messageId=${String(payload?.message?.id || "").trim()}`,
+        );
+        onMessageCreated?.(payload);
+      } else if (type === "message_updated") {
         logger.info?.(
           `[group-chat-ai-events] received message_updated roomId=${String(
             payload?.roomId || payload?.message?.roomId || "",

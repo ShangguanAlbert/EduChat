@@ -1323,6 +1323,10 @@ const groupChatRoomSchema = new mongoose.Schema(
     },
     ownerUserId: { type: String, required: true, index: true },
     partyAgentMemberEnabled: { type: Boolean, default: true },
+    paiaMonitoringEnabled: { type: Boolean, default: false },
+    paiaMonitoringStartedAt: { type: Date, default: null },
+    paiaMonitoringUpdatedAt: { type: Date, default: null },
+    paiaMonitoringUpdatedByAdminId: { type: String, default: "" },
     memberUserIds: {
       type: [String],
       default: () => [],
@@ -13585,6 +13589,16 @@ function normalizeGroupChatRoomDoc(doc, options = {}) {
     partyAgentMemberEnabled: sanitizeRuntimeBoolean(
       doc.partyAgentMemberEnabled,
       true,
+    ),
+    paiaMonitoringEnabled: sanitizeRuntimeBoolean(
+      doc.paiaMonitoringEnabled,
+      false,
+    ),
+    paiaMonitoringStartedAt: sanitizeIsoDate(doc.paiaMonitoringStartedAt),
+    paiaMonitoringUpdatedAt: sanitizeIsoDate(doc.paiaMonitoringUpdatedAt),
+    paiaMonitoringUpdatedByAdminId: sanitizeId(
+      doc.paiaMonitoringUpdatedByAdminId,
+      "",
     ),
     memberUserIds,
     mutedMemberUserIds,

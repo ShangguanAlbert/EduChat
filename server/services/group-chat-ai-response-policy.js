@@ -32,3 +32,55 @@ export function enforceGroupChatAiSocraticResponse(content) {
   }
   return text;
 }
+
+function splitLongBubble(text, maxChars) {
+  if (text.length <= maxChars || text.includes("```")) return [text];
+  const sentences = text.match(/[^。！？!?；;\n]+[。！？!?；;]?|\n+/g) || [text];
+  const chunks = [];
+  let current = "";
+  sentences.forEach((sentence) => {
+    const next = `${current}${sentence}`.trim();
+    if (current && next.length > maxChars) {
+      chunks.push(current.trim());
+      current = sentence.trim();
+    } else {
+      current = next;
+    }
+  });
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+export function splitGroupChatAiResponseBubbles(
+  content,
+  { maxBubbleChars = 360, maxBubbles = 8 } = {},
+) {
+  const text = String(content || "").replace(/\r\n?/g, "\n").trim();
+  if (!text) return [];
+
+  const blocks = [];
+  let currentLines = [];
+  let inCodeFence = false;
+  const flush = () => {
+    const block = currentLines.join("\n").trim();
+    if (block) blocks.push(block);
+    currentLines = [];
+  };
+
+  text.split("\n").forEach((line) => {
+    if (line.trim().startsWith("```")) inCodeFence = !inCodeFence;
+    if (!inCodeFence && !line.trim()) {
+      flush();
+      return;
+    }
+    currentLines.push(line);
+  });
+  flush();
+
+  const expanded = blocks.flatMap((block) => splitLongBubble(block, maxBubbleChars));
+  if (expanded.length <= maxBubbles) return expanded;
+  return [
+    ...expanded.slice(0, maxBubbles - 1),
+    expanded.slice(maxBubbles - 1).join("\n\n"),
+  ];
+}

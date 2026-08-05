@@ -1,6 +1,7 @@
 import {
   AtSign,
   ArrowLeft,
+  Bot,
   Copy,
   CircleHelp,
   Download,
@@ -12,7 +13,6 @@ import {
   Loader2,
   MessageSquareQuote,
   Smile,
-  SmilePlus,
   Plus,
   PanelLeftClose,
   PanelLeftOpen,
@@ -102,7 +102,6 @@ const PARTY_DEFAULT_AGENT_PROVIDER_MAP = Object.freeze({
   D: "aliyun",
 });
 const PARTY_MARKDOWN_FORWARD_PREFIX = "\u2063\u2063\u2063";
-const QUICK_REACTION_EMOJIS = Object.freeze(["👍", "👏", "🎉", "😄", "🤝"]);
 const COMPOSER_TOOL_EMOJIS = Object.freeze(buildComposerEmojiCatalog());
 const PARTY_WORKSPACE_SPLIT_STORAGE_KEY = "educhat.party.workspace-split.v1";
 const PARTY_WORKSPACE_MIN_CHAT_RATIO = 0.36;
@@ -114,6 +113,13 @@ const PARTY_GUIDE_ITEMS = Object.freeze([
   ["群聊与琳琳", "在消息框中输入 @AI 提问。琳琳会给出追问、概念解释和局部示例，不会替你完成整个网页。"],
   ["网页结对编程", "两名同学以 Driver 和 Navigator 角色共同编写 HTML/CSS、刷新预览并按任务要求轮换角色。"],
   ["调整布局", "点击左下角边栏按钮可显示或隐藏“我的派”；拖动聊天区和网页编程区之间的分隔条可调整宽度。"],
+]);
+const PAIA_CLASSROOM_GUIDE_ITEMS = Object.freeze([
+  ["进入小教室", "老师会提前安排两名学生进入同一间协作小教室，学生无需创建或加入。"],
+  ["查看任务", "左侧任务发布栏展示老师布置的网页设计任务和附件。"],
+  ["讨论与琳琳", "正常发送消息可与同伴讨论；需要帮助时点击“问琳琳”，无需输入 @AI。"],
+  ["网页结对编程", "两名同学轮流担任 Driver 和 Navigator，共同编写 HTML/CSS、检查代码并预览网页。"],
+  ["调整布局", "左侧集中显示任务、学生和琳琳；拖动中间分隔条可调整讨论区与编程区宽度。"],
 ]);
 
 function clampPartyWorkspaceSplit(value) {
@@ -242,6 +248,9 @@ export default function PartyChatDesktopPage({
     : returnTarget === "teacher-home"
       ? "返回教师主页"
       : "返回";
+  const partyGuideItems = isShiGaojunTeacherScope
+    ? PAIA_CLASSROOM_GUIDE_ITEMS
+    : PARTY_GUIDE_ITEMS;
   const imageInputRef = useRef(null);
   const fileInputRef = useRef(null);
   const announcementAttachmentInputRef = useRef(null);
@@ -307,7 +316,10 @@ export default function PartyChatDesktopPage({
   const [joinSubmitting, setJoinSubmitting] = useState(false);
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(false);
   const [showPartyGuide, setShowPartyGuide] = useState(false);
-  const [workspaceSplit, setWorkspaceSplit] = useState(readPartyWorkspaceSplit);
+  const [workspaceSplit, setWorkspaceSplit] = useState(() => {
+    const savedSplit = readPartyWorkspaceSplit();
+    return isShiGaojunTeacherScope ? Math.min(savedSplit, 0.42) : savedSplit;
+  });
   const [isWorkspaceResizing, setIsWorkspaceResizing] = useState(false);
   const [showSideMenu, setShowSideMenu] = useState(false);
   const [showCreateRoomModal, setShowCreateRoomModal] = useState(false);
@@ -349,10 +361,7 @@ export default function PartyChatDesktopPage({
     unreadUserIds: [],
     readUserIds: [],
   });
-  const [messageMenuState, setMessageMenuState] = useState({
-    messageId: "",
-    showReactions: false,
-  });
+  const [messageMenuState, setMessageMenuState] = useState({ messageId: "" });
 
   const activeRoom = useMemo(
     () => rooms.find((room) => room.id === activeRoomId) || null,
@@ -500,7 +509,9 @@ export default function PartyChatDesktopPage({
     (composeText.trim().length > 0 || selectedImageFiles.length > 0 || selectedUploadFiles.length > 0) &&
     !composerSending &&
     !activeRoomSelfMuted;
-  const canManageActiveRoom = !!activeRoom && activeRoom.ownerUserId === me.id;
+  const canManageActiveRoom = !!activeRoom
+    && !isShiGaojunTeacherScope
+    && activeRoom.ownerUserId === me.id;
   const partyAgentMemberEnabled = activeRoom?.partyAgentMemberEnabled !== false;
   const partyAgentAccessBlocked = !!activeRoom && !canManageActiveRoom && !partyAgentMemberEnabled;
   const partyAgentInputDisabled =
@@ -2246,12 +2257,12 @@ export default function PartyChatDesktopPage({
 
     function onDocMouseDown(event) {
       if (messageMenuRef.current?.contains(event.target)) return;
-      setMessageMenuState({ messageId: "", showReactions: false });
+      setMessageMenuState({ messageId: "" });
     }
 
     function onDocKeyDown(event) {
       if (event.key === "Escape") {
-        setMessageMenuState({ messageId: "", showReactions: false });
+        setMessageMenuState({ messageId: "" });
       }
     }
 
@@ -2616,7 +2627,7 @@ export default function PartyChatDesktopPage({
     });
   }
 
-  async function dispatchTextMessage(roomId, content, replyToMessageId = "") {
+  async function dispatchTextMessage(roomId, content, replyToMessageId = "", { aiRequested = false } = {}) {
     const safeRoomId = String(roomId || "").trim();
     if (!safeRoomId) return { message: null };
     if (isCurrentUserMutedInRoom(safeRoomId)) {
@@ -2648,6 +2659,7 @@ export default function PartyChatDesktopPage({
       const result = await sendPartyTextMessage(safeRoomId, {
         content,
         replyToMessageId: replyMeta.replyToMessageId,
+        aiRequested,
       });
       const message = normalizeMessage(result?.message);
       if (message) {
@@ -2791,7 +2803,7 @@ export default function PartyChatDesktopPage({
     }
   }
 
-  async function handleSendComposer() {
+  async function handleSendComposer({ aiRequested = false } = {}) {
     const roomId = String(activeRoomId || "").trim();
     if (!roomId || composerSending) return;
     if (activeRoomSelfMuted) {
@@ -2850,7 +2862,7 @@ export default function PartyChatDesktopPage({
         }
       }
       if (textPayload) {
-        tasks.push(dispatchTextMessage(roomId, textPayload, takeReplyTarget()));
+        tasks.push(dispatchTextMessage(roomId, textPayload, takeReplyTarget(), { aiRequested }));
       }
 
       try {
@@ -2867,6 +2879,13 @@ export default function PartyChatDesktopPage({
         setSendingFile(false);
       }
     })();
+  }
+
+  function handleAskPaiaAboutDiagnostic(diagnostic) {
+    const content = `请帮我们解释这个代码检查问题，并给出排查思路：${String(diagnostic || "").trim()}`;
+    void dispatchTextMessage(activeRoomId, content, "", { aiRequested: true }).catch((error) => {
+      setActionError(error?.message || "向琳琳提问失败，请稍后重试。");
+    });
   }
 
   function onPickImageFile(event) {
@@ -3212,7 +3231,7 @@ export default function PartyChatDesktopPage({
   }
 
   function closeMessageMenu() {
-    setMessageMenuState({ messageId: "", showReactions: false });
+    setMessageMenuState({ messageId: "" });
   }
 
   function toggleMessageMenu(messageId) {
@@ -3220,23 +3239,9 @@ export default function PartyChatDesktopPage({
     if (!safeMessageId) return;
     setMessageMenuState((prev) => {
       if (prev.messageId === safeMessageId) {
-        return { messageId: "", showReactions: false };
+        return { messageId: "" };
       }
-      return { messageId: safeMessageId, showReactions: false };
-    });
-  }
-
-  function toggleReactionPanel(messageId) {
-    const safeMessageId = String(messageId || "").trim();
-    if (!safeMessageId) return;
-    setMessageMenuState((prev) => {
-      if (prev.messageId !== safeMessageId) {
-        return { messageId: safeMessageId, showReactions: true };
-      }
-      return {
-        messageId: safeMessageId,
-        showReactions: !prev.showReactions,
-      };
+      return { messageId: safeMessageId };
     });
   }
 
@@ -3436,10 +3441,10 @@ export default function PartyChatDesktopPage({
             aria-controls="party-side-panel"
             aria-expanded={showSidebar}
             onClick={toggleSidebarPanel}
-            title={showSidebar ? "隐藏我的派边栏" : "显示我的派边栏"}
+            title={showSidebar ? "隐藏协作信息" : "显示协作信息"}
           >
             {showSidebar ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
-            <span>我的派</span>
+            <span>{isShiGaojunTeacherScope ? "协作信息" : "我的派"}</span>
           </button>
         ) : null}
         <aside
@@ -3450,18 +3455,18 @@ export default function PartyChatDesktopPage({
           aria-hidden={!showSidebar}
         >
           <div className="party-side-head">
-            <h2 className="party-side-title">我的派</h2>
+            <h2 className="party-side-title">{isShiGaojunTeacherScope ? "协作小教室" : "我的派"}</h2>
             <div className="party-side-head-actions">
               <button
                 type="button"
                 className="party-side-help-btn"
-                title="派协作使用说明"
-                aria-label="派协作使用说明"
+                title={isShiGaojunTeacherScope ? "协作小教室使用说明" : "派协作使用说明"}
+                aria-label={isShiGaojunTeacherScope ? "协作小教室使用说明" : "派协作使用说明"}
                 onClick={() => setShowPartyGuide(true)}
               >
                 <CircleHelp size={17} />
               </button>
-              <div className="party-side-menu-wrap" ref={sideMenuRef}>
+              {!isShiGaojunTeacherScope ? <div className="party-side-menu-wrap" ref={sideMenuRef}>
                 <button
                   type="button"
                   className="party-side-plus-btn"
@@ -3481,13 +3486,13 @@ export default function PartyChatDesktopPage({
                     </button>
                   </div>
                 ) : null}
-              </div>
+              </div> : null}
               {!isMobileSidebarDrawer ? (
                 <button
                   type="button"
                   className="party-side-collapse-btn"
-                  title="隐藏我的派边栏"
-                  aria-label="隐藏我的派边栏"
+                  title={isShiGaojunTeacherScope ? "隐藏协作信息" : "隐藏我的派边栏"}
+                  aria-label={isShiGaojunTeacherScope ? "隐藏协作信息" : "隐藏我的派边栏"}
                   onClick={toggleSidebarPanel}
                 >
                   <PanelLeftClose size={17} />
@@ -3500,7 +3505,7 @@ export default function PartyChatDesktopPage({
             {bootstrapLoading ? (
               <p className="party-tip">加载中...</p>
             ) : rooms.length === 0 ? (
-              <p className="party-tip">还没有派，先创建或加入一个。</p>
+              <p className="party-tip">{isShiGaojunTeacherScope ? "老师还未为你分配协作小教室。" : "还没有派，先创建或加入一个。"}</p>
             ) : (
               <div className="party-room-list">
                 {rooms.map((room) => {
@@ -3524,7 +3529,7 @@ export default function PartyChatDesktopPage({
                         </span>
                       </div>
                       <p className="party-room-meta">
-                        派号：{room.roomCode} · {formatTime(room.updatedAt)}
+                        {isShiGaojunTeacherScope ? `最近更新：${formatTime(room.updatedAt)}` : `派号：${room.roomCode} · ${formatTime(room.updatedAt)}`}
                       </p>
                     </button>
                   );
@@ -3659,9 +3664,9 @@ export default function PartyChatDesktopPage({
 
           <section className="party-card party-members-card">
             <div className="party-member-list-head">
-              <h2 className="party-card-title">成员</h2>
+              <h2 className="party-card-title">{isShiGaojunTeacherScope ? "学习同伴" : "成员"}</h2>
               <span className="party-member-count-badge">
-                {activeRoom ? `${activeRoom.memberCount}/${limits.maxMembersPerRoom}` : "--"}
+                {activeRoom ? (isShiGaojunTeacherScope ? `${activeRoom.memberCount} 名学生` : `${activeRoom.memberCount}/${limits.maxMembersPerRoom}`) : "--"}
               </span>
             </div>
 
@@ -3707,11 +3712,17 @@ export default function PartyChatDesktopPage({
                         {isOnline ? "在线" : "离线"}
                       </span>
                       {isMuted ? <span className="party-side-member-muted">禁言</span> : null}
-                      {isOwner ? <span className="party-side-member-owner">派主</span> : null}
+                      {!isShiGaojunTeacherScope && isOwner ? <span className="party-side-member-owner">派主</span> : null}
                       {isSelf ? <span className="party-side-member-self">我</span> : null}
                     </div>
                   );
                 })}
+                {isShiGaojunTeacherScope ? <div className="party-side-member-item is-paia">
+                  <span className="party-side-paia-avatar"><Bot size={15} /></span>
+                  <span className="party-side-member-name">琳琳</span>
+                  <span className="party-side-member-status online">正在观察</span>
+                  <span className="party-side-paia-role">AI 学习同伴</span>
+                </div> : null}
               </div>
             )}
           </section>
@@ -3789,11 +3800,11 @@ export default function PartyChatDesktopPage({
                       ) : activeMessages.length === 0 ? (
                         <p className="party-tip">还没有消息，发一条开始协作讨论。</p>
                       ) : (
-                        activeMessages.map((message) => {
+                        activeMessages.map((message, messageIndex) => {
                           const isMine = message.senderUserId === me.id;
                           const isAiMessage = message.senderKind === "ai";
                           const isMenuOpen = messageMenuState.messageId === message.id;
-                          const showReactions = isMenuOpen && messageMenuState.showReactions;
+                          const isLastMessage = messageIndex === activeMessages.length - 1;
                           const messageReactions = Array.isArray(message.reactions) ? message.reactions : [];
                           const readReceipt = buildMessageReadReceipt(message);
                           const isAgentForwardMessage = isPartyAgentForwardMessage(message);
@@ -3803,7 +3814,7 @@ export default function PartyChatDesktopPage({
                               key={message.id}
                               className={`party-message type-${message.type} ${isMine ? "mine" : ""} ${
                                 message.type === "system" ? "system" : ""
-                              }`}
+                              }${isAiMessage ? " ai" : ""}`}
                             >
                               {message.type === "system" ? (
                                 <p className="party-system-text">{message.content}</p>
@@ -3862,7 +3873,9 @@ export default function PartyChatDesktopPage({
                                         ) : null}
 
                                         {message.type === "text" ? (
-                                          renderPartyMessageText(message.content)
+                                          renderPartyMessageText(message.content, {
+                                            forceMarkdown: isAiMessage,
+                                          })
                                         ) : message.type === "image" ? (
                                           <button
                                             type="button"
@@ -3950,7 +3963,9 @@ export default function PartyChatDesktopPage({
 
                                         {isMenuOpen ? (
                                           <div
-                                            className={`party-msg-menu-panel${isMine ? " align-left" : " align-right"}`}
+                                            className={`party-msg-menu-panel${isMine ? " align-left" : " align-right"}${
+                                              isLastMessage ? " open-up" : ""
+                                            }`}
                                             role="menu"
                                           >
                                             {message.type === "text" ? (
@@ -3986,15 +4001,6 @@ export default function PartyChatDesktopPage({
                                               引用
                                             </button>
 
-                                            <button
-                                              type="button"
-                                              className="party-msg-menu-item"
-                                              onClick={() => toggleReactionPanel(message.id)}
-                                            >
-                                              <SmilePlus size={15} />
-                                              表情回复
-                                            </button>
-
                                             {message.type === "file" && (isMine || canManageActiveRoom) ? (
                                               <button
                                                 type="button"
@@ -4006,20 +4012,6 @@ export default function PartyChatDesktopPage({
                                               </button>
                                             ) : null}
 
-                                            {showReactions ? (
-                                              <div className="party-msg-reaction-row">
-                                                {QUICK_REACTION_EMOJIS.map((emoji) => (
-                                                  <button
-                                                    key={`${message.id}-${emoji}`}
-                                                    type="button"
-                                                    className="party-msg-reaction-btn"
-                                                    onClick={() => void handleQuickReaction(message, emoji)}
-                                                  >
-                                                    {emoji}
-                                                  </button>
-                                                ))}
-                                              </div>
-                                            ) : null}
                                           </div>
                                         ) : null}
                                       </div>
@@ -4249,7 +4241,11 @@ export default function PartyChatDesktopPage({
                         <textarea
                           ref={composeTextareaRef}
                           className="party-compose-textarea"
-                          placeholder={activeRoomSelfMuted ? PARTY_MEMBER_MUTED_BLOCKED_MESSAGE : "请输入消息"}
+                          placeholder={activeRoomSelfMuted
+                            ? PARTY_MEMBER_MUTED_BLOCKED_MESSAGE
+                            : isShiGaojunTeacherScope
+                              ? "与同伴讨论，或点击“问琳琳”获得帮助"
+                              : "请输入消息"}
                           value={composeText}
                           onChange={(event) => {
                             setComposeText(event.target.value);
@@ -4283,15 +4279,26 @@ export default function PartyChatDesktopPage({
                             ? PARTY_MEMBER_MUTED_BLOCKED_MESSAGE
                             : "Enter 发送 / Shift+Enter 换行"}
                         </span>
-                        <button
-                          type="button"
-                          className="party-send-btn"
-                          disabled={!canSendComposer}
-                          onClick={() => void handleSendComposer()}
-                        >
-                          {composerSending ? <Loader2 size={16} className="spin" /> : <SendHorizonal size={16} />}
-                          发送
-                        </button>
+                        <div className="party-compose-send-actions">
+                          {isShiGaojunTeacherScope ? <button
+                            type="button"
+                            className="party-ask-paia-btn"
+                            disabled={!canSendComposer || !composeText.trim()}
+                            onClick={() => void handleSendComposer({ aiRequested: true })}
+                          >
+                            <Bot size={16} />
+                            问琳琳
+                          </button> : null}
+                          <button
+                            type="button"
+                            className="party-send-btn"
+                            disabled={!canSendComposer}
+                            onClick={() => void handleSendComposer()}
+                          >
+                            {composerSending ? <Loader2 size={16} className="spin" /> : <SendHorizonal size={16} />}
+                            发送
+                          </button>
+                        </div>
                       </div>
                     </div>
                   </section>
@@ -4324,8 +4331,8 @@ export default function PartyChatDesktopPage({
                   <path d="M7.4 3v14" stroke="currentColor" strokeWidth="1.4" />
                 </svg>
               </button>
-              <h2>欢迎来到派</h2>
-              <p>创建或加入一个派，开始协作学习对话。</p>
+              <h2>{isShiGaojunTeacherScope ? "协作小教室" : "欢迎来到派"}</h2>
+              <p>{isShiGaojunTeacherScope ? "老师分配小教室后，你可以在这里与同伴开展网页结对编程。" : "创建或加入一个派，开始协作学习对话。"}</p>
             </section>
           )}
         </main>
@@ -4350,9 +4357,9 @@ export default function PartyChatDesktopPage({
             roomId={activeRoom.id}
             me={me}
             members={activeMembers}
-            ownerUserId={activeRoom.ownerUserId}
             taskText={activeRoom.announcement}
             codingEditors={codingEditorsByRoom[activeRoom.id] || []}
+            onAskPaia={handleAskPaiaAboutDiagnostic}
             onEditingChange={setCodingEditorPresence}
             onJoinCollaboration={joinCodingCollaboration}
             onLeaveCollaboration={leaveCodingCollaboration}
@@ -4447,7 +4454,7 @@ export default function PartyChatDesktopPage({
               </button>
             </div>
             <ol className="party-guide-list">
-              {PARTY_GUIDE_ITEMS.map(([title, description], index) => (
+              {partyGuideItems.map(([title, description], index) => (
                 <li key={title}>
                   <span className="party-guide-step">{index + 1}</span>
                   <div>
@@ -5115,6 +5122,9 @@ function normalizeMessage(raw) {
   if (!id) return null;
   const type = String(raw?.type || "").trim().toLowerCase();
   if (type !== "text" && type !== "image" && type !== "file" && type !== "system") return null;
+  const senderKind = String(raw?.senderKind || (type === "system" ? "system" : "user"))
+    .trim()
+    .toLowerCase();
   const systemContent = type === "system" ? normalizeSystemMessageContent(raw?.content) : "";
   if (type === "system" && !systemContent) return null;
   const image = raw?.image && typeof raw.image === "object"
@@ -5145,11 +5155,11 @@ function normalizeMessage(raw) {
     id,
     roomId: String(raw?.roomId || "").trim(),
     type,
-    senderKind: String(raw?.senderKind || (type === "system" ? "system" : "user"))
-      .trim()
-      .toLowerCase(),
+    senderKind,
     senderUserId: String(raw?.senderUserId || "").trim(),
-    senderName: String(raw?.senderName || (type === "system" ? "系统" : "用户")),
+    senderName: senderKind === "ai"
+      ? "琳琳"
+      : String(raw?.senderName || (type === "system" ? "系统" : "用户")),
     content: type === "system" ? systemContent : String(raw?.content || ""),
     replyToMessageId: String(raw?.replyToMessageId || "").trim(),
     replyPreviewText: String(raw?.replyPreviewText || ""),
@@ -5293,10 +5303,12 @@ function isPartyAgentForwardMessage(message) {
   return decodePartyForwardMarkdown(message?.content) !== null;
 }
 
-function renderPartyMessageText(content) {
+function renderPartyMessageText(content, { forceMarkdown = false } = {}) {
   const markdownText = decodePartyForwardMarkdown(content);
-  if (markdownText !== null) {
-    const normalizedMarkdown = normalizeRenderedMarkdown(markdownText);
+  if (markdownText !== null || forceMarkdown) {
+    const normalizedMarkdown = normalizeRenderedMarkdown(
+      markdownText !== null ? markdownText : content,
+    );
     return (
       <div className="party-message-text md-body is-markdown">
         <ReactMarkdown

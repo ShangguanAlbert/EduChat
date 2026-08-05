@@ -299,6 +299,22 @@ export function fetchAdminGroupChatRooms(adminToken) {
   return request("/api/auth/admin/group-chat/rooms", adminToken);
 }
 
+export function updateAdminCollaborationClassroomMonitoring(
+  adminToken,
+  roomId,
+  enabled,
+) {
+  const safeRoomId = String(roomId || "").trim();
+  return request(
+    `/api/auth/admin/collaboration-classrooms/${encodeURIComponent(safeRoomId)}/linlin-monitoring`,
+    adminToken,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: enabled === true }),
+    },
+  );
+}
+
 export function fetchAdminPartyCodingQuality(adminToken, options = {}) {
   const params = new URLSearchParams();
   const hours = Number(options?.hours);

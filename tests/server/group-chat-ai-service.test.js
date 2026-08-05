@@ -261,7 +261,7 @@ test("buildGroupChatAiPendingReplyDraft creates an AI placeholder reply", () => 
   assert.equal(pendingReply.aiMeta.status, "pending");
   assert.equal(pendingReply.aiMeta.model, "qwen3.7-plus");
   assert.equal(pendingReply.aiMeta.streaming, false);
-  assert.equal(pendingReply.senderName, "琳琳 · PAIA");
+  assert.equal(pendingReply.senderName, "琳琳");
   assert.match(pendingReply.content, /整理思路/);
 });
 

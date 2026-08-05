@@ -198,13 +198,18 @@ export function markPartyRoomRead(roomId, { messageId = "" } = {}) {
   });
 }
 
-export function sendPartyTextMessage(roomId, { content = "", replyToMessageId = "" } = {}) {
+export function sendPartyTextMessage(roomId, {
+  content = "",
+  replyToMessageId = "",
+  aiRequested = false,
+} = {}) {
   const safeRoomId = String(roomId || "").trim();
   return request(`/api/group-chat/rooms/${encodeURIComponent(safeRoomId)}/messages/text`, {
     method: "POST",
     body: JSON.stringify({
       content: String(content || ""),
       replyToMessageId: String(replyToMessageId || "").trim(),
+      aiRequested: aiRequested === true,
     }),
   });
 }

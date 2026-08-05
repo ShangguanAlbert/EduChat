@@ -330,3 +330,23 @@ export async function publishGroupChatAiMessageUpdated(
     }),
   );
 }
+
+export async function publishGroupChatAiMessageCreated(
+  redis,
+  {
+    prefix = DEFAULT_PREFIX,
+    roomId,
+    message,
+  } = {},
+) {
+  if (!redis) return;
+  const channel = buildGroupChatAiRedisKeys({ prefix }).events;
+  await redis.publish(
+    channel,
+    JSON.stringify({
+      type: "message_created",
+      roomId: String(roomId || "").trim(),
+      message,
+    }),
+  );
+}

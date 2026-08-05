@@ -2,6 +2,7 @@ import {
   buildAdminGroupChatsZipBundle,
 } from "../services/admin-group-chat-export.js";
 import { buildFinalTestExportBundle } from "../services/final-test-export.js";
+import { getPartyWebWorkspaceModel } from "../modules/party-coding/model.js";
 
 export function registerAdminRoutes(app, deps) {
   const {
@@ -218,6 +219,8 @@ export function registerAdminRoutes(app, deps) {
   } = deps;
 
   const TERMINAL_ADMIN_USERNAME_KEY = toUsernameKey("上官福泽");
+  const SHI_GAOJUN_ADMIN_USERNAME_KEY = toUsernameKey("施高俊");
+  const SHI_GAOJUN_TEACHER_SCOPE_KEY = "shi-gaojun";
   const USER_DIRECTORY_DEFAULT_TARGET_CLASSES = Object.freeze([
     "教技231",
     "810班",
@@ -1176,6 +1179,7 @@ export function registerAdminRoutes(app, deps) {
           _id: 1,
           ownerUserId: 1,
           memberUserIds: 1,
+          teacherScopeKey: 1,
           mutedMemberUserIds: 1,
           readStates: 1,
         },
@@ -1304,7 +1308,12 @@ export function registerAdminRoutes(app, deps) {
           name: 1,
           ownerUserId: 1,
           memberUserIds: 1,
+          teacherScopeKey: 1,
           partyAgentMemberEnabled: 1,
+          paiaMonitoringEnabled: 1,
+          paiaMonitoringStartedAt: 1,
+          paiaMonitoringUpdatedAt: 1,
+          paiaMonitoringUpdatedByAdminId: 1,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -1334,6 +1343,27 @@ export function registerAdminRoutes(app, deps) {
         : [];
       const usersById = new Map(
         users.map((user) => [sanitizeId(user?._id, ""), user]),
+      );
+      const roomIds = rooms.map((room) => sanitizeId(room?.id, "")).filter(Boolean);
+      const PartyWebWorkspace = getPartyWebWorkspaceModel(mongoose);
+      const workspaceDocs = roomIds.length
+        ? await PartyWebWorkspace.find(
+            { roomId: { $in: roomIds } },
+            {
+              roomId: 1,
+              taskStage: 1,
+              driverUserId: 1,
+              navigatorUserId: 1,
+              roleRotationCount: 1,
+              revision: 1,
+              lastPreviewAt: 1,
+              lastDiagnostics: 1,
+              updatedAt: 1,
+            },
+          ).lean()
+        : [];
+      const workspaceByRoomId = new Map(
+        workspaceDocs.map((workspace) => [sanitizeId(workspace?.roomId, ""), workspace]),
       );
       const allUsers = await AuthUser.find(
         {},
@@ -1419,6 +1449,7 @@ export function registerAdminRoutes(app, deps) {
           const ownerUserId = sanitizeId(room?.ownerUserId, "");
           const owner = buildMemberItem(ownerUserId, usersById);
           const ownerSortOrder = owner?.adminOrder ?? adminDefaultOrder;
+          const workspace = workspaceByRoomId.get(roomId) || null;
           const members = sanitizeGroupChatMemberUserIds(room?.memberUserIds)
             .map((memberId) => buildMemberItem(memberId, usersById))
             .filter(Boolean)
@@ -1442,9 +1473,20 @@ export function registerAdminRoutes(app, deps) {
             id: roomId,
             roomCode: sanitizeText(room?.roomCode, "", 32),
             name: sanitizeText(room?.name, "未命名派", 80),
+            teacherScopeKey: sanitizeText(room?.teacherScopeKey, "", 40).toLowerCase(),
             partyAgentMemberEnabled: sanitizeRuntimeBoolean(
               room?.partyAgentMemberEnabled,
               true,
+            ),
+            paiaMonitoringEnabled: sanitizeRuntimeBoolean(
+              room?.paiaMonitoringEnabled,
+              false,
+            ),
+            paiaMonitoringStartedAt: sanitizeIsoDate(
+              room?.paiaMonitoringStartedAt,
+            ),
+            paiaMonitoringUpdatedAt: sanitizeIsoDate(
+              room?.paiaMonitoringUpdatedAt,
             ),
             memberCount: members.length,
             owner,
@@ -1452,6 +1494,20 @@ export function registerAdminRoutes(app, deps) {
             createdAt: sanitizeIsoDate(room?.createdAt),
             updatedAt: sanitizeIsoDate(room?.updatedAt),
             ownerAdminSortOrder: ownerSortOrder,
+            codingProgress: workspace
+              ? {
+                  taskStage: sanitizeText(workspace?.taskStage, "understand", 20),
+                  driverUserId: sanitizeId(workspace?.driverUserId, ""),
+                  navigatorUserId: sanitizeId(workspace?.navigatorUserId, ""),
+                  roleRotationCount: Math.max(0, Number(workspace?.roleRotationCount || 0)),
+                  revision: Math.max(0, Number(workspace?.revision || 0)),
+                  lastPreviewAt: sanitizeIsoDate(workspace?.lastPreviewAt),
+                  diagnosticCount: Array.isArray(workspace?.lastDiagnostics)
+                    ? workspace.lastDiagnostics.length
+                    : 0,
+                  updatedAt: sanitizeIsoDate(workspace?.updatedAt),
+                }
+              : null,
           };
         })
         .filter(Boolean);
@@ -1492,6 +1548,72 @@ export function registerAdminRoutes(app, deps) {
       });
     }
   });
+
+  app.patch(
+    "/api/auth/admin/collaboration-classrooms/:roomId/linlin-monitoring",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (toUsernameKey(admin?.username) !== SHI_GAOJUN_ADMIN_USERNAME_KEY) {
+        res.status(403).json({ error: "仅施高俊可控制琳琳状态检测。" });
+        return;
+      }
+
+      const roomId = sanitizeId(req.params?.roomId, "");
+      if (!roomId || !isMongoObjectIdLike(roomId)) {
+        res.status(400).json({ error: "无效的协作小教室 ID。" });
+        return;
+      }
+      if (typeof req.body?.enabled !== "boolean") {
+        res.status(400).json({ error: "请提供明确的检测启停状态。" });
+        return;
+      }
+
+      try {
+        const enabled = req.body.enabled === true;
+        const now = new Date();
+        const roomDoc = await GroupChatRoom.findOneAndUpdate(
+          { _id: roomId, teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY },
+          {
+            $set: {
+              paiaMonitoringEnabled: enabled,
+              paiaMonitoringStartedAt: enabled ? now : null,
+              paiaMonitoringUpdatedAt: now,
+              paiaMonitoringUpdatedByAdminId: sanitizeId(admin?._id, ""),
+            },
+          },
+          { new: true },
+        ).lean();
+        const room = normalizeGroupChatRoomDoc(roomDoc);
+        if (!room) {
+          res.status(404).json({ error: "协作小教室不存在或不属于施高俊授课范围。" });
+          return;
+        }
+
+        broadcastGroupChatRoomUpdated(roomId, room);
+        if (!enabled) {
+          deps.broadcastGroupChatWsPayload?.(roomId, {
+            type: "coding_collab_intervention",
+            roomId,
+            intervention: null,
+          });
+        }
+        res.json({
+          ok: true,
+          roomId,
+          monitoring: {
+            enabled: room.paiaMonitoringEnabled === true,
+            startedAt: room.paiaMonitoringStartedAt,
+            updatedAt: room.paiaMonitoringUpdatedAt,
+          },
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "更新琳琳状态检测失败，请稍后重试。",
+        });
+      }
+    },
+  );
 
   app.post("/api/auth/admin/group-chat/rooms", async (req, res) => {
     const admin = await authenticateAdminRequest(req, res);

@@ -22,6 +22,11 @@ import {
 const GROUP_CHAT_TASK_ATTACHMENT_CONTEXT_MAX_CHARS = 8_000;
 const PAIA_TEACHER_SCOPE_KEY = "shi-gaojun";
 const PAIA_PAIR_MEMBER_LIMIT = 2;
+const PAIA_CLASSROOM_MANAGEMENT_ERROR = "协作小教室由施高俊老师统一分配，学生不能进行此操作。";
+
+function isPaiaClassroomStudentRequest(req) {
+  return String(req.authTeacherScopeKey || "").trim().toLowerCase() === PAIA_TEACHER_SCOPE_KEY;
+}
 
 async function parseTaskAttachmentAiContext(file) {
   try {
@@ -289,6 +294,10 @@ export function registerGroupChatRoutes(app, deps) {
   });
 
   app.post("/api/group-chat/rooms", requireChatAuth, async (req, res) => {
+    if (isPaiaClassroomStudentRequest(req)) {
+      res.status(403).json({ error: PAIA_CLASSROOM_MANAGEMENT_ERROR });
+      return;
+    }
     const userId = sanitizeId(req.authUser?._id, "");
     const roomName = sanitizeGroupChatRoomName(req.body?.name);
     if (!userId) {
@@ -325,6 +334,10 @@ export function registerGroupChatRoutes(app, deps) {
   });
 
   app.post("/api/group-chat/rooms/join", requireChatAuth, async (req, res) => {
+    if (isPaiaClassroomStudentRequest(req)) {
+      res.status(403).json({ error: PAIA_CLASSROOM_MANAGEMENT_ERROR });
+      return;
+    }
     const userId = sanitizeId(req.authUser?._id, "");
     const userRole = sanitizeText(req.authUser?.role, "", 20).toLowerCase();
     const roomCode = sanitizeGroupChatCode(req.body?.roomCode || req.body?.code);
@@ -448,6 +461,10 @@ export function registerGroupChatRoutes(app, deps) {
   });
 
   app.patch("/api/group-chat/rooms/:roomId", requireChatAuth, async (req, res) => {
+    if (isPaiaClassroomStudentRequest(req)) {
+      res.status(403).json({ error: PAIA_CLASSROOM_MANAGEMENT_ERROR });
+      return;
+    }
     const userId = sanitizeId(req.authUser?._id, "");
     const roomId = sanitizeId(req.params?.roomId, "");
     const nextName = sanitizeGroupChatRoomName(req.body?.name);
@@ -525,6 +542,10 @@ export function registerGroupChatRoutes(app, deps) {
   });
 
   app.patch("/api/group-chat/rooms/:roomId/announcement", requireChatAuth, async (req, res) => {
+    if (isPaiaClassroomStudentRequest(req)) {
+      res.status(403).json({ error: PAIA_CLASSROOM_MANAGEMENT_ERROR });
+      return;
+    }
     const userId = sanitizeId(req.authUser?._id, "");
     const roomId = sanitizeId(req.params?.roomId, "");
     const announcement = sanitizeText(req.body?.announcement, "", 500);
@@ -595,6 +616,10 @@ export function registerGroupChatRoutes(app, deps) {
     requireChatAuth,
     groupChatFileUpload.single("file"),
     async (req, res) => {
+      if (isPaiaClassroomStudentRequest(req)) {
+        res.status(403).json({ error: PAIA_CLASSROOM_MANAGEMENT_ERROR });
+        return;
+      }
       const userId = sanitizeId(req.authUser?._id, "");
       const roomId = sanitizeId(req.params?.roomId, "");
       const file = req.file;
@@ -701,6 +726,10 @@ export function registerGroupChatRoutes(app, deps) {
     "/api/group-chat/rooms/:roomId/announcement/attachments/:fileId",
     requireChatAuth,
     async (req, res) => {
+      if (isPaiaClassroomStudentRequest(req)) {
+        res.status(403).json({ error: PAIA_CLASSROOM_MANAGEMENT_ERROR });
+        return;
+      }
       const userId = sanitizeId(req.authUser?._id, "");
       const roomId = sanitizeId(req.params?.roomId, "");
       const fileId = sanitizeId(req.params?.fileId, "");
@@ -753,6 +782,10 @@ export function registerGroupChatRoutes(app, deps) {
   );
 
   app.patch("/api/group-chat/rooms/:roomId/party-agent-access", requireChatAuth, async (req, res) => {
+    if (isPaiaClassroomStudentRequest(req)) {
+      res.status(403).json({ error: PAIA_CLASSROOM_MANAGEMENT_ERROR });
+      return;
+    }
     const userId = sanitizeId(req.authUser?._id, "");
     const roomId = sanitizeId(req.params?.roomId, "");
     const nextEnabled = sanitizeRuntimeBoolean(req.body?.partyAgentMemberEnabled, true);
@@ -819,6 +852,10 @@ export function registerGroupChatRoutes(app, deps) {
   });
 
   app.patch("/api/group-chat/rooms/:roomId/members/:memberUserId/mute", requireChatAuth, async (req, res) => {
+    if (isPaiaClassroomStudentRequest(req)) {
+      res.status(403).json({ error: PAIA_CLASSROOM_MANAGEMENT_ERROR });
+      return;
+    }
     const userId = sanitizeId(req.authUser?._id, "");
     const roomId = sanitizeId(req.params?.roomId, "");
     const targetMemberUserId = sanitizeId(req.params?.memberUserId, "");
@@ -906,6 +943,10 @@ export function registerGroupChatRoutes(app, deps) {
   });
 
   app.delete("/api/group-chat/rooms/:roomId", requireChatAuth, async (req, res) => {
+    if (isPaiaClassroomStudentRequest(req)) {
+      res.status(403).json({ error: PAIA_CLASSROOM_MANAGEMENT_ERROR });
+      return;
+    }
     const userId = sanitizeId(req.authUser?._id, "");
     const roomId = sanitizeId(req.params?.roomId, "");
     if (!userId || !roomId) {
@@ -1183,7 +1224,12 @@ export function registerGroupChatRoutes(app, deps) {
         });
       }
 
-      if (isGroupChatAiMentionRequested(content)) {
+      const aiRequested = isGroupChatAiMentionRequested(content)
+        || (
+          String(req.authTeacherScopeKey || "").trim().toLowerCase() === PAIA_TEACHER_SCOPE_KEY
+          && req.body?.aiRequested === true
+        );
+      if (aiRequested) {
         const recentDocs = await GroupChatMessage.find({ roomId })
           .sort({ createdAt: -1 })
           .limit(24)
@@ -1768,7 +1814,7 @@ export function registerGroupChatRoutes(app, deps) {
         const [room, messageDoc] = await Promise.all([
           GroupChatRoom.findOne(
             { _id: roomId, memberUserIds: userId },
-            { ownerUserId: 1 },
+            { ownerUserId: 1, teacherScopeKey: 1 },
           ).lean(),
           GroupChatMessage.findOne({ _id: messageId, roomId }).lean(),
         ]);
@@ -1788,9 +1834,13 @@ export function registerGroupChatRoutes(app, deps) {
 
         const ownerUserId = sanitizeId(room?.ownerUserId, "");
         const senderUserId = sanitizeId(messageDoc?.senderUserId, "");
-        const canDelete = userId === senderUserId || (ownerUserId && ownerUserId === userId);
+        const isPaiaClassroom = String(room?.teacherScopeKey || req.authTeacherScopeKey || "")
+          .trim()
+          .toLowerCase() === PAIA_TEACHER_SCOPE_KEY;
+        const canDelete = userId === senderUserId
+          || (!isPaiaClassroom && ownerUserId && ownerUserId === userId);
         if (!canDelete) {
-          res.status(403).json({ error: "仅文件发送者或派主可删除该文件。" });
+          res.status(403).json({ error: isPaiaClassroom ? "只能删除自己发送的文件。" : "仅文件发送者或派主可删除该文件。" });
           return;
         }
 

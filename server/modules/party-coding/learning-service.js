@@ -128,7 +128,7 @@ export function detectPaiaIntervention(rawEvents, context = {}, now = Date.now()
 }
 
 export function createPartyLearningService(deps) {
-  const { mongoose } = deps;
+  const { mongoose, GroupChatRoom } = deps;
   const Workspace = getPartyWebWorkspaceModel(mongoose);
   const LearningEvent = getPartyLearningEventModel(mongoose);
   const Intervention = getPartyPaiaInterventionModel(mongoose);
@@ -153,6 +153,18 @@ export function createPartyLearningService(deps) {
     return Workspace.findOne({ roomId: safeText(roomId, 100) }).lean();
   }
 
+  async function readMonitoringState(roomId) {
+    if (!GroupChatRoom) return null;
+    return GroupChatRoom.findOne(
+      {
+        _id: safeText(roomId, 100),
+        teacherScopeKey: "shi-gaojun",
+        paiaMonitoringEnabled: true,
+      },
+      { paiaMonitoringEnabled: 1, paiaMonitoringStartedAt: 1 },
+    ).lean();
+  }
+
   function resolveRole(workspace, userId) {
     const safeUserId = safeText(userId, 100);
     if (safeUserId && safeUserId === safeText(workspace?.driverUserId, 100)) return "driver";
@@ -163,7 +175,11 @@ export function createPartyLearningService(deps) {
   async function recordEvent({ roomId, userId = "", userName = "成员", eventType, metadata = {}, workspace = null }) {
     const safeRoomId = safeText(roomId, 100);
     if (!safeRoomId || !eventType) return null;
-    const currentWorkspace = workspace || await readWorkspace(safeRoomId);
+    const [monitoringState, currentWorkspace] = await Promise.all([
+      readMonitoringState(safeRoomId),
+      workspace ? Promise.resolve(workspace) : readWorkspace(safeRoomId),
+    ]);
+    if (!monitoringState) return null;
     return LearningEvent.create({
       roomId: safeRoomId,
       taskId: `${safeRoomId}:${Math.max(1, Number(currentWorkspace?.taskRevision || 1))}`,
@@ -180,12 +196,24 @@ export function createPartyLearningService(deps) {
   async function maybeIntervene({ roomId, memberNames = {} }) {
     const safeRoomId = safeText(roomId, 100);
     if (!safeRoomId) return null;
+    const monitoringState = await readMonitoringState(safeRoomId);
+    if (!monitoringState) return null;
+    const monitoringStartedAt = monitoringState.paiaMonitoringStartedAt
+      ? new Date(monitoringState.paiaMonitoringStartedAt)
+      : new Date();
+    const analysisStartedAt = new Date(Math.max(
+      Date.now() - ANALYSIS_WINDOW_MS,
+      monitoringStartedAt.getTime(),
+    ));
     const [workspace, latestIntervention, recentEvents] = await Promise.all([
       readWorkspace(safeRoomId),
-      Intervention.findOne({ roomId: safeRoomId }).sort({ createdAt: -1 }).lean(),
+      Intervention.findOne({
+        roomId: safeRoomId,
+        createdAt: { $gte: monitoringStartedAt },
+      }).sort({ createdAt: -1 }).lean(),
       LearningEvent.find({
         roomId: safeRoomId,
-        occurredAt: { $gte: new Date(Date.now() - ANALYSIS_WINDOW_MS) },
+        occurredAt: { $gte: analysisStartedAt },
       }).sort({ occurredAt: 1 }).limit(120).lean(),
     ]);
     if (!workspace) return null;
@@ -233,7 +261,7 @@ export function createPartyLearningService(deps) {
         type: "text",
         senderKind: "ai",
         senderUserId: "",
-        senderName: "琳琳 · PAIA",
+        senderName: "琳琳",
         content: `${decision.prompt}\n\n判断依据：${decision.evidenceSummary}`,
         mentionNames: [],
         reactions: [],
@@ -253,9 +281,17 @@ export function createPartyLearningService(deps) {
 
   async function getLatestIntervention(roomId) {
     const safeRoomId = safeText(roomId, 100);
-    const workspace = await readWorkspace(safeRoomId);
+    const [monitoringState, workspace] = await Promise.all([
+      readMonitoringState(safeRoomId),
+      readWorkspace(safeRoomId),
+    ]);
+    if (!monitoringState) return null;
     const taskId = `${safeRoomId}:${Math.max(1, Number(workspace?.taskRevision || 1))}`;
-    const doc = await Intervention.findOne({ roomId: safeRoomId, taskId }).sort({ createdAt: -1 }).lean();
+    const doc = await Intervention.findOne({
+      roomId: safeRoomId,
+      taskId,
+      createdAt: { $gte: monitoringState.paiaMonitoringStartedAt || new Date() },
+    }).sort({ createdAt: -1 }).lean();
     return normalizeIntervention(doc);
   }
 
