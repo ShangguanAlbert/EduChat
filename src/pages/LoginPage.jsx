@@ -441,9 +441,9 @@ export default function LoginPage() {
           <p>
             开源协议：本项目遵循{" "}
             <Link className="login-license-link" to={withAuthSlot("/license")}>
-              GNU AGPL v3.0
+              MIT License
             </Link>
-            .
+            。
           </p>
           <p>Copyright © 2026 上官福泽</p>
         </div>

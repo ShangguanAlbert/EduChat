@@ -17,7 +17,7 @@ export default function LicensePage() {
             <span>返回登录</span>
           </Link>
           <h1 className="license-title">开源协议 License</h1>
-          <p className="license-subtitle">本项目遵循 GNU AGPL v3.0.</p>
+          <p className="license-subtitle">本项目采用 MIT License。</p>
         </header>
         <pre className="license-content">{LICENSE_CONTENT || LICENSE_FALLBACK_TEXT}</pre>
       </section>

@@ -93,4 +93,4 @@
 
 ## 许可证
 
-本项目采用 GNU Affero General Public License v3.0（AGPL-3.0）许可证发布，详见 [LICENSE](./LICENSE) 文件。
+本项目采用 MIT License 发布，详见 [LICENSE](./LICENSE) 文件。
