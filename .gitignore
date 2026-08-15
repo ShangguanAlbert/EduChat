@@ -31,3 +31,4 @@ dist-ssr
 # 第三方源码仅作为本地查阅资料，禁止提交到仓库。
 ref/
 uploads/
+.codex-audit

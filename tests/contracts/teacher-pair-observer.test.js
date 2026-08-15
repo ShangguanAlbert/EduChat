@@ -65,7 +65,7 @@ test("teacher home uses the focused pair-programming navigation for every teache
   assert.doesNotMatch(teacherHomePageSource, /群聊与公告/);
   assert.match(
     adminApiRoutesSource,
-    /function canManageCollaborationClassrooms\(admin\) \{\s*return String\(admin\?\.role \|\| ""\)\.trim\(\)\.toLowerCase\(\) === "admin";/,
+    /function canManageCollaborationClassrooms\(admin\) \{[\s\S]*\["admin", "teacher"\]\.includes/,
   );
   assert.match(
     adminApiRoutesSource,

@@ -18,7 +18,6 @@ import { EMPTY_AUTH_STATUS, PRIVACY_POLICY_SECTIONS } from "./login/loginConstan
 import { resolveAdminLoginTarget } from "./login/loginNavigation.js";
 import {
   getTeacherScopeStudentEntryPath,
-  SHI_GAOJUN_TEACHER_SCOPE_KEY,
 } from "../../shared/teacherScopes.js";
 import "../styles/login.css";
 
@@ -26,26 +25,9 @@ function readErrorMessage(error) {
   return error?.message || "请求失败，请稍后再试。";
 }
 
-const REGISTER_GENDER_OPTIONS = ["男", "女"];
-const REGISTER_GRADE_OPTIONS = [
-  "7年级",
-  "8年级",
-  "9年级",
-  "高一",
-  "高二",
-  "高三",
-  "大学一年级",
-  "大学二年级",
-  "大学三年级",
-  "大学四年级",
-  "硕士研究生",
-  "博士研究生",
-];
 const EMPTY_REGISTER_PROFILE = Object.freeze({
   name: "",
   studentId: "",
-  gender: "",
-  grade: "",
   className: "",
 });
 
@@ -56,12 +38,8 @@ export default function LoginPage() {
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const teacherScopeKey = SHI_GAOJUN_TEACHER_SCOPE_KEY;
-  const [pairProgrammingInviteCode, setPairProgrammingInviteCode] =
-    useState("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
-  const [privacyAgreed, setPrivacyAgreed] = useState(false);
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
 
   const [authStatusLoading, setAuthStatusLoading] = useState(true);
@@ -76,31 +54,25 @@ export default function LoginPage() {
     EMPTY_REGISTER_PROFILE,
   );
   const [registerInviteCode, setRegisterInviteCode] = useState("");
+  const [registerPrivacyAgreed, setRegisterPrivacyAgreed] = useState(false);
   const [registerErr, setRegisterErr] = useState("");
   const [registerLoading, setRegisterLoading] = useState(false);
 
   const loginHint = useMemo(() => {
     if (authStatusLoading) return "正在读取账号状态…";
-    if (!authStatus.hasAnyUser) return "尚未导入学生账号，请联系指导教师。";
-    return "";
+    if (!authStatus.hasAnyUser) {
+      return "平台暂未创建学生账号。可点击“加入课堂”提交申请，或联系授课教师导入账号。";
+    }
+    return "使用教师发放的账号和密码登录；首次加入课堂请点击“加入课堂”。";
   }, [authStatus.hasAnyUser, authStatusLoading]);
-
-  const pairProgrammingInviteRequired = true;
 
   async function refreshAuthStatus() {
     setAuthStatusLoading(true);
     try {
       const data = await fetchAuthStatus();
-      const adminUsernames = Array.isArray(data.adminUsernames)
-        ? data.adminUsernames.filter(Boolean)
-        : [];
       setAuthStatus({
         hasAnyUser: !!data.hasAnyUser,
         hasAdmin: !!data.hasAdmin,
-        adminUsernames,
-        preloadedStudentCount: Number(data.preloadedStudentCount || 0),
-        preloadedStudentTeacherScopeKey: String(data.preloadedStudentTeacherScopeKey || ""),
-        preloadedStudentTeacherScopeLabel: String(data.preloadedStudentTeacherScopeLabel || ""),
       });
     } catch (error) {
       setErr(readErrorMessage(error));
@@ -114,13 +86,14 @@ export default function LoginPage() {
     refreshAuthStatus();
   }, []);
 
-  function openRegisterModal() {
-    setRegisterRole("student");
+  function openRegisterModal(role = "student") {
+    setRegisterRole(role === "teacher" ? "teacher" : "student");
     setRegisterUsername("");
     setRegisterPassword("");
     setRegisterPasswordConfirm("");
     setRegisterProfile(EMPTY_REGISTER_PROFILE);
     setRegisterInviteCode("");
+    setRegisterPrivacyAgreed(false);
     setRegisterErr("");
     setShowRegisterModal(true);
   }
@@ -128,8 +101,23 @@ export default function LoginPage() {
   async function onRegisterSubmit(event) {
     event.preventDefault();
     setRegisterErr("");
-    const targetUsername = registerUsername.trim();
-    if (!targetUsername) return setRegisterErr("请输入用户名。");
+    const targetUsername =
+      registerRole === "student"
+        ? registerProfile.studentId.trim()
+        : registerUsername.trim();
+    if (!registerProfile.name.trim()) {
+      return setRegisterErr("请输入真实姓名。");
+    }
+    if (registerRole === "student") {
+      if (!/^\d{2,20}$/.test(registerProfile.studentId.trim())) {
+        return setRegisterErr("请输入 2 至 20 位数字学号。");
+      }
+      if (!registerProfile.className.trim()) {
+        return setRegisterErr("请输入班级。");
+      }
+    } else if (!targetUsername) {
+      return setRegisterErr("请输入用户名。");
+    }
     if (!registerPassword) return setRegisterErr("请输入密码。");
     if (registerPassword !== registerPasswordConfirm) {
       return setRegisterErr("两次输入的密码不一致。");
@@ -141,8 +129,8 @@ export default function LoginPage() {
           : "请输入结对编程课堂邀请码。",
       );
     }
-    if (!privacyAgreed) {
-      return setRegisterErr("请先在登录页勾选并同意隐私政策。");
+    if (!registerPrivacyAgreed) {
+      return setRegisterErr("请先勾选并同意隐私政策。");
     }
 
     setRegisterLoading(true);
@@ -153,7 +141,9 @@ export default function LoginPage() {
         password: registerPassword,
         profile: registerProfile,
         ...(registerRole === "teacher"
-          ? { teacherInviteCode: registerInviteCode.trim() }
+          ? {
+              teacherInviteCode: registerInviteCode.trim(),
+            }
           : { classInviteCode: registerInviteCode.trim() }),
       });
       setShowRegisterModal(false);
@@ -161,8 +151,8 @@ export default function LoginPage() {
       setPassword("");
       setErr(
         registerRole === "teacher"
-          ? "教师账号注册成功，请使用「教师登录」。"
-          : "学生账号已提交，等待施高俊老师确认绑定后即可登录。",
+          ? "教师账号注册成功，请使用「教师登录」。登录后请先在「课程」中绑定自己的授课课程。"
+          : "学生账号已提交，学号就是登录账号。等待指导教师确认后即可登录。",
       );
       await refreshAuthStatus();
     } catch (error) {
@@ -178,29 +168,21 @@ export default function LoginPage() {
 
     if (!username.trim()) return setErr("请输入用户名");
     if (!password) return setErr("请输入密码");
-    if (pairProgrammingInviteRequired && !pairProgrammingInviteCode.trim()) {
-      return setErr("请输入结对编程邀请码");
-    }
-    if (!privacyAgreed) return setErr("请先勾选并同意隐私政策");
 
     setLoading(true);
     try {
       const data = await loginAccount({
         username: username.trim(),
         password,
-        teacherScopeKey,
-        inviteCode: pairProgrammingInviteRequired
-          ? pairProgrammingInviteCode.trim()
-          : "",
       });
       setUserToken(data.token);
       setStoredAuthUser({
         ...(data.user || {}),
-        teacherScopeKey: data.teacherScopeKey || teacherScopeKey,
+        teacherScopeKey: data.teacherScopeKey || "",
         teacherScopeLabel: data.teacherScopeLabel || "",
       });
       const nextTeacherScopeKey = String(
-        data.teacherScopeKey || teacherScopeKey,
+        data.teacherScopeKey || "",
       )
         .trim()
         .toLowerCase();
@@ -222,7 +204,6 @@ export default function LoginPage() {
     if (!authStatus.hasAdmin) return setErr("管理员账号未初始化。");
     if (!username.trim()) return setErr("请输入用户名");
     if (!password) return setErr("请输入密码");
-    if (!privacyAgreed) return setErr("请先勾选并同意隐私政策");
 
     setTeacherLoginLoading(true);
     try {
@@ -262,12 +243,12 @@ export default function LoginPage() {
           {loginHint ? <p className="login-hint">{loginHint}</p> : null}
 
           <div className="login-field">
-            <label className="login-label">用户名</label>
+            <label className="login-label">账号或学号</label>
             <input
               className="login-input"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="请输入账号"
+              placeholder="请输入账号或学号"
               autoComplete="username"
             />
           </div>
@@ -284,71 +265,6 @@ export default function LoginPage() {
             />
           </div>
 
-          <div className="login-field">
-            <label className="login-label" htmlFor="login-teacher-name">
-              指导教师
-            </label>
-            <input
-              id="login-teacher-name"
-              className="login-input"
-              value="施高俊"
-              readOnly
-              aria-readonly="true"
-            />
-          </div>
-
-          {pairProgrammingInviteRequired ? (
-            <div className="login-field">
-              <label
-                className="login-label"
-                htmlFor="pair-programming-invite-code"
-              >
-                结对编程邀请码
-              </label>
-              <input
-                id="pair-programming-invite-code"
-                className="login-input"
-                value={pairProgrammingInviteCode}
-                onChange={(event) => {
-                  setPairProgrammingInviteCode(event.target.value);
-                  if (err) setErr("");
-                }}
-                type="password"
-                placeholder="请输入邀请码"
-                autoComplete="off"
-              />
-              <p className="login-field-note">
-                仅获得课堂邀请码的学生可以进入结对编程。
-              </p>
-            </div>
-          ) : null}
-
-          <div className="login-consent-row">
-            <label
-              className="login-consent-label"
-              htmlFor="privacy-agree-checkbox"
-            >
-              <input
-                id="privacy-agree-checkbox"
-                className="login-consent-checkbox"
-                type="checkbox"
-                checked={privacyAgreed}
-                onChange={(e) => {
-                  setPrivacyAgreed(e.target.checked);
-                  if (err) setErr("");
-                }}
-              />
-              <span>我已阅读并同意</span>
-            </label>
-            <button
-              type="button"
-              className="login-link-btn login-consent-link"
-              onClick={() => setShowPrivacyPolicy(true)}
-            >
-              《隐私政策（知情同意）》
-            </button>
-          </div>
-
           <div className="login-actions">
             <div className="login-action-row">
               <button
@@ -362,7 +278,7 @@ export default function LoginPage() {
               <button
                 className="login-btn"
                 type="submit"
-                disabled={loading || teacherLoginLoading || !privacyAgreed || authStatusLoading}
+                disabled={loading || teacherLoginLoading || authStatusLoading}
               >
                 {loading ? (
                   <span className="btn-inner">
@@ -381,9 +297,19 @@ export default function LoginPage() {
             <button
               type="button"
               className="login-link-btn"
-              onClick={openRegisterModal}
+              onClick={() => openRegisterModal("student")}
             >
-              注册账号
+              加入课堂
+            </button>
+            <span className="login-footer-divider" aria-hidden="true">
+              ·
+            </span>
+            <button
+              type="button"
+              className="login-link-btn"
+              onClick={() => openRegisterModal("teacher")}
+            >
+              教师注册
             </button>
             <span className="login-footer-divider" aria-hidden="true">
               ·
@@ -411,50 +337,104 @@ export default function LoginPage() {
 
       {showRegisterModal ? (
         <ModalOverlay
-          title="注册账号"
-          subtitle="账号注册与身份准入分开：教师需教师邀请码，学生提交后还需指导教师确认。"
+          title={registerRole === "teacher" ? "教师注册" : "加入课堂"}
+          subtitle={
+            registerRole === "teacher"
+              ? "填写邀请码即可注册；登录后先绑定自己的授课课程。"
+              : "填写最少信息加入结对编程课堂，提交后由指导教师确认。"
+          }
           onClose={() => setShowRegisterModal(false)}
         >
           <form onSubmit={onRegisterSubmit}>
-            <div className="login-field">
-              <label className="login-label" htmlFor="register-role">
-                注册身份
-              </label>
-              <select
-                id="register-role"
-                className="login-input login-select"
-                value={registerRole}
-                onChange={(event) => {
-                  setRegisterRole(event.target.value);
-                  setRegisterInviteCode("");
-                  setRegisterErr("");
-                }}
-                disabled={registerLoading}
-              >
-                <option value="student">学生</option>
-                <option value="teacher">教师</option>
-              </select>
-            </div>
+            {registerRole === "teacher" ? (
+              <div className="login-field">
+                <label className="login-label" htmlFor="register-username">
+                  登录账号
+                </label>
+                <input
+                  id="register-username"
+                  className="login-input"
+                  value={registerUsername}
+                  onChange={(event) => setRegisterUsername(event.target.value)}
+                  placeholder="请输入教师登录账号"
+                  autoComplete="username"
+                  disabled={registerLoading}
+                />
+              </div>
+            ) : null}
 
             <div className="login-field">
-              <label className="login-label" htmlFor="register-username">
-                用户名
+              <label className="login-label" htmlFor="register-name">
+                真实姓名
               </label>
               <input
-                id="register-username"
+                id="register-name"
                 className="login-input"
-                value={registerUsername}
-                onChange={(event) => setRegisterUsername(event.target.value)}
-                placeholder="请输入用户名"
-                autoComplete="username"
+                value={registerProfile.name}
+                onChange={(event) =>
+                  setRegisterProfile((current) => ({
+                    ...current,
+                    name: event.target.value,
+                  }))
+                }
+                placeholder="请输入中文姓名"
+                autoComplete="name"
                 disabled={registerLoading}
+                required
               />
             </div>
+
+            {registerRole === "student" ? (
+              <>
+                <div className="login-profile-fields">
+                  <div className="login-field">
+                    <label className="login-label" htmlFor="register-student-id">
+                      学号
+                    </label>
+                    <input
+                      id="register-student-id"
+                      className="login-input"
+                      value={registerProfile.studentId}
+                      onChange={(event) =>
+                        setRegisterProfile((current) => ({
+                          ...current,
+                          studentId: event.target.value,
+                        }))
+                      }
+                      placeholder="学号将作为登录账号"
+                      inputMode="numeric"
+                      pattern="[0-9]{2,20}"
+                      disabled={registerLoading}
+                      required
+                    />
+                  </div>
+                  <div className="login-field">
+                    <label className="login-label" htmlFor="register-class-name">
+                      班级
+                    </label>
+                    <input
+                      id="register-class-name"
+                      className="login-input"
+                      value={registerProfile.className}
+                      onChange={(event) =>
+                        setRegisterProfile((current) => ({
+                          ...current,
+                          className: event.target.value,
+                        }))
+                      }
+                      placeholder="例如：810班"
+                      disabled={registerLoading}
+                      required
+                    />
+                  </div>
+                </div>
+              </>
+            ) : null}
 
             <div className="login-profile-fields">
               <div className="login-field">
                 <label className="login-label" htmlFor="register-password">
-                  密码
+                  设置密码
                 </label>
                 <input
                   id="register-password"
@@ -489,126 +469,6 @@ export default function LoginPage() {
               </div>
             </div>
 
-            <div className="login-modal-section-title">
-              {registerRole === "teacher" ? "教师信息" : "学生信息"}
-            </div>
-            <div className="login-field">
-              <label className="login-label" htmlFor="register-name">
-                真实姓名
-              </label>
-              <input
-                id="register-name"
-                className="login-input"
-                value={registerProfile.name}
-                onChange={(event) =>
-                  setRegisterProfile((current) => ({
-                    ...current,
-                    name: event.target.value,
-                  }))
-                }
-                placeholder="请输入中文姓名"
-                autoComplete="name"
-                disabled={registerLoading}
-                required
-              />
-            </div>
-
-            {registerRole === "student" ? (
-              <>
-                <div className="login-field">
-                  <label className="login-label" htmlFor="register-student-id">
-                    学号
-                  </label>
-                  <input
-                    id="register-student-id"
-                    className="login-input"
-                    value={registerProfile.studentId}
-                    onChange={(event) =>
-                      setRegisterProfile((current) => ({
-                        ...current,
-                        studentId: event.target.value,
-                      }))
-                    }
-                    inputMode="numeric"
-                    pattern="[0-9]{1,20}"
-                    disabled={registerLoading}
-                    required
-                  />
-                </div>
-                <div className="login-profile-fields">
-                  <div className="login-field">
-                    <label className="login-label" htmlFor="register-gender">
-                      性别
-                    </label>
-                    <select
-                      id="register-gender"
-                      className="login-input login-select"
-                      value={registerProfile.gender}
-                      onChange={(event) =>
-                        setRegisterProfile((current) => ({
-                          ...current,
-                          gender: event.target.value,
-                        }))
-                      }
-                      disabled={registerLoading}
-                      required
-                    >
-                      <option value="">请选择</option>
-                      {REGISTER_GENDER_OPTIONS.map((option) => (
-                        <option key={option} value={option}>
-                          {option}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="login-field">
-                    <label className="login-label" htmlFor="register-grade">
-                      年级
-                    </label>
-                    <select
-                      id="register-grade"
-                      className="login-input login-select"
-                      value={registerProfile.grade}
-                      onChange={(event) =>
-                        setRegisterProfile((current) => ({
-                          ...current,
-                          grade: event.target.value,
-                        }))
-                      }
-                      disabled={registerLoading}
-                      required
-                    >
-                      <option value="">请选择</option>
-                      {REGISTER_GRADE_OPTIONS.map((option) => (
-                        <option key={option} value={option}>
-                          {option}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-                <div className="login-field">
-                  <label className="login-label" htmlFor="register-class-name">
-                    班级
-                  </label>
-                  <input
-                    id="register-class-name"
-                    className="login-input"
-                    value={registerProfile.className}
-                    onChange={(event) =>
-                      setRegisterProfile((current) => ({
-                        ...current,
-                        className: event.target.value,
-                      }))
-                    }
-                    placeholder="例如：810班"
-                    disabled={registerLoading}
-                    required
-                  />
-                </div>
-              </>
-            ) : null}
-
             <div className="login-field">
               <label className="login-label" htmlFor="register-invite-code">
                 {registerRole === "teacher"
@@ -623,17 +483,43 @@ export default function LoginPage() {
                 onChange={(event) => setRegisterInviteCode(event.target.value)}
                 placeholder={
                   registerRole === "teacher"
-                    ? "请向系统管理员获取"
-                    : "请向施高俊老师获取"
+                    ? "请向平台管理员获取"
+                    : "请向指导教师获取"
                 }
                 autoComplete="off"
                 disabled={registerLoading}
               />
               <p className="login-field-note">
                 {registerRole === "teacher"
-                  ? "教师邀请码属于管理权限凭证，请勿转发。"
-                  : "提交后会进入待确认列表，教师绑定后才能登录。"}
+                  ? "教师邀请码属于管理权限凭证，请勿转发；平台管理员可在后台调整班级范围。"
+                  : "学号将作为登录账号；提交后由教师确认课堂身份。"}
               </p>
+            </div>
+
+            <div className="login-consent-row login-register-consent">
+              <label
+                className="login-consent-label"
+                htmlFor="register-privacy-agree-checkbox"
+              >
+                <input
+                  id="register-privacy-agree-checkbox"
+                  className="login-consent-checkbox"
+                  type="checkbox"
+                  checked={registerPrivacyAgreed}
+                  onChange={(event) => {
+                    setRegisterPrivacyAgreed(event.target.checked);
+                    if (registerErr) setRegisterErr("");
+                  }}
+                />
+                <span>我已阅读并同意</span>
+              </label>
+              <button
+                type="button"
+                className="login-link-btn login-consent-link"
+                onClick={() => setShowPrivacyPolicy(true)}
+              >
+                《隐私政策（知情同意）》
+              </button>
             </div>
 
             <p className="login-modal-error">{registerErr}</p>
@@ -651,7 +537,11 @@ export default function LoginPage() {
                 className="login-modal-btn"
                 disabled={registerLoading}
               >
-                {registerLoading ? "注册中…" : "提交注册"}
+                {registerLoading
+                  ? "提交中…"
+                  : registerRole === "teacher"
+                    ? "注册教师账号"
+                    : "申请加入课堂"}
               </button>
             </div>
           </form>
@@ -684,7 +574,7 @@ export default function LoginPage() {
                 type="button"
                 className="login-policy-confirm"
                 onClick={() => {
-                  setPrivacyAgreed(true);
+                  if (showRegisterModal) setRegisterPrivacyAgreed(true);
                   setShowPrivacyPolicy(false);
                   if (err) setErr("");
                 }}

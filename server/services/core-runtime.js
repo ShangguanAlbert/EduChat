@@ -70,11 +70,6 @@ import {
   sanitizeTeacherScopeKey,
 } from "../../shared/teacherScopes.js";
 import {
-  FIXED_STUDENT_ACCOUNT_TAG,
-  FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
-  parseFixedStudentAccounts,
-} from "../../shared/fixedStudentAccounts.js";
-import {
   createReasoningTagStreamResolver,
 } from "../../shared/reasoningTags.js";
 import {
@@ -141,6 +136,7 @@ const PAIR_PROGRAMMING_INVITE_CODE = String(
 const TEACHER_REGISTRATION_INVITE_CODE = String(
   process.env.TEACHER_REGISTRATION_INVITE_CODE || "",
 ).trim();
+const PLATFORM_ADMIN_ACCOUNT_TAG = "platform_admin";
 const SELF_REGISTERED_TEACHER_ACCOUNT_TAG = "teacher_invite_registration";
 const ACCOUNT_STATUS_ACTIVE = "active";
 const ACCOUNT_STATUS_PENDING_BINDING = "pending_binding";
@@ -227,25 +223,15 @@ const STUDENT_HOMEWORK_OSS_SUB_SCOPE = "student-homework";
 const STUDENT_HOMEWORK_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 const STUDENT_HOMEWORK_UPLOAD_MAX_FILES = 6;
 const STUDENT_HOMEWORK_MAX_FILES_PER_LESSON_PER_STUDENT = 20;
-const FIXED_ADMIN_ACCOUNTS = Object.freeze(readFixedAdminAccountsFromEnv());
-const FIXED_STUDENT_ACCOUNTS = Object.freeze(readFixedStudentAccountsFromEnv());
-const FIXED_ADMIN_USERNAME_KEYS = new Set(
-  FIXED_ADMIN_ACCOUNTS.map((item) =>
-    String(item?.username || "")
-      .trim()
-      .toLowerCase(),
-  ),
-);
-const FIXED_STUDENT_USERNAME_KEYS = new Set(
-  FIXED_STUDENT_ACCOUNTS.map((item) =>
-    String(item?.username || "")
-      .trim()
-      .toLowerCase(),
-  ),
-);
+const PLATFORM_ADMIN_ACCOUNT = Object.freeze(readPlatformAdminFromEnv());
+const PLATFORM_ADMIN_USERNAME_KEY = String(
+  PLATFORM_ADMIN_ACCOUNT?.username || "",
+)
+  .trim()
+  .toLowerCase();
 const RESERVED_ADMIN_USERNAME_KEYS = new Set([
   "admin",
-  ...FIXED_ADMIN_USERNAME_KEYS,
+  ...(PLATFORM_ADMIN_USERNAME_KEY ? [PLATFORM_ADMIN_USERNAME_KEY] : []),
 ]);
 const CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE = "chat-prepared-pdf-images";
 const ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES = 50;
@@ -924,7 +910,7 @@ const authUserSchema = new mongoose.Schema(
   {
     username: { type: String, required: true, trim: true },
     usernameKey: { type: String, required: true, unique: true, index: true },
-    role: { type: String, enum: ["admin", "user"], default: "user" },
+    role: { type: String, enum: ["admin", "teacher", "user"], default: "user" },
     passwordHash: { type: String, required: true },
     accountTag: { type: String, default: "" },
     accountStatus: {
@@ -937,6 +923,7 @@ const authUserSchema = new mongoose.Schema(
       default: ACCOUNT_STATUS_ACTIVE,
     },
     lockedTeacherScopeKey: { type: String, default: "" },
+    authorizedClassNames: { type: [String], default: () => [] },
     profile: {
       name: { type: String, default: "" },
       studentId: { type: String, default: "" },
@@ -1567,6 +1554,7 @@ const adminClassroomTaskSchema = new mongoose.Schema(
 const adminClassroomCoursePlanSchema = new mongoose.Schema(
   {
     id: { type: String, default: "" },
+    courseId: { type: String, default: "", index: true },
     courseName: { type: String, default: "" },
     className: { type: String, default: ADMIN_CLASSROOM_DEFAULT_CLASS_NAME },
     courseTime: { type: String, default: "" },
@@ -1721,6 +1709,33 @@ const adminConfigSchema = new mongoose.Schema(
 const AdminConfig =
   mongoose.models.AdminConfig ||
   mongoose.model("AdminConfig", adminConfigSchema);
+
+const teachingCourseSchema = new mongoose.Schema(
+  {
+    ownerTeacherId: { type: String, default: "", index: true },
+    ownerTeacherName: { type: String, default: "" },
+    courseName: { type: String, required: true, default: "未命名课程" },
+    termName: { type: String, default: "" },
+    syllabusText: { type: String, default: "" },
+    knowledgePoints: {
+      type: [paiaCourseKnowledgePointSchema],
+      default: () => [],
+    },
+    classNames: { type: [String], default: () => [] },
+    updatedByUserId: { type: String, default: "" },
+  },
+  {
+    timestamps: true,
+    collection: "teaching_courses",
+  },
+);
+
+teachingCourseSchema.index({ ownerTeacherId: 1, updatedAt: -1 });
+
+const TeachingCourse =
+  mongoose.models.TeachingCourse ||
+  mongoose.model("TeachingCourse", teachingCourseSchema);
+
 const adminClassroomLessonFileSchema = new mongoose.Schema(
   {
     key: { type: String, default: ADMIN_CONFIG_KEY, index: true },
@@ -7617,6 +7632,7 @@ function sanitizeAdminClassroomCoursePlanPayload(input, index = 0) {
 
   return {
     id: sanitizeId(source.id, `course-${index + 1}`),
+    courseId: sanitizeId(source.courseId, ""),
     courseName: courseName || `未命名课程 ${index + 1}`,
     className,
     courseTime,
@@ -10132,8 +10148,8 @@ function validateUserProfile(profile) {
   }
 
   const genderOptions = ["男", "女"];
-  if (!genderOptions.includes(profile.gender)) {
-    errors.gender = "请选择性别";
+  if (profile.gender && !genderOptions.includes(profile.gender)) {
+    errors.gender = "性别信息无效";
   }
 
   const gradeOptions = [
@@ -10150,8 +10166,8 @@ function validateUserProfile(profile) {
     "硕士研究生",
     "博士研究生",
   ];
-  if (!gradeOptions.includes(profile.grade)) {
-    errors.grade = "请选择年级";
+  if (profile.grade && !gradeOptions.includes(profile.grade)) {
+    errors.grade = "年级信息无效";
   }
 
   if (!profile.className) {
@@ -13403,8 +13419,7 @@ function broadcastGroupChatMemberJoined(roomId, user) {
 async function startServer() {
   await mongoose.connect(mongoUri, { serverSelectionTimeoutMS: 6000 });
   console.log("Mongo connected.");
-  await ensureFixedAdminAccounts();
-  await ensureFixedStudentAccounts();
+  await ensurePlatformAdminAccount();
   await removeLegacyPlaintextPasswords();
 
   const server = http.createServer(app);
@@ -13686,51 +13701,17 @@ function findMongoIndexByKey(existingIndexes, key) {
   return list.find((index) => hasSameMongoIndexKey(index?.key, key)) || null;
 }
 
-function readFixedAdminAccountsFromEnv() {
-  const raw = String(process.env.FIXED_ADMIN_ACCOUNTS || "").trim();
-  if (!raw) return [];
-
-  let parsed = null;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
+function readPlatformAdminFromEnv() {
+  const username = String(process.env.PLATFORM_ADMIN_USERNAME || "").trim();
+  const password = String(process.env.PLATFORM_ADMIN_PASSWORD || "");
+  if (!username && !password) return null;
+  if (!username || !password) {
     console.warn(
-      '[auth] FIXED_ADMIN_ACCOUNTS 解析失败：请使用 JSON 数组格式（例如 [{"username":"admin","password":"secret"}]）。',
+      "[auth] 平台管理员配置不完整：请同时设置 PLATFORM_ADMIN_USERNAME 和 PLATFORM_ADMIN_PASSWORD。",
     );
-    return [];
+    return null;
   }
-
-  if (!Array.isArray(parsed)) {
-    console.warn("[auth] FIXED_ADMIN_ACCOUNTS 无效：必须是 JSON 数组。");
-    return [];
-  }
-
-  const deduped = new Map();
-  parsed.forEach((item) => {
-    const username =
-      normalizeUsername(item?.username) || String(item?.username || "").trim();
-    const password = String(item?.password || "");
-    if (!username || !password) return;
-    const usernameKey = toUsernameKey(username);
-    if (!usernameKey || deduped.has(usernameKey)) return;
-    deduped.set(usernameKey, {
-      username,
-      password,
-    });
-  });
-
-  return Array.from(deduped.values());
-}
-
-function readFixedStudentAccountsFromEnv() {
-  const raw = String(process.env.FIXED_STUDENT_ACCOUNTS || "").trim();
-  if (!raw) return [];
-  return parseFixedStudentAccounts(raw, {
-    warningLabel: "FIXED_STUDENT_ACCOUNTS",
-    onWarning: (message) => {
-      console.warn(message);
-    },
-  });
+  return { username, password };
 }
 
 function normalizeUsername(input) {
@@ -13755,28 +13736,8 @@ function isReservedAdminUsernameKey(usernameKey) {
   );
 }
 
-function isFixedAdminUsernameKey(usernameKey) {
-  return FIXED_ADMIN_USERNAME_KEYS.has(
-    String(usernameKey || "")
-      .trim()
-      .toLowerCase(),
-  );
-}
-
-function isFixedAdminUser(user) {
-  return (
-    !!user && user.role === "admin" && isFixedAdminUsernameKey(user.usernameKey)
-  );
-}
-
 function isTeacherAdminUser(user) {
-  return (
-    !!user &&
-    user.role === "admin" &&
-    (isFixedAdminUsernameKey(user.usernameKey) ||
-      String(user.accountTag || "").trim() ===
-        SELF_REGISTERED_TEACHER_ACCOUNT_TAG)
-  );
+  return !!user && ["admin", "teacher"].includes(String(user.role || "").trim());
 }
 
 function readAccountStatus(user) {
@@ -13786,23 +13747,6 @@ function readAccountStatus(user) {
   }
   if (status === ACCOUNT_STATUS_DISABLED) return ACCOUNT_STATUS_DISABLED;
   return ACCOUNT_STATUS_ACTIVE;
-}
-
-function isFixedStudentUsernameKey(usernameKey) {
-  return FIXED_STUDENT_USERNAME_KEYS.has(
-    String(usernameKey || "")
-      .trim()
-      .toLowerCase(),
-  );
-}
-
-function isFixedStudentUser(user) {
-  return (
-    !!user &&
-    user.role === "user" &&
-    (String(user.accountTag || "").trim() === FIXED_STUDENT_ACCOUNT_TAG ||
-      isFixedStudentUsernameKey(user.usernameKey))
-  );
 }
 
 function readLockedTeacherScopeKey(value) {
@@ -13875,123 +13819,45 @@ async function verifyPassword(password, storedHash) {
   return crypto.timingSafeEqual(a, b);
 }
 
-async function ensureFixedAdminAccounts() {
-  for (const account of FIXED_ADMIN_ACCOUNTS) {
-    const username =
-      normalizeUsername(account?.username) ||
-      String(account?.username || "").trim();
-    const password = String(account?.password || "");
-    if (!username || !password) continue;
+async function ensurePlatformAdminAccount() {
+  const username = normalizeUsername(PLATFORM_ADMIN_ACCOUNT?.username);
+  const password = String(PLATFORM_ADMIN_ACCOUNT?.password || "");
+  if (!username || !password) return;
 
-    const usernameKey = toUsernameKey(username);
-    const existing = await AuthUser.findOne({ usernameKey });
-    const hashMatches = existing
-      ? await verifyPassword(password, existing.passwordHash).catch(() => false)
-      : false;
+  const usernameKey = toUsernameKey(username);
+  const existing = await AuthUser.findOne({ usernameKey });
+  const hashMatches = existing
+    ? await verifyPassword(password, existing.passwordHash).catch(() => false)
+    : false;
 
-    if (!existing) {
-      const passwordHash = await hashPassword(password);
-      await AuthUser.create({
-        username,
-        usernameKey,
-        role: "admin",
-        passwordHash,
-        accountStatus: ACCOUNT_STATUS_ACTIVE,
-      });
-      continue;
-    }
-
-    const needsUpdate =
-      existing.role !== "admin" ||
-      existing.username !== username ||
-      readAccountStatus(existing) !== ACCOUNT_STATUS_ACTIVE ||
-      !hashMatches;
-    if (!needsUpdate) continue;
-
-    existing.username = username;
-    existing.usernameKey = usernameKey;
-    existing.role = "admin";
-    existing.accountStatus = ACCOUNT_STATUS_ACTIVE;
-    existing.passwordHash = await hashPassword(password);
-    await existing.save();
+  if (!existing) {
+    const passwordHash = await hashPassword(password);
+    await AuthUser.create({
+      username,
+      usernameKey,
+      role: "admin",
+      passwordHash,
+      accountTag: PLATFORM_ADMIN_ACCOUNT_TAG,
+      accountStatus: ACCOUNT_STATUS_ACTIVE,
+    });
+    return;
   }
-}
 
-async function ensureFixedStudentAccounts() {
-  for (const account of FIXED_STUDENT_ACCOUNTS) {
-    const username =
-      normalizeUsername(account?.username) ||
-      String(account?.username || "").trim();
-    const password = String(account?.password || "");
-    const className = sanitizeText(account?.className, "", 40);
-    const studentId = sanitizeText(account?.studentId, "", 20);
-    const grade = sanitizeText(account?.grade, "8年级", 20);
-    const lockedTeacherScopeKey = sanitizeTeacherScopeKey(
-      account?.requiredTeacherScopeKey ||
-        FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
-    );
-    if (!username || !password || !studentId || !lockedTeacherScopeKey)
-      continue;
+  const needsUpdate =
+    existing.role !== "admin" ||
+    existing.username !== username ||
+    String(existing.accountTag || "").trim() !== PLATFORM_ADMIN_ACCOUNT_TAG ||
+    readAccountStatus(existing) !== ACCOUNT_STATUS_ACTIVE ||
+    !hashMatches;
+  if (!needsUpdate) return;
 
-    const usernameKey = toUsernameKey(username);
-    const existing = await AuthUser.findOne({ usernameKey });
-    const hashMatches = existing
-      ? await verifyPassword(password, existing.passwordHash).catch(() => false)
-      : false;
-
-    if (!existing) {
-      const passwordHash = await hashPassword(password);
-      await AuthUser.create({
-        username,
-        usernameKey,
-        role: "user",
-        passwordHash,
-        accountTag: FIXED_STUDENT_ACCOUNT_TAG,
-        accountStatus: ACCOUNT_STATUS_ACTIVE,
-        lockedTeacherScopeKey,
-        profile: {
-          name: username,
-          studentId,
-          grade,
-          className,
-        },
-      });
-      continue;
-    }
-
-    const nextProfile = {
-      ...sanitizeUserProfile(existing.profile),
-      name: username,
-      studentId,
-      grade,
-      className,
-    };
-    const needsUpdate =
-      existing.role !== "user" ||
-      existing.username !== username ||
-      readAccountStatus(existing) !== ACCOUNT_STATUS_ACTIVE ||
-      !hashMatches ||
-      String(existing.accountTag || "").trim() !== FIXED_STUDENT_ACCOUNT_TAG ||
-      readLockedTeacherScopeKey(existing.lockedTeacherScopeKey) !==
-        lockedTeacherScopeKey ||
-      nextProfile.name !== sanitizeText(existing.profile?.name, "", 20) ||
-      nextProfile.studentId !==
-        sanitizeText(existing.profile?.studentId, "", 20) ||
-      nextProfile.grade !== sanitizeText(existing.profile?.grade, "", 20) ||
-      nextProfile.className !==
-        sanitizeText(existing.profile?.className, "", 40);
-    if (!needsUpdate) continue;
-
-    existing.username = username;
-    existing.usernameKey = usernameKey;
-    existing.role = "user";
-    existing.accountStatus = ACCOUNT_STATUS_ACTIVE;
-    existing.passwordHash = await hashPassword(password);
-    existing.accountTag = FIXED_STUDENT_ACCOUNT_TAG;
-    existing.lockedTeacherScopeKey = lockedTeacherScopeKey;
-    existing.profile = nextProfile;
-    await existing.save();
-  }
+  existing.username = username;
+  existing.usernameKey = usernameKey;
+  existing.role = "admin";
+  existing.accountTag = PLATFORM_ADMIN_ACCOUNT_TAG;
+  existing.accountStatus = ACCOUNT_STATUS_ACTIVE;
+  existing.passwordHash = await hashPassword(password);
+  await existing.save();
 }
 
 async function removeLegacyPlaintextPasswords() {
@@ -14581,6 +14447,7 @@ export {
   sanitizeTeacherScopeKey,
   PAIR_PROGRAMMING_INVITE_CODE,
   TEACHER_REGISTRATION_INVITE_CODE,
+  PLATFORM_ADMIN_ACCOUNT_TAG,
   SELF_REGISTERED_TEACHER_ACCOUNT_TAG,
   ACCOUNT_STATUS_ACTIVE,
   ACCOUNT_STATUS_PENDING_BINDING,
@@ -14589,9 +14456,6 @@ export {
   hasPairProgrammingTokenAccess,
   isPairProgrammingInviteCodeValid,
   isPairProgrammingTeacherScope,
-  FIXED_STUDENT_ACCOUNTS,
-  FIXED_STUDENT_ACCOUNT_TAG,
-  FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
   groupChatWsRoomSockets,
   groupChatWsMetaBySocket,
   groupChatWsOnlineCountsByRoom,
@@ -14672,9 +14536,6 @@ export {
   STUDENT_HOMEWORK_MAX_FILE_SIZE_BYTES,
   STUDENT_HOMEWORK_UPLOAD_MAX_FILES,
   STUDENT_HOMEWORK_MAX_FILES_PER_LESSON_PER_STUDENT,
-  FIXED_ADMIN_ACCOUNTS,
-  FIXED_ADMIN_USERNAME_KEYS,
-  FIXED_STUDENT_USERNAME_KEYS,
   RESERVED_ADMIN_USERNAME_KEYS,
   CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE,
   ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES,
@@ -14744,6 +14605,8 @@ export {
   adminClassroomCoursePlanSchema,
   adminConfigSchema,
   AdminConfig,
+  teachingCourseSchema,
+  TeachingCourse,
   adminClassroomLessonFileSchema,
   AdminClassroomLessonFile,
     classroomHomeworkFileSchema,
@@ -15156,20 +15019,15 @@ export {
   normalizeUsername,
   toUsernameKey,
   isReservedAdminUsernameKey,
-  isFixedAdminUsernameKey,
-  isFixedAdminUser,
   isTeacherAdminUser,
   readAccountStatus,
-  isFixedStudentUsernameKey,
-  isFixedStudentUser,
   readLockedTeacherScopeKey,
   isJiaoji231ClassName,
   resolveLoginLockedTeacherScopeKey,
   validatePassword,
   hashPassword,
   verifyPassword,
-  ensureFixedAdminAccounts,
-  ensureFixedStudentAccounts,
+  ensurePlatformAdminAccount,
   removeLegacyPlaintextPasswords,
   signToken,
   verifyToken,

@@ -7,6 +7,7 @@ export {
   GroupChatMessage,
   GroupChatStoredFile,
   AdminConfig,
+  TeachingCourse,
   AdminClassroomLessonFile,
   ClassroomHomeworkFile,
 } from "../services/core-runtime.js";

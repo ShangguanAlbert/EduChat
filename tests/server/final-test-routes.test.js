@@ -295,27 +295,6 @@ function createFinalTestDeps() {
     SHANGGUAN_FUZE_TEACHER_SCOPE_KEY: "shangguan-fuze",
     DEFAULT_TEACHER_SCOPE_KEY: "default",
     ADMIN_CONFIG_KEY: "admin-config",
-    FIXED_STUDENT_ACCOUNTS: [
-      {
-        username: "zhangsan810",
-        studentId: "81001",
-        className: "810班",
-        requiredTeacherScopeKey: "shangguan-fuze",
-      },
-      {
-        username: "lisi810",
-        studentId: "81002",
-        className: "810班",
-        requiredTeacherScopeKey: "shangguan-fuze",
-      },
-      {
-        username: "wangwu811",
-        studentId: "81101",
-        className: "811班",
-        requiredTeacherScopeKey: "shangguan-fuze",
-      },
-    ],
-    FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY: "shangguan-fuze",
     CLASSROOM_FIRST_LESSON_DATE: "2026-03-11",
     CLASSROOM_QUESTIONNAIRE_URL: "",
     sanitizeTeacherScopeKey: (value) => String(value || "").trim().toLowerCase(),

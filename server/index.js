@@ -72,8 +72,7 @@ app.use((error, _req, res, next) => {
 async function startServer() {
   await deps.mongoose.connect(deps.mongoUri, { serverSelectionTimeoutMS: 6000 });
   console.log("Mongo connected.");
-  await deps.ensureFixedAdminAccounts();
-  await deps.ensureFixedStudentAccounts();
+  await deps.ensurePlatformAdminAccount();
   await deps.removeLegacyPlaintextPasswords();
 
   const server = http.createServer(app);

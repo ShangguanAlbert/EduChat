@@ -76,8 +76,12 @@ import {
   backfillAdminGeneratedImageThumbnails,
   bindAdminUserDirectoryStudent,
   createAdminCollaborationClassroom,
+  createAdminTeachingCourseClass,
+  createAdminTeachingCourse,
+  deleteAdminTeachingCourse,
   createAdminUserDirectoryClassCategory,
   createAdminUserDirectoryUser,
+  downloadAdminStudentImportTemplate,
   deleteAllUserChats,
   deleteAdminUserDirectoryUser,
   downloadAdminGeneratedImage,
@@ -93,7 +97,6 @@ import {
   deleteAdminClassroomTaskFile,
   downloadAdminClassroomLessonFile,
   fetchAdminGeneratedImageGroups,
-  fetchAdminCollaborationCourseMemoryConfig,
   fetchAdminCollaborationClassrooms,
   fetchAdminClassroomHomeworkOverview,
   fetchAdminClassroomPlans,
@@ -101,7 +104,10 @@ import {
   reopenAdminFinalTestSession,
   fetchAdminMe,
   fetchAdminOnlinePresence,
+  fetchAdminTeachingCourses,
+  fetchAdminTeachingCourseClassRoster,
   fetchAdminUserDirectory,
+  importAdminStudentAccounts,
   mergeAdminUserDirectoryUsers,
   saveAdminClassroomPlans,
   saveAdminFinalTestConfig,
@@ -111,7 +117,8 @@ import {
   updateAdminCollaborationClassroomMonitoring,
   updateAdminCollaborationCourseAnnouncement,
   updateAdminCollaborationMonitoringMaster,
-  updateAdminCollaborationCourseMemoryConfig,
+  updateAdminTeachingCourse,
+  updateAdminPersonalProfile,
 } from "./admin/adminApi.js";
 import { clearAdminToken, getAdminToken } from "./login/adminSession.js";
 import {
@@ -131,26 +138,24 @@ const FINAL_TEST_EXPORT_CLASS_OPTIONS = Object.freeze([
 const TEACHER_HOME_PANEL_KEYS = Object.freeze(
   new Set([
     "classroom",
+    "class-manage",
     "course",
     "discipline",
     "homework",
     "seat-fixed",
     "random-rollcall",
     "final-test",
-    "user-manage",
+    "teacher-manage",
+    "student-manage",
     "export-center",
     "image-library",
     "party-manage",
     "online",
   ]),
 );
-const TERMINAL_ADMIN_USERNAME_KEY = "上官福泽"
-  .replace(/\s+/g, "")
-  .toLowerCase();
+const PLATFORM_ADMIN_ACCOUNT_TAG = "platform_admin";
 const SELF_REGISTERED_TEACHER_ACCOUNT_TAG = "teacher_invite_registration";
-const USER_DIRECTORY_DEFAULT_TARGET_CLASSES = Object.freeze([
-  ...TARGET_CLASS_NAMES,
-]);
+const USER_DIRECTORY_DEFAULT_TARGET_CLASSES = Object.freeze([]);
 const TEACHER_SEAT_LAYOUT_STORAGE_KEY = "teacher-seat-layouts-v1";
 const SEAT_LAYOUT_MIN_ROWS = 3;
 const SEAT_LAYOUT_MAX_ROWS = 10;
@@ -259,13 +264,6 @@ const USER_CREATE_CLASS_TEACHER_SCOPE_RULES = Object.freeze([
   },
 ]);
 
-function toAdminUsernameKey(value) {
-  return String(value || "")
-    .trim()
-    .replace(/\s+/g, "")
-    .toLowerCase();
-}
-
 function toClassNameKey(value) {
   return String(value || "")
     .trim()
@@ -310,11 +308,10 @@ function resolveUserClassFilterValue(className, targetClassKeyToName) {
 }
 
 function readUserRoleLabel(role) {
-  return String(role || "")
-    .trim()
-    .toLowerCase() === "admin"
-    ? "管理员"
-    : "学生";
+  const safeRole = String(role || "").trim().toLowerCase();
+  if (safeRole === "admin") return "管理员";
+  if (safeRole === "teacher") return "教师";
+  return "学生";
 }
 
 function readFinalTestStatusLabel(status) {
@@ -862,6 +859,7 @@ function normalizeLessonPlans(plans) {
   const source = Array.isArray(plans) ? plans : [];
   return source.map((lesson) => ({
     ...(lesson && typeof lesson === "object" ? lesson : {}),
+    courseId: String(lesson?.courseId || "").trim(),
     className: normalizeLessonClassName(lesson?.className),
     homeworkRequirementText: normalizeClassroomHomeworkRequirementText(
       lesson?.homeworkRequirementText,
@@ -869,6 +867,22 @@ function normalizeLessonPlans(plans) {
     homeworkUploadEnabled: lesson?.homeworkUploadEnabled !== false,
     lateSubmissionEnabled: lesson?.lateSubmissionEnabled === true,
   }));
+}
+
+function resolveLessonTeachingCourseId(lesson, teachingCourses = []) {
+  const savedCourseId = String(lesson?.courseId || "").trim();
+  if (savedCourseId) return savedCourseId;
+
+  const lessonClassName = normalizeLessonClassName(lesson?.className);
+  const classMatchedCourse = (Array.isArray(teachingCourses)
+    ? teachingCourses
+    : []
+  ).find((course) =>
+    (Array.isArray(course?.classNames) ? course.classNames : []).some(
+      (className) => normalizeLessonClassName(className) === lessonClassName,
+    ),
+  );
+  return String(classMatchedCourse?.id || teachingCourses?.[0]?.id || "").trim();
 }
 
 function buildClassroomConfigSnapshot({
@@ -1217,11 +1231,16 @@ const TeacherSeatFixedPanel = memo(function TeacherSeatFixedPanel({
   );
 });
 
-function buildLessonDraft(lessonIndex = 1, defaultClassName = "") {
+function buildLessonDraft(
+  lessonIndex = 1,
+  defaultClassName = "",
+  teachingCourseId = "",
+) {
   const now = Date.now();
   const nowIso = new Date(now).toISOString();
   return {
     id: `course-${now}-${Math.round(Math.random() * 1000)}`,
+    courseId: String(teachingCourseId || "").trim(),
     courseName: `第${lessonIndex}节课`,
     className: normalizeLessonClassName(defaultClassName),
     courseStartAt: "",
@@ -1245,8 +1264,11 @@ function triggerBrowserDownload(blob, fileName) {
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = String(fileName || "课程文件.bin").trim() || "课程文件.bin";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function triggerTextDownload(fileName, content) {
@@ -1296,12 +1318,14 @@ export default function TeacherHomePage() {
   const [downloadingFileId, setDownloadingFileId] = useState("");
   const [deletingFileId, setDeletingFileId] = useState("");
   const [error, setError] = useState("");
-  const [activePanel, setActivePanel] = useState(
-    () => requestedTeacherPanel || "party-manage",
+  const [activePanel, setActivePanel] = useState(() =>
+    requestedTeacherPanel === "user-manage"
+      ? "student-manage"
+      : requestedTeacherPanel || "party-manage",
   );
   const [lessonListVisible, setLessonListVisible] = useState(true);
   const [lessonAnnouncementExpanded, setLessonAnnouncementExpanded] =
-    useState(true);
+    useState(false);
   const [lessonSearchQuery, setLessonSearchQuery] = useState("");
   const [lessonClassFilter, setLessonClassFilter] = useState("");
   const [disciplineSearchQuery, setDisciplineSearchQuery] = useState("");
@@ -1320,6 +1344,19 @@ export default function TeacherHomePage() {
     createdAt: "",
     updatedAt: "",
   });
+  const [personalProfile, setPersonalProfile] = useState({
+    name: "",
+    gender: "",
+    authorizedClassNamesText: "",
+    saving: false,
+    error: "",
+  });
+  const [newTeachingClassName, setNewTeachingClassName] = useState("");
+  const [creatingTeachingClass, setCreatingTeachingClass] = useState(false);
+  const [teachingClassError, setTeachingClassError] = useState("");
+  const [teachingClassCreateDialogOpen, setTeachingClassCreateDialogOpen] =
+    useState(false);
+  const [pendingClassImport, setPendingClassImport] = useState("");
   const [classroomUpdatedAt, setClassroomUpdatedAt] = useState("");
   const [productTaskEnabled, setProductTaskEnabled] = useState(false);
   const [teacherCoursePlans, setTeacherCoursePlans] = useState([]);
@@ -1378,9 +1415,10 @@ export default function TeacherHomePage() {
   const [userDirectoryItems, setUserDirectoryItems] = useState([]);
   const [userDirectoryKeyword, setUserDirectoryKeyword] = useState("");
   const [userDirectorySearchInput, setUserDirectorySearchInput] = useState("");
-  const [userDirectoryRoleFilter, setUserDirectoryRoleFilter] = useState("all");
   const [userDirectoryClassFilter, setUserDirectoryClassFilter] =
     useState("all");
+  const [platformUserDirectoryView, setPlatformUserDirectoryView] =
+    useState("teachers");
   const [userDirectorySortBy, setUserDirectorySortBy] = useState("updated");
   const [userDirectoryTargetClasses, setUserDirectoryTargetClasses] = useState(
     USER_DIRECTORY_DEFAULT_TARGET_CLASSES,
@@ -1392,6 +1430,12 @@ export default function TeacherHomePage() {
     useState([]);
   const [userDirectorySavingChanges, setUserDirectorySavingChanges] =
     useState(false);
+  const [userDirectoryCapabilities, setUserDirectoryCapabilities] = useState({
+    canManageUsers: false,
+    canCreateStudents: false,
+    canImportStudents: false,
+    isPlatformAdmin: false,
+  });
   const [userClassCategoryDialog, setUserClassCategoryDialog] = useState({
     open: false,
     className: "",
@@ -1421,9 +1465,23 @@ export default function TeacherHomePage() {
     gender: "",
     grade: "",
     className: "",
+    role: "user",
+    authorizedClassNamesText: "",
     confirmText: "",
     error: "",
     saving: false,
+  });
+  const [studentImportDialog, setStudentImportDialog] = useState({
+    open: false,
+    teacherUserId: "",
+    file: null,
+    fileName: "",
+    downloading: false,
+    templateDownloadUrl: "",
+    templateFileName: "",
+    importing: false,
+    error: "",
+    result: null,
   });
   const [userDeleteDialog, setUserDeleteDialog] = useState({
     open: false,
@@ -1466,13 +1524,33 @@ export default function TeacherHomePage() {
     error: "",
   });
   const [memoryDialogRoom, setMemoryDialogRoom] = useState(null);
+  const [teachingCourses, setTeachingCourses] = useState([]);
+  const [selectedTeachingCourseId, setSelectedTeachingCourseId] = useState("");
+  const [selectedTeachingClassName, setSelectedTeachingClassName] = useState("");
+  const [teachingClassRoster, setTeachingClassRoster] = useState({
+    loading: false,
+    error: "",
+    updatedAt: "",
+    className: "",
+    students: [],
+  });
+  const [teachingCourseTeacherOptions, setTeachingCourseTeacherOptions] =
+    useState([]);
+  const [canManageAllTeachingCourses, setCanManageAllTeachingCourses] =
+    useState(false);
+  const [creatingTeachingCourse, setCreatingTeachingCourse] = useState(false);
+  const [deletingTeachingCourse, setDeletingTeachingCourse] = useState(false);
   const [courseMemoryConfig, setCourseMemoryConfig] = useState({
-    courseId: "html-css",
-    courseName: "HTML 与 CSS 网页创作",
+    courseId: "",
+    ownerTeacherId: "",
+    ownerTeacherName: "",
+    courseName: "",
     termName: "",
     syllabusText: "",
     knowledgePoints: [],
     knowledgePointsText: "",
+    classNames: [],
+    classNamesText: "",
     updatedAt: "",
     loading: false,
     saving: false,
@@ -1559,8 +1637,7 @@ export default function TeacherHomePage() {
 
   const handleAuthError = useCallback(
     (rawError) => {
-      const message = readErrorMessage(rawError);
-      if (!message.includes("管理员")) return false;
+      if (Number(rawError?.status) !== 401) return false;
       clearAdminToken();
       setAdminToken("");
       navigate(withAuthSlot("/login", activeSlot), { replace: true });
@@ -1671,6 +1748,12 @@ export default function TeacherHomePage() {
             .filter(Boolean)
         : [];
       setUserDirectoryItems(Array.isArray(data?.users) ? data.users : []);
+      setUserDirectoryCapabilities({
+        canManageUsers: !!data?.canManageUsers,
+        canCreateStudents: !!data?.canCreateStudents,
+        canImportStudents: !!data?.canImportStudents,
+        isPlatformAdmin: !!data?.currentAdmin?.isPlatformAdmin,
+      });
       setUserDirectoryTargetClasses(
         targetClasses.length > 0
           ? targetClasses
@@ -1752,7 +1835,7 @@ export default function TeacherHomePage() {
     }
   }, [adminToken, handleAuthError]);
 
-  const loadCourseMemoryConfig = useCallback(async () => {
+  const loadCourseMemoryConfig = useCallback(async (preferredCourseId = "") => {
     if (!adminToken) return;
     setCourseMemoryConfig((current) => ({
       ...current,
@@ -1760,21 +1843,39 @@ export default function TeacherHomePage() {
       error: "",
     }));
     try {
-      const data = await fetchAdminCollaborationCourseMemoryConfig(adminToken);
-      const config = data?.config && typeof data.config === "object"
-        ? data.config
-        : {};
+      const data = await fetchAdminTeachingCourses(adminToken);
+      const courses = Array.isArray(data?.courses) ? data.courses : [];
+      const teacherOptions = Array.isArray(data?.teacherOptions)
+        ? data.teacherOptions
+        : [];
+      const requestedCourseId = String(
+        preferredCourseId || selectedTeachingCourseId || "",
+      );
+      const config =
+        courses.find((item) => String(item?.id || "") === requestedCourseId) ||
+        courses[0] ||
+        null;
+      setTeachingCourses(courses);
+      setTeachingCourseTeacherOptions(teacherOptions);
+      setCanManageAllTeachingCourses(Boolean(data?.canManageAllCourses));
+      setSelectedTeachingCourseId(String(config?.id || ""));
       const knowledgePoints = Array.isArray(config?.knowledgePoints)
         ? config.knowledgePoints
         : [];
       setCourseMemoryConfig((current) => ({
         ...current,
-        courseId: String(config?.courseId || "html-css"),
-        courseName: String(config?.courseName || "HTML 与 CSS 网页创作"),
+        courseId: String(config?.id || ""),
+        ownerTeacherId: String(config?.ownerTeacherId || ""),
+        ownerTeacherName: String(config?.ownerTeacherName || ""),
+        courseName: String(config?.courseName || ""),
         termName: String(config?.termName || ""),
         syllabusText: String(config?.syllabusText || ""),
         knowledgePoints,
         knowledgePointsText: formatCourseKnowledgePointLines(knowledgePoints),
+        classNames: Array.isArray(config?.classNames) ? config.classNames : [],
+        classNamesText: Array.isArray(config?.classNames)
+          ? config.classNames.join("、")
+          : "",
         updatedAt: String(config?.updatedAt || ""),
         loading: false,
         error: "",
@@ -1787,7 +1888,7 @@ export default function TeacherHomePage() {
         error: readErrorMessage(rawError),
       }));
     }
-  }, [adminToken, handleAuthError]);
+  }, [adminToken, handleAuthError, selectedTeachingCourseId]);
 
   const loadPageData = useCallback(
     async ({ background = false } = {}) => {
@@ -1816,6 +1917,25 @@ export default function TeacherHomePage() {
           createdAt: String(meData?.admin?.createdAt || ""),
           updatedAt: String(meData?.admin?.updatedAt || ""),
         });
+        const personalName = String(meData?.admin?.profile?.name || "");
+        const personalGender = String(meData?.admin?.profile?.gender || "");
+        const personalClassNames = Array.isArray(meData?.admin?.authorizedClassNames)
+          ? meData.admin.authorizedClassNames
+          : [];
+        setPersonalProfile((current) => ({
+          ...current,
+          name: personalName,
+          gender: personalGender,
+          authorizedClassNamesText: personalClassNames.join("、"),
+          saving: false,
+          error: "",
+        }));
+        if (
+          String(meData?.admin?.role || "").toLowerCase() === "teacher" &&
+          personalClassNames.length === 0
+        ) {
+          setActivePanel("course");
+        }
         const legacyProductEnabled =
           !!plansData?.shangguanClassTaskProductImprovementEnabled;
         setProductTaskEnabled(legacyProductEnabled);
@@ -1898,7 +2018,11 @@ export default function TeacherHomePage() {
 
   useEffect(() => {
     setPageRefreshState("idle");
-    setActivePanel(requestedTeacherPanel || "party-manage");
+    setActivePanel(
+      requestedTeacherPanel === "user-manage"
+        ? "student-manage"
+        : requestedTeacherPanel || "party-manage",
+    );
     setExportCenterScopeKey(
       requestedExportCenterContext.teacherScopeKey || DEFAULT_TEACHER_SCOPE_KEY,
     );
@@ -1982,11 +2106,33 @@ export default function TeacherHomePage() {
   }, [activePanel, loadImageLibrary]);
 
   useEffect(() => {
-    if (activePanel !== "user-manage" && activePanel !== "discipline") {
+    if (
+      activePanel !== "teacher-manage" &&
+      activePanel !== "student-manage" &&
+      activePanel !== "discipline"
+    ) {
       return;
     }
     void loadUserDirectory();
   }, [activePanel, loadUserDirectory]);
+
+  useEffect(() => {
+    if (
+      activePanel !== "student-manage" ||
+      !pendingClassImport ||
+      userDirectoryLoading ||
+      !userDirectoryCapabilities.canImportStudents
+    ) {
+      return;
+    }
+    openStudentImportDialog();
+    setPendingClassImport("");
+  }, [
+    activePanel,
+    pendingClassImport,
+    userDirectoryCapabilities.canImportStudents,
+    userDirectoryLoading,
+  ]);
 
   useEffect(() => {
     if (activePanel !== "seat-fixed" && activePanel !== "random-rollcall")
@@ -2015,7 +2161,13 @@ export default function TeacherHomePage() {
   }, [activePanel, loadPartyRoomManage]);
 
   useEffect(() => {
-    if (activePanel !== "course") return;
+    if (
+      activePanel !== "course" &&
+      activePanel !== "class-manage" &&
+      activePanel !== "classroom"
+    ) {
+      return;
+    }
     void loadCourseMemoryConfig();
   }, [activePanel, loadCourseMemoryConfig]);
 
@@ -2161,19 +2313,33 @@ export default function TeacherHomePage() {
   }, [imageLibraryClassFilter, imageLibraryGroups]);
 
   useEffect(() => {
-    if (!Array.isArray(teacherCoursePlans) || teacherCoursePlans.length === 0) {
+    if (!selectedTeachingCourseId) {
       if (selectedCourseId) setSelectedCourseId("");
       return;
     }
-    const exists = teacherCoursePlans.some(
+    const currentCoursePlans = teacherCoursePlans.filter(
+      (lesson) =>
+        resolveLessonTeachingCourseId(lesson, teachingCourses) ===
+        selectedTeachingCourseId,
+    );
+    if (currentCoursePlans.length === 0) {
+      if (selectedCourseId) setSelectedCourseId("");
+      return;
+    }
+    const exists = currentCoursePlans.some(
       (item) => String(item?.id || "") === String(selectedCourseId || ""),
     );
     if (!exists) {
       setSelectedCourseId(
-        String(sortLessonPlans(teacherCoursePlans)[0]?.id || ""),
+        String(sortLessonPlans(currentCoursePlans)[0]?.id || ""),
       );
     }
-  }, [selectedCourseId, teacherCoursePlans]);
+  }, [
+    selectedCourseId,
+    selectedTeachingCourseId,
+    teacherCoursePlans,
+    teachingCourses,
+  ]);
 
   useEffect(() => {
     if (!Array.isArray(homeworkLessons) || homeworkLessons.length === 0) {
@@ -2241,21 +2407,17 @@ export default function TeacherHomePage() {
     return () => window.clearTimeout(timerId);
   }, [deleteConfirmDialog.open]);
 
-  const adminUsernameKey = useMemo(
-    () => toAdminUsernameKey(adminProfile.username),
-    [adminProfile.username],
-  );
   const isTerminalAdmin = useMemo(
-    () => adminUsernameKey === TERMINAL_ADMIN_USERNAME_KEY,
-    [adminUsernameKey],
+    () =>
+      String(adminProfile.accountTag || "").trim() ===
+        PLATFORM_ADMIN_ACCOUNT_TAG || userDirectoryCapabilities.isPlatformAdmin,
+    [adminProfile.accountTag, userDirectoryCapabilities.isPlatformAdmin],
   );
   const canBindStudentAccounts = useMemo(
     () =>
       isTerminalAdmin ||
-      String(adminProfile.role || "").trim().toLowerCase() === "admin" ||
-      String(adminProfile.accountTag || "").trim() ===
-        SELF_REGISTERED_TEACHER_ACCOUNT_TAG,
-    [adminProfile.accountTag, adminProfile.role, isTerminalAdmin],
+      String(adminProfile.role || "").trim().toLowerCase() === "teacher",
+    [adminProfile.role, isTerminalAdmin],
   );
   const currentAdminUserId = useMemo(
     () => String(adminProfile.id || "").trim(),
@@ -2302,15 +2464,8 @@ export default function TeacherHomePage() {
     [userDirectoryTargetClasses],
   );
   const userCreateClassOptions = useMemo(() => {
-    const preferred = ["教技231", "810班", "811班"];
     const seen = new Set();
     const options = [];
-    preferred.forEach((className) => {
-      const key = toClassNameKey(className);
-      if (!key || seen.has(key)) return;
-      seen.add(key);
-      options.push(className);
-    });
     userDirectoryTargetClasses.forEach((className) => {
       const safeClassName = String(className || "").trim();
       const key = toClassNameKey(safeClassName);
@@ -2339,20 +2494,24 @@ export default function TeacherHomePage() {
   const sidebarGroups = useMemo(() => {
     return [
       {
-        key: "pair-teaching-group",
-        label: "结对编程教学",
+        key: "personal-group",
+        label: "教学准备",
         items: [
-          { key: "party-manage", label: "协作课堂", icon: Activity },
+          { key: "course", label: "课程管理", icon: BookCheck },
           { key: "classroom", label: "课时任务", icon: ClipboardList },
-          { key: "course", label: "课程", icon: BookCheck },
+          { key: "party-manage", label: "协作课堂", icon: Activity },
         ],
       },
       {
-        key: "course-member-group",
-        label: "课程成员与数据",
+        key: "pair-teaching-group",
+        label: "平台管理",
         items: [
-          { key: "user-manage", label: "学生与账号", icon: Users },
-          { key: "export-center", label: "数据与导出", icon: Download },
+          { key: "class-manage", label: "班级管理", icon: Users },
+          {
+            key: "student-manage",
+            label: isTerminalAdmin ? "平台所有用户" : "学生账号",
+            icon: Users,
+          },
         ],
       },
       {
@@ -2365,7 +2524,7 @@ export default function TeacherHomePage() {
         ],
       },
     ];
-  }, []);
+  }, [isTerminalAdmin]);
 
   const availablePanelKeys = useMemo(
     () =>
@@ -2785,7 +2944,7 @@ export default function TeacherHomePage() {
   const userDirectorySummary = useMemo(() => {
     const summary = {
       totalCount: 0,
-      adminCount: 0,
+      teacherCount: 0,
       studentCount: 0,
       targetClassStudentCount: 0,
       otherClassStudentCount: 0,
@@ -2793,14 +2952,11 @@ export default function TeacherHomePage() {
     };
     userDirectoryItems.forEach((item) => {
       summary.totalCount += 1;
-      if (
-        String(item?.role || "")
-          .trim()
-          .toLowerCase() === "admin"
-      ) {
-        summary.adminCount += 1;
+      if (String(item?.role || "").trim().toLowerCase() === "teacher") {
+        summary.teacherCount += 1;
         return;
       }
+      if (String(item?.role || "").trim().toLowerCase() === "admin") return;
       summary.studentCount += 1;
       const bucket = resolveUserClassBucket(
         item?.profile?.className,
@@ -2829,25 +2985,6 @@ export default function TeacherHomePage() {
       (item) => normalizeLessonClassName(item?.className) === classFilter,
     );
   }, [finalTestSubmissionClassName, finalTestSubmissionClasses]);
-
-  const userDirectoryRoleCounts = useMemo(() => {
-    const counts = {
-      all: userDirectoryItems.length,
-      user: 0,
-      admin: 0,
-    };
-    userDirectoryItems.forEach((item) => {
-      const role = String(item?.role || "user")
-        .trim()
-        .toLowerCase();
-      if (role === "admin") {
-        counts.admin += 1;
-      } else {
-        counts.user += 1;
-      }
-    });
-    return counts;
-  }, [userDirectoryItems]);
 
   const userDirectoryClassCounts = useMemo(() => {
     const counts = userDirectoryClassFilterOptions.reduce((result, option) => {
@@ -2879,6 +3016,29 @@ export default function TeacherHomePage() {
     () => Object.keys(userDirectoryPendingEdits).length,
     [userDirectoryPendingEdits],
   );
+  const studentImportTeacherOptions = useMemo(
+    () =>
+      userDirectoryItems
+        .filter(
+          (item) =>
+            String(item?.role || "").trim().toLowerCase() === "teacher" &&
+            String(item?.accountTag || "").trim() !==
+              PLATFORM_ADMIN_ACCOUNT_TAG &&
+            !!String(item?.lockedTeacherScopeKey || "").trim(),
+        )
+        .map((item) => ({
+          id: String(item?.id || "").trim(),
+          label:
+            String(item?.profile?.name || "").trim() ||
+            String(item?.username || "").trim() ||
+            "未命名教师",
+          authorizedClassNames: Array.isArray(item?.authorizedClassNames)
+            ? item.authorizedClassNames
+            : [],
+        }))
+        .filter((item) => item.id),
+    [userDirectoryItems],
+  );
   const userDirectoryPendingDeleteCount = useMemo(
     () => userDirectoryPendingDeleteIds.length,
     [userDirectoryPendingDeleteIds],
@@ -2893,9 +3053,6 @@ export default function TeacherHomePage() {
   );
 
   const userDirectoryVisibleItems = useMemo(() => {
-    const roleFilter = String(userDirectoryRoleFilter || "all")
-      .trim()
-      .toLowerCase();
     const classFilter = String(userDirectoryClassFilter || "all").trim();
     const keyword = String(userDirectoryKeyword || "")
       .trim()
@@ -2909,9 +3066,8 @@ export default function TeacherHomePage() {
         const role = String(item?.role || "user")
           .trim()
           .toLowerCase();
-        if (roleFilter !== "all" && role !== roleFilter) return false;
         if (classFilter !== "all") {
-          if (role === "admin") return false;
+          if (["admin", "teacher"].includes(role)) return false;
           const classValue = resolveUserClassFilterValue(
             item?.profile?.className,
             userDirectoryTargetClassKeyToName,
@@ -2959,10 +3115,33 @@ export default function TeacherHomePage() {
     userDirectoryKeyword,
     userDirectoryClassFilter,
     userDirectoryItems,
-    userDirectoryRoleFilter,
     userDirectorySortBy,
     userDirectoryTargetClassKeyToName,
   ]);
+
+  const isTeacherManagementPanel = activePanel === "teacher-manage";
+  const isStudentManagementPanel = activePanel === "student-manage";
+  const isPlatformUsersPanel = isTerminalAdmin && isStudentManagementPanel;
+  const isPlatformTeacherDirectory =
+    isPlatformUsersPanel && platformUserDirectoryView === "teachers";
+  const isTeacherDirectoryPanel =
+    isTeacherManagementPanel || isPlatformTeacherDirectory;
+  const userDirectoryPanelItems = useMemo(
+    () =>
+      userDirectoryVisibleItems.filter((item) => {
+        const role = String(item?.role || "user").trim().toLowerCase();
+        if (isTeacherDirectoryPanel) return role === "teacher";
+        if (isPlatformUsersPanel) {
+          return role === "user";
+        }
+        return role === "user";
+      }),
+    [
+      isPlatformUsersPanel,
+      isTeacherDirectoryPanel,
+      userDirectoryVisibleItems,
+    ],
+  );
 
   const userMergeCandidates = useMemo(
     () =>
@@ -2990,13 +3169,11 @@ export default function TeacherHomePage() {
   const hasUserDirectoryFilters = useMemo(
     () =>
       !!String(userDirectoryKeyword || "").trim() ||
-      userDirectoryRoleFilter !== "all" ||
       userDirectoryClassFilter !== "all" ||
       userDirectorySortBy !== "updated",
     [
       userDirectoryClassFilter,
       userDirectoryKeyword,
-      userDirectoryRoleFilter,
       userDirectorySortBy,
     ],
   );
@@ -3115,9 +3292,24 @@ export default function TeacherHomePage() {
     pairClassroomCreateDialog.studentKeyword,
     pairClassroomStudentOptions,
   ]);
+  const selectedTeachingCourse = useMemo(
+    () =>
+      teachingCourses.find(
+        (course) =>
+          String(course?.id || "") === String(selectedTeachingCourseId || ""),
+      ) || null,
+    [selectedTeachingCourseId, teachingCourses],
+  );
   const sortedCoursePlans = useMemo(
-    () => sortLessonPlans(teacherCoursePlans),
-    [teacherCoursePlans],
+    () =>
+      sortLessonPlans(
+        teacherCoursePlans.filter(
+          (lesson) =>
+            resolveLessonTeachingCourseId(lesson, teachingCourses) ===
+            String(selectedTeachingCourseId || ""),
+        ),
+      ),
+    [selectedTeachingCourseId, teacherCoursePlans, teachingCourses],
   );
   const lessonClassNames = useMemo(() => {
     const seen = new Set();
@@ -3129,11 +3321,14 @@ export default function TeacherHomePage() {
   }, [sortedCoursePlans]);
   const authorizedClassOptions = useMemo(
     () =>
-      authorizedClassNames.map((className) => ({
+      (Array.isArray(selectedTeachingCourse?.classNames)
+        ? selectedTeachingCourse.classNames
+        : authorizedClassNames
+      ).map((className) => ({
         value: className,
         label: className,
       })),
-    [authorizedClassNames],
+    [authorizedClassNames, selectedTeachingCourse],
   );
   const filteredCoursePlans = useMemo(() => {
     let result = sortedCoursePlans;
@@ -3700,9 +3895,15 @@ export default function TeacherHomePage() {
   }
 
   function onCreateLesson() {
+    const teachingCourseId = String(selectedTeachingCourseId || "").trim();
+    if (!teachingCourseId) {
+      setError("请先在“课程管理”中建立并选择一门课程。");
+      return;
+    }
     const nextLesson = buildLessonDraft(
-      teacherCoursePlans.length + 1,
-      authorizedClassNames[0] || "",
+      sortedCoursePlans.length + 1,
+      authorizedClassOptions[0]?.value || "",
+      teachingCourseId,
     );
     setTeacherCoursePlans((current) => [...current, nextLesson]);
     setSelectedCourseId(String(nextLesson.id));
@@ -4080,7 +4281,12 @@ export default function TeacherHomePage() {
       if (!silent) setError("");
       if (!silent) setClassroomSaveNotice("");
       setSaving(true);
-      const plansToSave = normalizeLessonPlans(teacherCoursePlans);
+      const plansToSave = normalizeLessonPlans(teacherCoursePlans).map(
+        (lesson) => ({
+          ...lesson,
+          courseId: resolveLessonTeachingCourseId(lesson, teachingCourses),
+        }),
+      );
       try {
         const data = await saveAdminClassroomPlans(adminToken, {
           shangguanClassTaskProductImprovementEnabled: !!productTaskEnabled,
@@ -4137,6 +4343,7 @@ export default function TeacherHomePage() {
       selectedCourseId,
       classroomDisciplineConfig,
       teacherCoursePlans,
+      teachingCourses,
     ],
   );
 
@@ -4568,7 +4775,6 @@ export default function TeacherHomePage() {
   function onClearUserDirectoryFilters() {
     setUserDirectorySearchInput("");
     setUserDirectoryKeyword("");
-    setUserDirectoryRoleFilter("all");
     setUserDirectoryClassFilter("all");
     setUserDirectorySortBy("updated");
   }
@@ -4878,7 +5084,7 @@ export default function TeacherHomePage() {
 
   async function onSaveCourseMemoryConfig(event) {
     event?.preventDefault?.();
-    if (!adminToken || courseMemoryConfig.saving) return;
+    if (!adminToken || courseMemoryConfig.saving || !courseMemoryConfig.courseId) return;
     const courseName = String(courseMemoryConfig.courseName || "").trim();
     if (!courseName) {
       setCourseMemoryConfig((current) => ({
@@ -4904,32 +5110,48 @@ export default function TeacherHomePage() {
       error: "",
     }));
     try {
-      const data = await updateAdminCollaborationCourseMemoryConfig(
+      const data = await updateAdminTeachingCourse(
         adminToken,
+        courseMemoryConfig.courseId,
         {
-          courseId: String(courseMemoryConfig.courseId || "html-css").trim(),
           courseName,
           termName: String(courseMemoryConfig.termName || "").trim(),
           syllabusText: String(courseMemoryConfig.syllabusText || "").trim(),
           knowledgePoints,
+          ...(canManageAllTeachingCourses
+            ? { teacherUserId: courseMemoryConfig.ownerTeacherId }
+            : {}),
         },
       );
-      const config = data?.config || {};
+      const config = data?.course || {};
       const storedPoints = Array.isArray(config?.knowledgePoints)
         ? config.knowledgePoints
         : knowledgePoints;
       setCourseMemoryConfig((current) => ({
         ...current,
-        courseId: String(config?.courseId || current.courseId),
+        courseId: String(config?.id || current.courseId),
+        ownerTeacherId: String(config?.ownerTeacherId || ""),
+        ownerTeacherName: String(config?.ownerTeacherName || ""),
         courseName: String(config?.courseName || courseName),
         termName: String(config?.termName || ""),
         syllabusText: String(config?.syllabusText || ""),
         knowledgePoints: storedPoints,
         knowledgePointsText: formatCourseKnowledgePointLines(storedPoints),
+        classNames: Array.isArray(config?.classNames) ? config.classNames : current.classNames,
+        classNamesText: Array.isArray(config?.classNames)
+          ? config.classNames.join("、")
+          : current.classNamesText,
         updatedAt: String(config?.updatedAt || new Date().toISOString()),
         saving: false,
         error: "",
       }));
+      setTeachingCourses((current) =>
+        current.map((item) =>
+          String(item?.id || "") === String(config?.id || courseMemoryConfig.courseId)
+            ? config
+            : item,
+        ),
+      );
     } catch (rawError) {
       if (handleAuthError(rawError)) return;
       setCourseMemoryConfig((current) => ({
@@ -4938,6 +5160,216 @@ export default function TeacherHomePage() {
         error: readErrorMessage(rawError),
       }));
     }
+  }
+
+  async function onCreateTeachingCourse() {
+    if (!adminToken || creatingTeachingCourse) return;
+    setCreatingTeachingCourse(true);
+    setError("");
+    try {
+      const data = await createAdminTeachingCourse(adminToken, {
+        courseName: `新课程${teachingCourses.length + 1}`,
+      });
+      const course = data?.course;
+      if (!course?.id) {
+        throw new Error("课程创建失败，请稍后重试。");
+      }
+      setTeachingCourses((current) => [course, ...current]);
+      await loadCourseMemoryConfig(course.id);
+    } catch (rawError) {
+      if (handleAuthError(rawError)) return;
+      setCourseMemoryConfig((current) => ({
+        ...current,
+        error: readErrorMessage(rawError),
+      }));
+    } finally {
+      setCreatingTeachingCourse(false);
+    }
+  }
+
+  async function onDeleteTeachingCourse() {
+    const courseId = String(courseMemoryConfig.courseId || "").trim();
+    const courseName = String(courseMemoryConfig.courseName || "这门课程").trim();
+    if (!adminToken || !courseId || deletingTeachingCourse) return;
+    if (!window.confirm(`确认删除“${courseName}”吗？此操作不会删除教师或学生账号。`)) {
+      return;
+    }
+    setDeletingTeachingCourse(true);
+    setCourseMemoryConfig((current) => ({ ...current, error: "" }));
+    try {
+      const data = await deleteAdminTeachingCourse(adminToken, courseId);
+      const nextCourses = teachingCourses.filter(
+        (course) => String(course?.id || "") !== courseId,
+      );
+      const nextCourseId = String(nextCourses[0]?.id || "");
+      setTeachingCourses(nextCourses);
+      setSelectedTeachingCourseId(nextCourseId);
+      await loadCourseMemoryConfig(nextCourseId);
+      setError("");
+      if (data?.authorizedClassNames) {
+        setPersonalProfile((current) => ({
+          ...current,
+          authorizedClassNamesText: data.authorizedClassNames.join("、"),
+        }));
+      }
+    } catch (rawError) {
+      if (handleAuthError(rawError)) return;
+      setCourseMemoryConfig((current) => ({
+        ...current,
+        error: readErrorMessage(rawError),
+      }));
+    } finally {
+      setDeletingTeachingCourse(false);
+    }
+  }
+
+  async function onSavePersonalProfile(event) {
+    event?.preventDefault?.();
+    if (!adminToken || personalProfile.saving) return;
+    const authorizedClassNames = Array.from(
+      new Set(
+        String(personalProfile.authorizedClassNamesText || "")
+          .split(/[、,，\n]+/)
+          .map((item) => item.replace(/\s+/g, "").trim())
+          .filter(Boolean),
+      ),
+    ).slice(0, 50);
+    setPersonalProfile((current) => ({
+      ...current,
+      saving: true,
+      error: "",
+    }));
+    try {
+      const data = await updateAdminPersonalProfile(adminToken, {
+        name: String(personalProfile.name || "").trim(),
+        gender: String(personalProfile.gender || "").trim(),
+        authorizedClassNames,
+      });
+      const profile = data?.admin?.profile || {};
+      const storedClassNames = Array.isArray(data?.admin?.authorizedClassNames)
+        ? data.admin.authorizedClassNames
+        : authorizedClassNames;
+      setPersonalProfile((current) => ({
+        ...current,
+        name: String(profile?.name || current.name),
+        gender: String(profile?.gender || ""),
+        authorizedClassNamesText: storedClassNames.join("、"),
+        saving: false,
+        error: "",
+      }));
+      setAuthorizedClassNames(storedClassNames);
+      setTeachingCourses((current) =>
+        current.map((course) => ({
+          ...course,
+          ownerTeacherName: String(profile?.name || course?.ownerTeacherName || ""),
+          classNames: storedClassNames,
+        })),
+      );
+    } catch (rawError) {
+      if (handleAuthError(rawError)) return;
+      setPersonalProfile((current) => ({
+        ...current,
+        saving: false,
+        error: readErrorMessage(rawError),
+      }));
+    }
+  }
+
+  async function onCreateTeachingClass(event) {
+    event?.preventDefault?.();
+    if (!adminToken || creatingTeachingClass || !selectedTeachingCourseId) return;
+    const createdClassName = String(newTeachingClassName || "").trim();
+    setCreatingTeachingClass(true);
+    setTeachingClassError("");
+    try {
+      const data = await createAdminTeachingCourseClass(
+        adminToken,
+        selectedTeachingCourseId,
+        newTeachingClassName,
+      );
+      const classNames = Array.isArray(data?.authorizedClassNames)
+        ? data.authorizedClassNames
+        : authorizedClassNames;
+      setAuthorizedClassNames(classNames);
+      setNewTeachingClassName("");
+      setCourseMemoryConfig((current) => ({
+        ...current,
+        classNames: Array.isArray(data?.course?.classNames)
+          ? data.course.classNames
+          : classNames,
+      }));
+      setTeachingCourses((current) =>
+        current.map((course) =>
+          String(course?.id || "") === selectedTeachingCourseId
+            ? data.course || { ...course, classNames }
+            : course,
+        ),
+      );
+      setSelectedTeachingClassName(createdClassName);
+      void loadTeachingClassRoster(createdClassName);
+      setTeachingClassCreateDialogOpen(false);
+    } catch (rawError) {
+      if (handleAuthError(rawError)) return;
+      setTeachingClassError(readErrorMessage(rawError));
+    } finally {
+      setCreatingTeachingClass(false);
+    }
+  }
+
+  function openTeachingClassCreateDialog() {
+    if (!selectedTeachingCourseId) return;
+    setNewTeachingClassName("");
+    setTeachingClassError("");
+    setTeachingClassCreateDialogOpen(true);
+  }
+
+  function closeTeachingClassCreateDialog() {
+    if (creatingTeachingClass) return;
+    setNewTeachingClassName("");
+    setTeachingClassError("");
+    setTeachingClassCreateDialogOpen(false);
+  }
+
+  const loadTeachingClassRoster = useCallback(async (className) => {
+    const safeClassName = String(className || "").trim();
+    if (!adminToken || !selectedTeachingCourseId || !safeClassName) return;
+    setSelectedTeachingClassName(safeClassName);
+    setTeachingClassRoster((current) => ({
+      ...current,
+      loading: true,
+      error: "",
+      className: safeClassName,
+    }));
+    try {
+      const data = await fetchAdminTeachingCourseClassRoster(
+        adminToken,
+        selectedTeachingCourseId,
+        safeClassName,
+      );
+      setTeachingClassRoster({
+        loading: false,
+        error: "",
+        updatedAt: String(data?.updatedAt || new Date().toISOString()),
+        className: safeClassName,
+        students: Array.isArray(data?.students) ? data.students : [],
+      });
+    } catch (rawError) {
+      if (handleAuthError(rawError)) return;
+      setTeachingClassRoster((current) => ({
+        ...current,
+        loading: false,
+        error: readErrorMessage(rawError),
+      }));
+    }
+  }, [adminToken, handleAuthError, selectedTeachingCourseId]);
+
+  function openCourseClassStudents(className, shouldImport = false) {
+    const safeClassName = String(className || "").trim();
+    if (!safeClassName) return;
+    setPlatformUserDirectoryView("students");
+    setUserDirectoryClassFilter(safeClassName);
+    setPendingClassImport(shouldImport ? safeClassName : "");
+    setActivePanel("student-manage");
   }
 
   async function onToggleClassroomMonitoring(room) {
@@ -4993,8 +5425,163 @@ export default function TeacherHomePage() {
     });
   }
 
+  function closeStudentImportDialog() {
+    if (studentImportDialog.templateDownloadUrl) {
+      URL.revokeObjectURL(studentImportDialog.templateDownloadUrl);
+    }
+    setStudentImportDialog({
+      open: false,
+      teacherUserId: "",
+      file: null,
+      fileName: "",
+      downloading: false,
+      templateDownloadUrl: "",
+      templateFileName: "",
+      importing: false,
+      error: "",
+      result: null,
+    });
+  }
+
+  function openStudentImportDialog() {
+    if (!userDirectoryCapabilities.canImportStudents) return;
+    const firstTeacher = studentImportTeacherOptions[0];
+    const teacherUserId = isTerminalAdmin
+      ? String(firstTeacher?.id || "").trim()
+      : currentAdminUserId;
+    setStudentImportDialog({
+      open: true,
+      teacherUserId,
+      file: null,
+      fileName: "",
+      downloading: false,
+      templateDownloadUrl: "",
+      templateFileName: "",
+      importing: false,
+      error: "",
+      result: null,
+    });
+    void prepareStudentImportTemplate(teacherUserId);
+  }
+
+  async function prepareStudentImportTemplate(teacherUserId = "") {
+    if (!adminToken) return;
+    const selectedTeacherUserId = String(teacherUserId || "").trim();
+    setStudentImportDialog((current) => ({
+      ...current,
+      downloading: true,
+      templateDownloadUrl: "",
+      templateFileName: "",
+      error: "",
+    }));
+    try {
+      const result = await downloadAdminStudentImportTemplate(
+        adminToken,
+        isTerminalAdmin ? selectedTeacherUserId : "",
+      );
+      setStudentImportDialog((current) => ({
+        ...(current.open && current.teacherUserId === selectedTeacherUserId
+          ? {
+              ...current,
+              downloading: false,
+              templateDownloadUrl: URL.createObjectURL(result.blob),
+              templateFileName: result.filename,
+            }
+          : current),
+      }));
+    } catch (rawError) {
+      if (handleAuthError(rawError)) return;
+      setStudentImportDialog((current) => ({
+        ...(current.open && current.teacherUserId === selectedTeacherUserId
+          ? {
+              ...current,
+              downloading: false,
+              error: readErrorMessage(rawError),
+            }
+          : current),
+      }));
+    }
+  }
+
+  async function onImportStudentAccounts(event) {
+    if (event) event.preventDefault();
+    if (!adminToken || studentImportDialog.importing) return;
+    if (!studentImportDialog.file) {
+      setStudentImportDialog((current) => ({
+        ...current,
+        error: "请选择填写完成的 Excel 文件。",
+      }));
+      return;
+    }
+    if (isTerminalAdmin && !studentImportDialog.teacherUserId) {
+      setStudentImportDialog((current) => ({
+        ...current,
+        error: "请先选择要绑定学生的教师。",
+      }));
+      return;
+    }
+    setStudentImportDialog((current) => ({
+      ...current,
+      importing: true,
+      error: "",
+      result: null,
+    }));
+    try {
+      const data = await importAdminStudentAccounts(
+        adminToken,
+        studentImportDialog.file,
+        isTerminalAdmin ? studentImportDialog.teacherUserId : "",
+      );
+      setStudentImportDialog((current) => ({
+        ...current,
+        importing: false,
+        result: data,
+      }));
+      await loadUserDirectory();
+    } catch (rawError) {
+      if (handleAuthError(rawError)) return;
+      setStudentImportDialog((current) => ({
+        ...current,
+        importing: false,
+        error: readErrorMessage(rawError),
+      }));
+    }
+  }
+
+  async function onDownloadStudentImportResult() {
+    const results = Array.isArray(studentImportDialog.result?.results)
+      ? studentImportDialog.result.results
+      : [];
+    if (results.length === 0) return;
+    const XLSX = await import("xlsx");
+    const rows = results.map((item) => ({
+      Excel行号: item.rowNumber,
+      姓名: item.name || "",
+      登录账号: item.username || item.studentId || "",
+      学号: item.studentId || "",
+      班级: item.className || "",
+      初始密码: item.initialPassword || "",
+      导入状态: item.status === "created" ? "创建成功" : "导入失败",
+      说明: item.message || "",
+    }));
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    worksheet["!cols"] = [
+      { wch: 12 },
+      { wch: 14 },
+      { wch: 22 },
+      { wch: 22 },
+      { wch: 16 },
+      { wch: 22 },
+      { wch: 14 },
+      { wch: 42 },
+    ];
+    XLSX.utils.book_append_sheet(workbook, worksheet, "导入结果");
+    XLSX.writeFile(workbook, "学生账号导入结果.xlsx");
+  }
+
   function openUserCreateDialog() {
-    if (!isTerminalAdmin) return;
+    if (!userDirectoryCapabilities.canCreateStudents) return;
     setUserCreateDialog({
       open: true,
       username: "",
@@ -5013,9 +5600,9 @@ export default function TeacherHomePage() {
 
   async function onSubmitUserCreateDialog(event) {
     if (event) event.preventDefault();
-    if (!isTerminalAdmin || !adminToken) return;
+    if (!userDirectoryCapabilities.canCreateStudents || !adminToken) return;
 
-    const username = String(userCreateDialog.username || "").trim();
+    const username = String(userCreateDialog.studentId || "").trim();
     const password = String(userCreateDialog.password || "");
     const name = String(userCreateDialog.name || "").trim();
     const studentId = String(userCreateDialog.studentId || "").trim();
@@ -5031,10 +5618,10 @@ export default function TeacherHomePage() {
       forcedTeacherScopeKey || userCreateDialog.lockedTeacherScopeKey || "",
     ).trim();
 
-    if (!username || !password || !name || !studentId || !className) {
+    if (!password || !name || !studentId || !className) {
       setUserCreateDialog((current) => ({
         ...current,
-        error: "账号、密码、姓名、学号、归属班级为必填项。",
+        error: "密码、姓名、学号、归属班级为必填项；学号将作为登录账号。",
       }));
       return;
     }
@@ -5147,6 +5734,8 @@ export default function TeacherHomePage() {
       gender: "",
       grade: "",
       className: "",
+      role: "user",
+      authorizedClassNamesText: "",
       confirmText: "",
       error: "",
       saving: false,
@@ -5159,7 +5748,7 @@ export default function TeacherHomePage() {
       const userId = String(user?.id || "").trim();
       if (!userId) return false;
       if (userId === currentAdminUserId) return false;
-      if (toAdminUsernameKey(user?.username) === TERMINAL_ADMIN_USERNAME_KEY)
+      if (String(user?.accountTag || "").trim() === PLATFORM_ADMIN_ACCOUNT_TAG)
         return false;
       return true;
     },
@@ -5181,6 +5770,10 @@ export default function TeacherHomePage() {
         gender: String(user?.profile?.gender || "").trim(),
         grade: String(user?.profile?.grade || "").trim(),
         className: String(user?.profile?.className || "").trim(),
+        role: String(user?.role || "user").trim().toLowerCase(),
+        authorizedClassNamesText: Array.isArray(user?.authorizedClassNames)
+          ? user.authorizedClassNames.join("、")
+          : "",
         confirmText: "",
         error: "",
         saving: false,
@@ -5207,6 +5800,13 @@ export default function TeacherHomePage() {
 
     const editPayload = {
       username: String(userEditDialog.username || "").trim(),
+      authorizedClassNames:
+                ["admin", "teacher"].includes(userEditDialog.role)
+          ? String(userEditDialog.authorizedClassNamesText || "")
+              .split(/[、,，;；\n]/)
+              .map((item) => item.trim())
+              .filter(Boolean)
+          : [],
       profile: {
         name: String(userEditDialog.name || "").trim(),
         studentId: String(userEditDialog.studentId || "").trim(),
@@ -5228,6 +5828,7 @@ export default function TeacherHomePage() {
         return {
           ...item,
           username: editPayload.username,
+          authorizedClassNames: editPayload.authorizedClassNames,
           profile: {
             ...currentProfile,
             ...editPayload.profile,
@@ -5368,7 +5969,7 @@ export default function TeacherHomePage() {
 
   const userDirectoryTableRows = useMemo(
     () =>
-      userDirectoryVisibleItems.map((user) => {
+      userDirectoryPanelItems.map((user) => {
         const userId = String(user?.id || "").trim();
         const userRole = String(user?.role || "")
           .trim()
@@ -5385,12 +5986,21 @@ export default function TeacherHomePage() {
             }
           >
             <td>{user?.username || "-"}</td>
-            <td>{readUserRoleLabel(userRole)}</td>
             <td>{user?.profile?.name || "-"}</td>
-            <td>{user?.profile?.studentId || "-"}</td>
-            <td>{user?.profile?.className || "-"}</td>
-            <td>{user?.profile?.grade || "-"}</td>
-            <td>{user?.profile?.gender || "-"}</td>
+            {isTeacherDirectoryPanel ? (
+              <td>
+                {(Array.isArray(user?.authorizedClassNames)
+                  ? user.authorizedClassNames.join("、")
+                  : "") || "未配置"}
+              </td>
+            ) : (
+              <>
+                <td>{user?.profile?.studentId || "-"}</td>
+                <td>{user?.profile?.className || "-"}</td>
+                <td>{user?.profile?.grade || "-"}</td>
+                <td>{user?.profile?.gender || "-"}</td>
+              </>
+            )}
             <td>{
               isPendingStudent
                 ? "待教师确认"
@@ -5447,7 +6057,8 @@ export default function TeacherHomePage() {
       onBindUserDirectoryStudent,
       openUserDeleteDialog,
       openUserEditDialog,
-      userDirectoryVisibleItems,
+      isTeacherDirectoryPanel,
+      userDirectoryPanelItems,
     ],
   );
 
@@ -5619,9 +6230,11 @@ export default function TeacherHomePage() {
                 <dt>角色</dt>
                 <dd>
                   {adminProfile.role
-                    ? adminProfile.role === "admin"
-                      ? "授课教师"
-                      : adminProfile.role
+                    ? isTerminalAdmin
+                      ? "平台管理员"
+                      : adminProfile.role === "teacher"
+                        ? "授课教师"
+                        : adminProfile.role
                     : "--"}
                 </dd>
               </div>
@@ -5721,29 +6334,224 @@ export default function TeacherHomePage() {
               pageRefreshState === "refreshing" ? " is-refreshing" : ""
             }`}
           >
-            {activePanel === "course" ? (
+            {activePanel === "personal" ? (
+              <div className="teacher-panel-stack teacher-personal-stack">
+                <header className="teacher-panel-head">
+                  <div>
+                    <h2>个人信息配置</h2>
+                    <p className="teacher-panel-save-time">
+                      请先确认自己的真实信息和授课班级。保存后，学生导入、课时任务和协作课堂都会按这些班级建立范围。
+                    </p>
+                  </div>
+                  <button
+                    type="submit"
+                    form="teacher-personal-profile-form"
+                    className="teacher-primary-btn"
+                    disabled={personalProfile.saving}
+                  >
+                    <Save size={14} />
+                    {personalProfile.saving ? "保存中..." : "保存个人信息"}
+                  </button>
+                </header>
+
+                <section className="teacher-personal-config">
+                  <form
+                    id="teacher-personal-profile-form"
+                    onSubmit={onSavePersonalProfile}
+                  >
+                    <label>
+                      <span>真实姓名</span>
+                      <input
+                        type="text"
+                        value={personalProfile.name}
+                        maxLength={20}
+                        placeholder="请输入真实中文姓名"
+                        onChange={(event) =>
+                          setPersonalProfile((current) => ({
+                            ...current,
+                            name: event.target.value,
+                            error: "",
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      <span>性别</span>
+                      <select
+                        value={personalProfile.gender}
+                        onChange={(event) =>
+                          setPersonalProfile((current) => ({
+                            ...current,
+                            gender: event.target.value,
+                            error: "",
+                          }))
+                        }
+                      >
+                        <option value="">暂不填写</option>
+                        <option value="男">男</option>
+                        <option value="女">女</option>
+                      </select>
+                    </label>
+                    {personalProfile.error ? (
+                      <span className="teacher-confirm-error">{personalProfile.error}</span>
+                    ) : null}
+                  </form>
+                </section>
+              </div>
+            ) : activePanel === "class-manage" ? (
+              <div className="teacher-panel-stack teacher-personal-stack teacher-class-management-stack">
+                <header className="teacher-panel-head">
+                  <div>
+                    <h2>班级管理</h2>
+                    <p className="teacher-panel-save-time">班级必须归属于一门已建立的课程；学生管理与批量导入从具体班级进入。</p>
+                  </div>
+                  <div className="teacher-panel-actions">
+                    <div className="teacher-course-switcher">
+                      <select aria-label="选择课程" value={selectedTeachingCourseId} onChange={(event) => { const nextCourseId = event.target.value; setSelectedTeachingCourseId(nextCourseId); setSelectedTeachingClassName(""); setTeachingClassRoster({ loading: false, error: "", updatedAt: "", className: "", students: [] }); void loadCourseMemoryConfig(nextCourseId); }}>
+                        <option value="">请选择课程</option>
+                        {teachingCourses.map((course) => <option key={course.id} value={course.id}>{course.courseName}</option>)}
+                      </select>
+                    </div>
+                    <button type="button" className="teacher-primary-btn" onClick={openTeachingClassCreateDialog} disabled={!selectedTeachingCourseId}>
+                      新建班级
+                    </button>
+                  </div>
+                </header>
+                <section className="teacher-personal-config">
+                  <div className="teacher-course-class-list" role="tablist" aria-label="授课班级">
+                    {courseMemoryConfig.classNames.length ? courseMemoryConfig.classNames.map((className) => (
+                      <button
+                        key={className}
+                        type="button"
+                        role="tab"
+                        aria-selected={selectedTeachingClassName === className}
+                        className={selectedTeachingClassName === className ? "is-selected" : ""}
+                        onClick={() => void loadTeachingClassRoster(className)}
+                      >
+                        {className}
+                      </button>
+                    )) : <small>请先选择课程并建立班级。</small>}
+                  </div>
+                  {selectedTeachingClassName ? (
+                    <section className="teacher-class-roster" aria-label={`${selectedTeachingClassName}学生信息`}>
+                      <header>
+                        <div>
+                          <h3>{`${selectedTeachingClassName} · 学生信息与协同学习画像`}</h3>
+                          <p>画像来自已整合的课堂过程记忆，用于辅助教师判断；它不是对学生能力或人格的固定标签。</p>
+                        </div>
+                        <div className="teacher-class-roster-actions">
+                          <button type="button" className="teacher-ghost-btn" onClick={() => openCourseClassStudents(selectedTeachingClassName, true)}>
+                            <Upload size={14} />导入学生
+                          </button>
+                          <button type="button" className="teacher-ghost-btn" onClick={() => void loadTeachingClassRoster(selectedTeachingClassName)} disabled={teachingClassRoster.loading}>
+                            <RefreshCw size={14} className={teachingClassRoster.loading ? "is-spinning" : ""} />
+                            {teachingClassRoster.loading ? "读取中..." : "刷新"}
+                          </button>
+                        </div>
+                      </header>
+                      {teachingClassRoster.error ? <p className="teacher-confirm-error">{teachingClassRoster.error}</p> : null}
+                      {teachingClassRoster.loading ? <p className="teacher-empty-text">正在读取班级学生与协同记忆...</p> : teachingClassRoster.students.length === 0 ? <div className="teacher-class-roster-empty"><strong>当前班级还没有学生账号</strong><span>可先通过“导入学生”建立账号；学生完成结对编程后，系统会在夜间形成可追溯的协同学习画像。</span></div> : (
+                        <div className="teacher-class-roster-table-wrap">
+                          <table>
+                            <thead><tr><th>学生</th><th>账号 / 学号</th><th>结对协作</th><th>协同学习画像</th><th>证据</th></tr></thead>
+                            <tbody>{teachingClassRoster.students.map((student) => {
+                              const portrait = student?.portrait || {};
+                              const judgments = Array.isArray(portrait.judgments) ? portrait.judgments : [];
+                              return <tr key={student.id}>
+                                <td><strong>{student.name || "学生"}</strong><small>{student.gender || "性别未填"}</small></td>
+                                <td><span>{student.username || "-"}</span><small>{student.studentId || "未填写学号"}</small></td>
+                                <td>{student.room ? <><strong>{student.room.name}</strong><small>{student.room.partnerNames?.length ? `同伴：${student.room.partnerNames.join("、")}` : "已建立结对房间"}</small></> : <span className="teacher-class-roster-muted">尚未进入结对房间</span>}</td>
+                                <td>{portrait.memoryCount ? <div className="teacher-class-portrait"><span>{`已整合 ${portrait.memoryCount} 条记忆 · ${portrait.knowledgeEvidenceCount || 0} 条知识证据`}</span>{portrait.latestActivity ? <p>{portrait.latestActivity}</p> : null}{judgments.map((item, index) => <p key={`${student.id}-judgment-${index}`} className="teacher-class-portrait-judgment">{item.summary}</p>)}</div> : <span className="teacher-class-roster-muted">尚未形成协同学习画像</span>}</td>
+                                <td>{student.room ? <button type="button" className="teacher-ghost-btn" onClick={() => setMemoryDialogRoom({ id: student.room.id, name: student.room.name })}><BookCheck size={14} />记忆档案</button> : <span className="teacher-class-roster-muted">-</span>}</td>
+                              </tr>;
+                            })}</tbody>
+                          </table>
+                        </div>
+                      )}
+                    </section>
+                  ) : null}
+                </section>
+              </div>
+            ) : activePanel === "course" ? (
               <div className="teacher-panel-stack teacher-course-stack">
                 <header className="teacher-panel-head">
                   <div>
-                    <h2>课程大纲与记忆知识地图</h2>
+                    <h2>课程管理</h2>
                     <p className="teacher-panel-save-time">
-                      教师配置是课程结构的权威来源；琳琳只把课堂证据连接到这些知识点，不会自行修改大纲。
+                      先建立需要授课的课程，再在课程下配置班级、课时任务和知识点；琳琳只引用教师保存的课程信息。
                       {courseMemoryConfig.updatedAt
                         ? ` · 最近保存：${formatDisplayTime(courseMemoryConfig.updatedAt)}`
                         : ""}
                     </p>
                   </div>
-                  <button
-                    type="submit"
-                    form="teacher-course-memory-form"
-                    className="teacher-primary-btn"
-                    disabled={courseMemoryConfig.loading || courseMemoryConfig.saving}
-                  >
-                    <Save size={14} />
-                    {courseMemoryConfig.saving ? "保存中..." : "保存课程"}
-                  </button>
+                  <div className="teacher-panel-actions">
+                    <button
+                      type="button"
+                      className="teacher-ghost-btn"
+                      disabled={creatingTeachingCourse}
+                      onClick={onCreateTeachingCourse}
+                    >
+                      {creatingTeachingCourse ? "新建中..." : "新建课程"}
+                    </button>
+                    <button
+                      type="submit"
+                      form="teacher-course-memory-form"
+                      className="teacher-primary-btn"
+                      disabled={
+                        !courseMemoryConfig.courseId ||
+                        courseMemoryConfig.loading ||
+                        courseMemoryConfig.saving
+                      }
+                    >
+                      {courseMemoryConfig.saving ? "保存中..." : "保存当前课程"}
+                    </button>
+                    <button
+                      type="button"
+                      className="teacher-danger-ghost-btn"
+                      disabled={
+                        !courseMemoryConfig.courseId || deletingTeachingCourse
+                      }
+                      onClick={() => void onDeleteTeachingCourse()}
+                    >
+                      {deletingTeachingCourse ? "删除中..." : "删除当前课程"}
+                    </button>
+                  </div>
                 </header>
 
+                {teachingCourses.length ? (
+                  <section className="teacher-course-management-list" aria-label="已建立课程">
+                    {teachingCourses.map((course) => {
+                      const isSelected = course.id === selectedTeachingCourseId;
+                      const classCount = Array.isArray(course.classNames)
+                        ? course.classNames.length
+                        : 0;
+                      return (
+                        <button
+                          key={course.id}
+                          type="button"
+                          className={`teacher-course-summary-card${
+                            isSelected ? " is-selected" : ""
+                          }`}
+                          aria-pressed={isSelected}
+                          onClick={() => {
+                            setSelectedTeachingCourseId(course.id);
+                            void loadCourseMemoryConfig(course.id);
+                          }}
+                        >
+                          <strong>{course.courseName || "未命名课程"}</strong>
+                          <span>{course.termName || "未设置课程周期"}</span>
+                          <small>
+                            {canManageAllTeachingCourses
+                              ? `${course.ownerTeacherName || "未绑定教师"} · ${classCount} 个授课班级`
+                              : `${classCount} 个授课班级`}
+                          </small>
+                        </button>
+                      );
+                    })}
+                  </section>
+                ) : null}
+
+                {courseMemoryConfig.courseId ? (
                 <section className="teacher-card teacher-course-memory-config">
                   <form
                     id="teacher-course-memory-form"
@@ -5781,7 +6589,42 @@ export default function TeacherHomePage() {
                           }
                         />
                       </label>
+                      {canManageAllTeachingCourses ? (
+                        <label>
+                          <span>授课教师</span>
+                          <select
+                            value={courseMemoryConfig.ownerTeacherId}
+                            onChange={(event) => {
+                              const teacherId = event.target.value;
+                              const teacher = teachingCourseTeacherOptions.find(
+                                (item) => item.id === teacherId,
+                              );
+                              setCourseMemoryConfig((current) => ({
+                                ...current,
+                                ownerTeacherId: teacherId,
+                                ownerTeacherName: String(teacher?.name || ""),
+                                error: "",
+                              }));
+                            }}
+                          >
+                            <option value="">暂不绑定教师</option>
+                            {teachingCourseTeacherOptions.map((teacher) => (
+                              <option key={teacher.id} value={teacher.id}>
+                                {teacher.name}
+                              </option>
+                            ))}
+                          </select>
+                          <small>保存课程后生效。教师被绑定后，可在自己的教学工作台管理该课程。</small>
+                        </label>
+                      ) : null}
                     </div>
+                    <section className="teacher-course-class-management">
+                      <div>
+                        <strong>班级管理</strong>
+                        <small>班级、学生账号与批量导入均在班级管理中完成。</small>
+                      </div>
+                      <button type="button" className="teacher-ghost-btn" onClick={() => setActivePanel("class-manage")}>前往班级管理</button>
+                    </section>
                     <label>
                       <span>课程大纲</span>
                       <textarea
@@ -5822,6 +6665,12 @@ export default function TeacherHomePage() {
                     </div>
                   </form>
                 </section>
+                ) : (
+                  <section className="teacher-course-empty-state">
+                    <h3>先新建一门课程</h3>
+                    <p>教师注册后不需要绑定班级。先写清要教授的课程，再在课程内建立班级与课时任务。</p>
+                  </section>
+                )}
               </div>
             ) : activePanel === "classroom" ? (
               <div className="teacher-panel-stack teacher-classroom-stack">
@@ -5833,6 +6682,27 @@ export default function TeacherHomePage() {
                     </p>
                   </div>
                   <div className="teacher-panel-actions">
+                    {teachingCourses.length > 0 ? (
+                      <label className="teacher-classroom-course-picker">
+                        <span className="sr-only">选择课程</span>
+                        <select
+                          value={selectedTeachingCourseId}
+                          onChange={(event) => {
+                            const nextCourseId = String(event.target.value || "");
+                            setSelectedTeachingCourseId(nextCourseId);
+                            setLessonClassFilter("");
+                            void loadCourseMemoryConfig(nextCourseId);
+                          }}
+                          aria-label="选择课程"
+                        >
+                          {teachingCourses.map((course) => (
+                            <option key={course.id} value={course.id}>
+                              {course.courseName || "未命名课程"}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
                     {classroomConfigHasUnsavedChanges ? (
                       <span className="teacher-user-manage-dirty-tag">
                         课时内容未保存
@@ -5840,47 +6710,28 @@ export default function TeacherHomePage() {
                     ) : null}
                     <button
                       type="button"
-                      className="teacher-ghost-btn teacher-tooltip-btn teacher-action-icon-btn"
+                      className="teacher-ghost-btn"
                       onClick={() =>
                         setLessonListVisible((current) => !current)
                       }
-                      data-tooltip={
-                        lessonListVisible ? "隐藏课时列表" : "显示课时列表"
-                      }
-                      title={
-                        lessonListVisible ? "隐藏课时列表" : "显示课时列表"
-                      }
-                      aria-label={
-                        lessonListVisible ? "隐藏课时列表" : "显示课时列表"
-                      }
                     >
-                      {lessonListVisible ? (
-                        <EyeOff size={15} />
-                      ) : (
-                        <Eye size={15} />
-                      )}
+                      {lessonListVisible ? "收起列表" : "展开列表"}
                     </button>
                     <button
                       type="button"
-                      className="teacher-ghost-btn teacher-tooltip-btn teacher-action-icon-btn"
+                      className="teacher-ghost-btn"
                       onClick={onCreateLesson}
                       disabled={loading || saving || uploadingFiles}
-                      data-tooltip="新建一节课"
-                      title="新建一节课"
-                      aria-label="新建一节课"
                     >
-                      <Plus size={15} />
+                      新建课时
                     </button>
                     <button
                       type="button"
-                      className="teacher-primary-btn teacher-tooltip-btn teacher-action-icon-btn"
+                      className="teacher-primary-btn"
                       onClick={onSaveClassroomConfig}
                       disabled={loading || saving || uploadingFiles}
-                      data-tooltip={saving ? "保存中..." : "保存课堂配置"}
-                      title={saving ? "保存中..." : "保存课堂配置"}
-                      aria-label={saving ? "保存中..." : "保存课堂配置"}
                     >
-                      <Save size={15} />
+                      {saving ? "保存中..." : "保存课时"}
                     </button>
                   </div>
                 </header>
@@ -5897,7 +6748,7 @@ export default function TeacherHomePage() {
                       <h3>课时列表</h3>
                       <div className="teacher-lesson-list-head-right">
                         {!lessonBatchDeleteMode && (
-                          <span>{`${filteredCoursePlans.length}${filteredCoursePlans.length !== teacherCoursePlans.length ? `/${teacherCoursePlans.length}` : ""} 节课`}</span>
+                          <span>{`${filteredCoursePlans.length}${filteredCoursePlans.length !== sortedCoursePlans.length ? `/${sortedCoursePlans.length}` : ""} 节课`}</span>
                         )}
                         <button
                           type="button"
@@ -5984,9 +6835,13 @@ export default function TeacherHomePage() {
                       </div>
                     )}
 
-                    {teacherCoursePlans.length === 0 ? (
+                    {!selectedTeachingCourse ? (
                       <p className="teacher-empty-text">
-                        暂无课时，请点击右上角「新建一节课」。
+                        请先在“课程管理”中创建课程，再为该课程新建课时。
+                      </p>
+                    ) : sortedCoursePlans.length === 0 ? (
+                      <p className="teacher-empty-text">
+                        当前课程暂无课时，请点击右上角“新建课时”。
                       </p>
                     ) : (
                       <div
@@ -8251,19 +9106,39 @@ export default function TeacherHomePage() {
               </div>
             ) : null}
 
-            {activePanel === "user-manage" ? (
+            {isTeacherManagementPanel || isStudentManagementPanel ? (
               <div className="teacher-panel-stack teacher-user-manage-stack">
                 <header className="teacher-panel-head">
                   <div>
-                    <h2>学生与账号</h2>
+                    <h2>
+                      {isTeacherManagementPanel
+                        ? "教师管理"
+                        : isPlatformUsersPanel
+                          ? "平台所有用户"
+                          : isTerminalAdmin
+                            ? "学生管理"
+                            : "学生账号"}
+                    </h2>
                     <p className="teacher-panel-save-time">
-                      {`最近刷新：${formatDisplayTime(userDirectoryUpdatedAt)}`}
+                      {isTeacherManagementPanel
+                        ? "教师通过登录页的“教师注册”开通账号；平台管理员可在此调整其授权班级。"
+                        : isPlatformUsersPanel
+                          ? `授课教师与学生账号分开管理；平台管理员不出现在此目录 · 最近刷新：${formatDisplayTime(userDirectoryUpdatedAt)}`
+                          : isTerminalAdmin
+                            ? `最近刷新：${formatDisplayTime(userDirectoryUpdatedAt)}`
+                            : `仅显示本人授课班级的学生账号；既有账号仅可查看，可新增或批量导入学生 · 最近刷新：${formatDisplayTime(userDirectoryUpdatedAt)}`}
                     </p>
                   </div>
                   <div className="teacher-panel-actions teacher-user-manage-head-actions">
                     <div
                       className="teacher-user-manage-head-stats"
-                      aria-label="用户账号统计"
+                      aria-label={
+                        isTeacherManagementPanel
+                          ? "教师账号统计"
+                          : isPlatformUsersPanel
+                            ? "平台账号统计"
+                            : "学生账号统计"
+                      }
                     >
                       {isTerminalAdmin && userDirectoryHasUnsavedChanges ? (
                         <span className="teacher-user-manage-dirty-tag">
@@ -8272,56 +9147,97 @@ export default function TeacherHomePage() {
                       ) : null}
                       <article className="teacher-user-manage-head-stat">
                         <div className="teacher-user-manage-head-stat-main">
-                          <span>总用户</span>
-                          <strong>{userDirectorySummary.totalCount}</strong>
+                          <span>
+                            {isTeacherManagementPanel
+                              ? "教师账号"
+                              : isPlatformUsersPanel
+                                ? "业务账号"
+                                : "学生账号"}
+                          </span>
+                          <strong>
+                            {isTeacherManagementPanel
+                              ? userDirectorySummary.teacherCount
+                              : isPlatformUsersPanel
+                                ? userDirectorySummary.totalCount
+                                : userDirectorySummary.studentCount}
+                          </strong>
                         </div>
                         <button
                           type="button"
                           className="teacher-user-manage-head-info"
-                          aria-label="总用户说明"
+                          aria-label={
+                            isTeacherManagementPanel
+                              ? "教师账号说明"
+                              : isPlatformUsersPanel
+                                ? "平台账号说明"
+                                : "学生账号说明"
+                          }
                         >
                           <CircleHelp size={13} />
                           <span
                             className="teacher-user-manage-head-tooltip"
                             role="tooltip"
                           >
-                            平台内全部账号数量（学生 + 管理员）。
+                            {isTeacherManagementPanel
+                              ? "已完成教师注册、可配置授课范围的教师账号数量。"
+                              : isPlatformUsersPanel
+                                ? "平台内授课教师与学生账号的总数；平台管理员不在此目录中。"
+                                : "当前账号可管理范围内的学生账号数量。"}
                           </span>
                         </button>
                       </article>
+                      {!isTeacherDirectoryPanel ? (
                       <article className="teacher-user-manage-head-stat">
                         <div className="teacher-user-manage-head-stat-main">
-                          <span>学生用户</span>
-                          <strong>{userDirectorySummary.studentCount}</strong>
+                          <span>{isPlatformUsersPanel ? "教师账号" : "班级分布"}</span>
+                          <strong>
+                            {isPlatformUsersPanel
+                              ? userDirectorySummary.teacherCount
+                              : userDirectorySummary.studentCount}
+                          </strong>
                         </div>
                         <button
                           type="button"
                           className="teacher-user-manage-head-info"
-                          aria-label="学生用户说明"
+                          aria-label={isPlatformUsersPanel ? "教师账号说明" : "学生用户说明"}
                         >
                           <CircleHelp size={13} />
                           <span
                             className="teacher-user-manage-head-tooltip"
                             role="tooltip"
                           >
-                            {`分类内 ${userDirectorySummary.targetClassStudentCount} / 班级外 ${userDirectorySummary.otherClassStudentCount} / 未填写班级 ${userDirectorySummary.unassignedStudentCount}`}
+                          {isPlatformUsersPanel
+                            ? "已完成教师注册的授课教师账号数量。"
+                            : `分类内 ${userDirectorySummary.targetClassStudentCount} / 班级外 ${userDirectorySummary.otherClassStudentCount} / 未填写班级 ${userDirectorySummary.unassignedStudentCount}`}
                           </span>
                         </button>
                       </article>
+                      ) : null}
                     </div>
                     <div className="teacher-user-manage-head-action-tools">
-                      {isTerminalAdmin ? (
+                      {!isTeacherDirectoryPanel && userDirectoryCapabilities.canCreateStudents ? (
                         <button
                           type="button"
-                          className="teacher-ghost-btn teacher-user-manage-create-btn teacher-action-icon-btn"
+                          className="teacher-ghost-btn teacher-user-manage-create-btn"
                           onClick={openUserCreateDialog}
                           disabled={
                             userDirectoryLoading || userDirectorySavingChanges
                           }
-                          aria-label="新增用户"
-                          title="新增用户"
+                          aria-label="新增学生"
                         >
                           <Plus size={14} />
+                          <span>新增学生</span>
+                        </button>
+                      ) : null}
+                      {!isTeacherDirectoryPanel && userDirectoryCapabilities.canImportStudents ? (
+                        <button
+                          type="button"
+                          className="teacher-ghost-btn teacher-user-manage-create-btn"
+                          onClick={openStudentImportDialog}
+                          disabled={userDirectoryLoading}
+                        >
+                          <Upload size={14} />
+                          <span>批量导入</span>
                         </button>
                       ) : null}
                       {isTerminalAdmin ? (
@@ -8367,6 +9283,31 @@ export default function TeacherHomePage() {
                 </header>
 
                 <section className="teacher-card teacher-user-manage-list-card">
+                  {isPlatformUsersPanel ? (
+                    <div className="teacher-user-directory-role-tabs" role="tablist" aria-label="用户类型">
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={platformUserDirectoryView === "teachers"}
+                        className={platformUserDirectoryView === "teachers" ? "active" : ""}
+                        onClick={() => {
+                          setPlatformUserDirectoryView("teachers");
+                          setUserDirectoryClassFilter("all");
+                        }}
+                      >
+                        {`授课教师（${userDirectorySummary.teacherCount}）`}
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={platformUserDirectoryView === "students"}
+                        className={platformUserDirectoryView === "students" ? "active" : ""}
+                        onClick={() => setPlatformUserDirectoryView("students")}
+                      >
+                        {`学生（${userDirectorySummary.studentCount}）`}
+                      </button>
+                    </div>
+                  ) : null}
                   <div className="teacher-image-library-search-wrap">
                     <form
                       className="teacher-image-library-search"
@@ -8395,38 +9336,9 @@ export default function TeacherHomePage() {
                       </button>
                     </form>
 
+                    {!isTeacherDirectoryPanel ? (
                     <div className="teacher-user-manage-filter-row">
                       <div className="teacher-user-manage-chip-panels">
-                        <div className="teacher-user-manage-chip-group">
-                          <span className="teacher-user-manage-chip-label">
-                            角色
-                          </span>
-                          <div className="teacher-image-library-chip-group">
-                            <button
-                              type="button"
-                              className={`teacher-image-chip${userDirectoryRoleFilter === "all" ? " active" : ""}`}
-                              onClick={() => setUserDirectoryRoleFilter("all")}
-                            >
-                              {`全部 (${userDirectoryRoleCounts.all})`}
-                            </button>
-                            <button
-                              type="button"
-                              className={`teacher-image-chip${userDirectoryRoleFilter === "user" ? " active" : ""}`}
-                              onClick={() => setUserDirectoryRoleFilter("user")}
-                            >
-                              {`学生 (${userDirectoryRoleCounts.user})`}
-                            </button>
-                            <button
-                              type="button"
-                              className={`teacher-image-chip${userDirectoryRoleFilter === "admin" ? " active" : ""}`}
-                              onClick={() =>
-                                setUserDirectoryRoleFilter("admin")
-                              }
-                            >
-                              {`管理员 (${userDirectoryRoleCounts.admin})`}
-                            </button>
-                          </div>
-                        </div>
                         <div className="teacher-user-manage-chip-group">
                           <span className="teacher-user-manage-chip-label">
                             班级
@@ -8448,23 +9360,6 @@ export default function TeacherHomePage() {
                                 {`${option.label} (${Number(userDirectoryClassCounts[option.value] || 0)})`}
                               </button>
                             ))}
-                            {isTerminalAdmin ? (
-                              <button
-                                type="button"
-                                className="teacher-image-chip teacher-user-manage-add-class-chip"
-                                onClick={() =>
-                                  setUserClassCategoryDialog({
-                                    open: true,
-                                    className: "",
-                                    error: "",
-                                    saving: false,
-                                  })
-                                }
-                              >
-                                <Plus size={13} />
-                                <span>新增班级</span>
-                              </button>
-                            ) : null}
                           </div>
                         </div>
                       </div>
@@ -8479,11 +9374,7 @@ export default function TeacherHomePage() {
                             <Link2 size={14} />
                             <span>账号合并</span>
                           </button>
-                        ) : (
-                          <span className="teacher-user-manage-limit-hint">
-                            仅"上官福泽"可编辑/删除账号，账号合并仅限学生账号。
-                          </span>
-                        )}
+                        ) : null}
                         <button
                           type="button"
                           className="teacher-image-sort-btn"
@@ -8499,15 +9390,39 @@ export default function TeacherHomePage() {
                         </button>
                       </div>
                     </div>
+                    ) : (
+                      <div className="teacher-user-manage-filter-row">
+                        <div className="teacher-user-manage-limit-hint">
+                          教师与学生账号分开管理；这里不显示平台管理员账号。
+                        </div>
+                        <button
+                          type="button"
+                          className="teacher-image-sort-btn"
+                          onClick={() =>
+                            setUserDirectorySortBy((current) =>
+                              current === "updated" ? "username" : "updated",
+                            )
+                          }
+                        >
+                          {userDirectorySortBy === "updated"
+                            ? "排序：最近注册/更新"
+                            : "排序：账号"}
+                        </button>
+                      </div>
+                    )}
                   </div>
 
-                  {userDirectoryVisibleItems.length === 0 ? (
+                  {userDirectoryPanelItems.length === 0 ? (
                     <div className="teacher-image-library-empty">
                       <Users size={28} />
                       <p>
                         {userDirectoryLoading
                           ? "正在加载用户列表..."
-                          : "暂无匹配的用户信息。"}
+                          : isTeacherDirectoryPanel
+                            ? "暂无教师账号。教师可在登录页使用教师邀请码自行注册。"
+                            : isPlatformUsersPanel
+                              ? "暂无匹配的平台用户。"
+                              : "暂无匹配的学生信息。"}
                       </p>
                       {hasUserDirectoryFilters ? (
                         <button
@@ -8525,12 +9440,17 @@ export default function TeacherHomePage() {
                         <thead>
                           <tr>
                             <th>账号</th>
-                            <th>角色</th>
                             <th>姓名</th>
-                            <th>学号</th>
-                            <th>班级</th>
-                            <th>年级</th>
-                            <th>性别</th>
+                        {isTeacherDirectoryPanel ? (
+                          <th>授权班级</th>
+                        ) : (
+                              <>
+                                <th>学号</th>
+                                <th>所属班级</th>
+                                <th>年级</th>
+                                <th>性别</th>
+                              </>
+                            )}
                             <th>账号状态</th>
                             <th>更新时间</th>
                             <th>操作</th>
@@ -8871,12 +9791,8 @@ export default function TeacherHomePage() {
                   </div>
                 </header>
 
-                <p className="teacher-collab-classroom-note">
-                  查看各结对房间的实时协作进展、角色分工和 AI 参与度感知。教师以只读方式观察，不进入学生群聊发言。
-                </p>
-
                 <section
-                  className={`teacher-card teacher-pair-monitoring-master${
+                  className={`teacher-pair-monitoring-master${
                     pairMonitoringMasterEnabled ? " is-enabled" : ""
                   }`}
                 >
@@ -8918,7 +9834,7 @@ export default function TeacherHomePage() {
                   </button>
                 </section>
 
-                <section className="teacher-card teacher-party-manage-card">
+                <section className="teacher-party-manage-card">
                   <div className="teacher-party-manage-summary">
                     <span>{`小教室：${collaborationClassroomItems.length}`}</span>
                     <span>{`参与度感知中：${collaborationClassroomItems.filter((room) => room?.paiaMonitoringEnabled === true).length}`}</span>
@@ -9448,6 +10364,66 @@ export default function TeacherHomePage() {
               </div>
             </div>
           ) : null}
+          {teachingClassCreateDialogOpen ? (
+            <div
+              className="teacher-time-overlay"
+              role="presentation"
+              onClick={closeTeachingClassCreateDialog}
+            >
+              <div
+                className="teacher-time-card teacher-class-create-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label="新建班级"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <h3>新建班级</h3>
+                <p className="teacher-time-form-hint">请输入要添加到当前课程的班级名称。</p>
+                <form
+                  className="teacher-time-form"
+                  autoComplete="off"
+                  onSubmit={onCreateTeachingClass}
+                >
+                  <label>
+                    <span>班级名称</span>
+                    <input
+                      type="text"
+                      name="teaching-section-label"
+                      value={newTeachingClassName}
+                      placeholder="例如：810班"
+                      maxLength={40}
+                      autoComplete="off"
+                      autoFocus
+                      onChange={(event) => {
+                        setNewTeachingClassName(event.target.value);
+                        setTeachingClassError("");
+                      }}
+                    />
+                  </label>
+                  {teachingClassError ? (
+                    <span className="teacher-confirm-error">{teachingClassError}</span>
+                  ) : null}
+                  <div className="teacher-time-actions">
+                    <button
+                      type="button"
+                      className="teacher-ghost-btn"
+                      onClick={closeTeachingClassCreateDialog}
+                      disabled={creatingTeachingClass}
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="submit"
+                      className="teacher-primary-btn"
+                      disabled={creatingTeachingClass}
+                    >
+                      {creatingTeachingClass ? "创建中..." : "确认创建"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          ) : null}
           {userClassCategoryDialog.open ? (
             <div
               className="teacher-time-overlay"
@@ -9509,6 +10485,215 @@ export default function TeacherHomePage() {
               </div>
             </div>
           ) : null}
+          {studentImportDialog.open ? (
+            <div
+              className="teacher-time-overlay"
+              role="presentation"
+              onClick={closeStudentImportDialog}
+            >
+              <div
+                className="teacher-time-card teacher-student-import-card"
+                role="dialog"
+                aria-modal="true"
+                aria-label="批量导入学生账号"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="teacher-student-import-head">
+                  <div>
+                    <h3>批量导入学生账号</h3>
+                    <p>下载模板填写后上传，学号将作为学生登录账号。</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="teacher-icon-btn"
+                    onClick={closeStudentImportDialog}
+                    aria-label="关闭批量导入"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+                <form
+                  className="teacher-time-form"
+                  onSubmit={onImportStudentAccounts}
+                >
+                  {isTerminalAdmin ? (
+                    <label>
+                      <span>绑定教师</span>
+                      <select
+                        value={studentImportDialog.teacherUserId}
+                        onChange={(event) => {
+                          const teacherUserId = event.target.value;
+                          if (studentImportDialog.templateDownloadUrl) {
+                            URL.revokeObjectURL(
+                              studentImportDialog.templateDownloadUrl,
+                            );
+                          }
+                          setStudentImportDialog((current) => ({
+                            ...current,
+                            teacherUserId,
+                            file: null,
+                            fileName: "",
+                            downloading: false,
+                            templateDownloadUrl: "",
+                            templateFileName: "",
+                            result: null,
+                            error: "",
+                          }));
+                          void prepareStudentImportTemplate(teacherUserId);
+                        }}
+                      >
+                        <option value="">请选择教师</option>
+                        {studentImportTeacherOptions.map((teacher) => (
+                          <option key={teacher.id} value={teacher.id}>
+                            {`${teacher.label}（${teacher.authorizedClassNames.join("、") || "未授权班级"}）`}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+
+                  <div className="teacher-student-import-steps">
+                    <section>
+                      <strong>第一步：下载模板</strong>
+                      <span>已绑定班级会写入说明页；未绑定时仍可下载通用模板。</span>
+                      {studentImportDialog.templateDownloadUrl ? (
+                        <a
+                          className="teacher-ghost-btn"
+                          href={studentImportDialog.templateDownloadUrl}
+                          download={
+                            studentImportDialog.templateFileName ||
+                            "学生账号批量导入模板.xlsx"
+                          }
+                        >
+                          <Download size={14} />
+                          <span>下载 Excel 模板</span>
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          className="teacher-ghost-btn"
+                          onClick={() =>
+                            void prepareStudentImportTemplate(
+                              studentImportDialog.teacherUserId,
+                            )
+                          }
+                          disabled={studentImportDialog.downloading}
+                        >
+                          <Download size={14} />
+                          <span>
+                            {studentImportDialog.downloading
+                              ? "正在准备模板..."
+                              : "重新准备模板"}
+                          </span>
+                        </button>
+                      )}
+                    </section>
+                    <section>
+                      <strong>第二步：上传填写后的文件</strong>
+                      <span>支持 .xlsx 和 .xls，每次最多 500 名学生。</span>
+                      <label className="teacher-student-import-file">
+                        <Upload size={15} />
+                        <span>
+                          {studentImportDialog.fileName || "选择 Excel 文件"}
+                        </span>
+                        <input
+                          type="file"
+                          accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                          onChange={(event) => {
+                            const file = event.target.files?.[0] || null;
+                            setStudentImportDialog((current) => ({
+                              ...current,
+                              file,
+                              fileName: file?.name || "",
+                              result: null,
+                              error: "",
+                            }));
+                          }}
+                        />
+                      </label>
+                    </section>
+                  </div>
+
+                  {studentImportDialog.error ? (
+                    <span className="teacher-confirm-error" role="alert">
+                      {studentImportDialog.error}
+                    </span>
+                  ) : null}
+
+                  {studentImportDialog.result ? (
+                    <div className="teacher-student-import-result">
+                      <div className="teacher-student-import-result-head">
+                        <p>
+                          {`共 ${studentImportDialog.result.summary?.totalCount || 0} 行，成功 ${studentImportDialog.result.summary?.createdCount || 0}，失败 ${studentImportDialog.result.summary?.failedCount || 0}。`}
+                        </p>
+                        <button
+                          type="button"
+                          className="teacher-ghost-btn"
+                          onClick={() => void onDownloadStudentImportResult()}
+                        >
+                          <Download size={14} />
+                          <span>下载导入结果</span>
+                        </button>
+                      </div>
+                      <p className="teacher-time-form-hint">
+                        自动生成的初始密码只在本次结果中显示，请立即下载保存。
+                      </p>
+                      <div className="teacher-student-import-result-table-wrap">
+                        <table className="teacher-user-manage-table">
+                          <thead>
+                            <tr>
+                              <th>行号</th>
+                              <th>姓名</th>
+                              <th>账号</th>
+                              <th>班级</th>
+                              <th>初始密码</th>
+                              <th>结果</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(studentImportDialog.result.results || []).map(
+                              (item) => (
+                                <tr key={`${item.rowNumber}-${item.studentId}`}>
+                                  <td>{item.rowNumber}</td>
+                                  <td>{item.name || "-"}</td>
+                                  <td>{item.username || item.studentId || "-"}</td>
+                                  <td>{item.className || "-"}</td>
+                                  <td>{item.initialPassword || "-"}</td>
+                                  <td>{item.message || "-"}</td>
+                                </tr>
+                              ),
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="teacher-time-actions">
+                    <button
+                      type="button"
+                      className="teacher-ghost-btn"
+                      onClick={closeStudentImportDialog}
+                    >
+                      关闭
+                    </button>
+                    <button
+                      type="submit"
+                      className="teacher-primary-btn"
+                      disabled={
+                        studentImportDialog.importing ||
+                        !studentImportDialog.file
+                      }
+                    >
+                      {studentImportDialog.importing
+                        ? "正在导入..."
+                        : "开始批量导入"}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          ) : null}
           {userCreateDialog.open ? (
             <div
               className="teacher-time-overlay"
@@ -9527,22 +10712,9 @@ export default function TeacherHomePage() {
                   className="teacher-time-form"
                   onSubmit={onSubmitUserCreateDialog}
                 >
-                  <label>
-                    <span>账号（必填）</span>
-                    <input
-                      type="text"
-                      value={userCreateDialog.username}
-                      onChange={(event) =>
-                        setUserCreateDialog((current) => ({
-                          ...current,
-                          username: event.target.value,
-                          error: "",
-                        }))
-                      }
-                      maxLength={64}
-                      autoFocus
-                    />
-                  </label>
+                  <p className="teacher-time-form-hint">
+                    学号将作为学生的登录账号。
+                  </p>
                   <label>
                     <span>密码（必填）</span>
                     <input
@@ -9571,6 +10743,7 @@ export default function TeacherHomePage() {
                         }))
                       }
                       maxLength={20}
+                      autoFocus
                     />
                   </label>
                   <label>
@@ -9593,26 +10766,28 @@ export default function TeacherHomePage() {
                   </label>
                   <label>
                     <span>归属班级（必填）</span>
-                    <select
+                    <input
+                      type="text"
+                      list="user-create-class-options"
                       value={userCreateDialog.className}
                       onChange={(event) =>
                         setUserCreateDialog((current) => ({
                           ...current,
-                          className: String(event.target.value || "").trim(),
+                          className: String(event.target.value || ""),
                           error: "",
                         }))
                       }
-                    >
-                      <option value="">请选择班级</option>
+                      placeholder="输入班级，或从已有班级中选择"
+                      maxLength={40}
+                    />
+                    <datalist id="user-create-class-options">
                       {userCreateClassOptions.map((className) => (
                         <option
                           key={`create-class-${className}`}
                           value={className}
-                        >
-                          {className}
-                        </option>
+                        />
                       ))}
-                    </select>
+                    </datalist>
                   </label>
                   <div className="teacher-user-manage-dialog-grid">
                     <label>
@@ -9656,9 +10831,11 @@ export default function TeacherHomePage() {
                       </select>
                     </label>
                   </div>
-                  <label>
-                    <span>是否绑定老师</span>
-                    <select
+                  {isTerminalAdmin ? (
+                    <>
+                      <label>
+                        <span>是否绑定老师</span>
+                        <select
                       value={
                         userCreateForcedTeacherScopeKey ||
                         userCreateDialog.bindTeacher
@@ -9680,21 +10857,21 @@ export default function TeacherHomePage() {
                           };
                         })
                       }
-                    >
-                      <option value="no">不绑定</option>
-                      <option value="yes">绑定</option>
-                    </select>
-                  </label>
-                  {userCreateForcedTeacherScopeKey ? (
-                    <span className="teacher-time-form-hint">
-                      {`该班级按系统规则自动绑定为「${userCreateForcedTeacherScopeLabel || "指定老师"}」。`}
-                    </span>
-                  ) : null}
-                  {userCreateForcedTeacherScopeKey ||
-                  userCreateDialog.bindTeacher ? (
-                    <label>
-                      <span>绑定老师</span>
-                      <select
+                        >
+                          <option value="no">不绑定</option>
+                          <option value="yes">绑定</option>
+                        </select>
+                      </label>
+                      {userCreateForcedTeacherScopeKey ? (
+                        <span className="teacher-time-form-hint">
+                          {`该班级按系统规则自动绑定为「${userCreateForcedTeacherScopeLabel || "指定老师"}」。`}
+                        </span>
+                      ) : null}
+                      {userCreateForcedTeacherScopeKey ||
+                      userCreateDialog.bindTeacher ? (
+                        <label>
+                          <span>绑定老师</span>
+                          <select
                         value={
                           userCreateForcedTeacherScopeKey ||
                           userCreateDialog.lockedTeacherScopeKey
@@ -9707,20 +10884,26 @@ export default function TeacherHomePage() {
                             error: "",
                           }))
                         }
-                      >
-                        {USER_CREATE_BINDABLE_TEACHER_SCOPE_OPTIONS.map(
-                          (item) => (
-                            <option
-                              key={`create-bind-teacher-${item.key}`}
-                              value={item.key}
-                            >
-                              {item.label}
-                            </option>
-                          ),
-                        )}
-                      </select>
-                    </label>
-                  ) : null}
+                          >
+                            {USER_CREATE_BINDABLE_TEACHER_SCOPE_OPTIONS.map(
+                              (item) => (
+                                <option
+                                  key={`create-bind-teacher-${item.key}`}
+                                  value={item.key}
+                                >
+                                  {item.label}
+                                </option>
+                              ),
+                            )}
+                          </select>
+                        </label>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="teacher-time-form-hint">
+                      学生账号会自动绑定到当前教师及对应授权班级。
+                    </p>
+                  )}
                   {userCreateDialog.error ? (
                     <span className="teacher-confirm-error">
                       {userCreateDialog.error}
@@ -9739,7 +10922,7 @@ export default function TeacherHomePage() {
                       className="teacher-primary-btn"
                       disabled={userCreateDialog.saving}
                     >
-                      {userCreateDialog.saving ? "创建中..." : "创建用户"}
+                      {userCreateDialog.saving ? "创建中..." : "创建学生"}
                     </button>
                   </div>
                 </form>
@@ -9779,6 +10962,27 @@ export default function TeacherHomePage() {
                       maxLength={64}
                     />
                   </label>
+                  {["admin", "teacher"].includes(userEditDialog.role) ? (
+                    <label>
+                      <span>授权班级</span>
+                      <textarea
+                        value={userEditDialog.authorizedClassNamesText}
+                        onChange={(event) =>
+                          setUserEditDialog((current) => ({
+                            ...current,
+                            authorizedClassNamesText: event.target.value,
+                            error: "",
+                          }))
+                        }
+                        placeholder="例如：810班、811班"
+                        rows={3}
+                        maxLength={500}
+                      />
+                      <small className="teacher-time-form-hint">
+                        多个班级使用顿号、逗号或换行分隔。该教师只能查看和导入这些班级的学生。
+                      </small>
+                    </label>
+                  ) : null}
                   <label>
                     <span>姓名</span>
                     <input

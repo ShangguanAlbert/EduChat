@@ -20,6 +20,10 @@ import {
 } from "../../shared/finalTestState.js";
 import { sanitizeGroupChatAiConfig } from "../services/group-chat-ai-config.js";
 import { createAuthRateLimiter } from "../modules/auth/rate-limit.js";
+import {
+  resolveRegistrationUsername,
+  validateStudentRegistrationProfile,
+} from "../modules/auth/registration.js";
 
 export function registerAuthUserClassroomRoutes(app, deps) {
   function readSignedUrlExpiryText(url) {
@@ -67,9 +71,6 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     ACCOUNT_STATUS_DISABLED,
     isPairProgrammingInviteCodeValid,
     isPairProgrammingTeacherScope,
-    FIXED_STUDENT_ACCOUNTS,
-    FIXED_STUDENT_ACCOUNT_TAG,
-    FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
     MAX_FILE_SIZE_BYTES,
     MAX_FILES,
     CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS,
@@ -139,9 +140,6 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     STUDENT_HOMEWORK_MAX_FILE_SIZE_BYTES,
     STUDENT_HOMEWORK_UPLOAD_MAX_FILES,
     STUDENT_HOMEWORK_MAX_FILES_PER_LESSON_PER_STUDENT,
-    FIXED_ADMIN_ACCOUNTS,
-    FIXED_ADMIN_USERNAME_KEYS,
-    FIXED_STUDENT_USERNAME_KEYS,
     RESERVED_ADMIN_USERNAME_KEYS,
     CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE,
     ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES,
@@ -188,6 +186,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     GroupChatStoredFile,
     GroupChatMessage,
     AdminConfig,
+    TeachingCourse,
     AdminClassroomLessonFile,
     ClassroomHomeworkFile,
     FinalTestSession,
@@ -316,7 +315,21 @@ export function registerAuthUserClassroomRoutes(app, deps) {
 
   async function readAuthorizedClassNamesForTeacherScope(
     teacherScopeKey = SHI_GAOJUN_TEACHER_SCOPE_KEY,
+    admin = null,
   ) {
+    const configuredClassNames = Array.from(
+      new Set(
+        (Array.isArray(admin?.authorizedClassNames)
+          ? admin.authorizedClassNames
+          : []
+        )
+          .map((className) => sanitizeClassroomUserClassName(className))
+          .filter(Boolean),
+      ),
+    ).sort((a, b) =>
+      a.localeCompare(b, "zh-CN", { numeric: true, sensitivity: "base" }),
+    );
+    if (configuredClassNames.length > 0) return configuredClassNames;
     const users = await AuthUser.find(
       {
         role: "user",
@@ -483,91 +496,6 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     };
   }
 
-  async function loadFixedFinalTestRosterDirectory(teacherScopeKey) {
-    const safeTeacherScopeKey = sanitizeTeacherScopeKey(teacherScopeKey);
-    const fixedAccounts = (Array.isArray(FIXED_STUDENT_ACCOUNTS)
-      ? FIXED_STUDENT_ACCOUNTS
-      : [])
-      .map((account) => {
-        const username = sanitizeText(account?.username, "", 64);
-        const usernameKey = normalizeFinalTestUsernameKey(username);
-        const className = sanitizeClassroomUserClassName(account?.className);
-        const requiredTeacherScopeKey = sanitizeTeacherScopeKey(
-          account?.requiredTeacherScopeKey ||
-            FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
-        );
-        if (
-          !username ||
-          !usernameKey ||
-          !className ||
-          requiredTeacherScopeKey !== safeTeacherScopeKey
-        ) {
-          return null;
-        }
-        return {
-          username,
-          usernameKey,
-          studentName: username,
-          studentId: sanitizeText(account?.studentId, "", 20),
-          className,
-        };
-      })
-      .filter(Boolean);
-    const usernameKeys = fixedAccounts.map((account) => account.usernameKey);
-    const fixedUserQuery =
-      usernameKeys.length > 0
-        ? AuthUser.find(
-            {
-              usernameKey: { $in: usernameKeys },
-            },
-            { username: 1, usernameKey: 1, profile: 1, accountTag: 1 },
-          )
-        : null;
-    const fixedUsers = fixedUserQuery
-      ? fixedUserQuery && typeof fixedUserQuery.lean === "function"
-        ? await fixedUserQuery.lean()
-        : await resolveMaybeLean(fixedUserQuery)
-      : [];
-    const userByUsernameKey = new Map(
-      (Array.isArray(fixedUsers) ? fixedUsers : []).map((user) => [
-        normalizeFinalTestUsernameKey(user?.usernameKey || user?.username),
-        user,
-      ]),
-    );
-    const rosterAll = fixedAccounts
-      .map((account) => {
-        const user = userByUsernameKey.get(account.usernameKey) || null;
-        const profile = sanitizeUserProfile(user?.profile);
-        return {
-          userId: sanitizeId(user?._id, "") || `fixed:${account.usernameKey}`,
-          username: account.username,
-          studentName:
-            sanitizeText(profile.name, "", 64) ||
-            account.studentName ||
-            account.username,
-          studentId:
-            sanitizeText(profile.studentId, "", 20) || account.studentId,
-          className: account.className,
-          usernameKey: account.usernameKey,
-          matchedUserId: sanitizeId(user?._id, ""),
-        };
-      })
-      .sort(compareClassroomRosterStudent);
-    const rosterByClassName = new Map(
-      CLASSROOM_TARGET_CLASS_NAMES.map((className) => [className, []]),
-    );
-    rosterAll.forEach((student) => {
-      if (!rosterByClassName.has(student.className)) {
-        rosterByClassName.set(student.className, []);
-      }
-      rosterByClassName.get(student.className).push(student);
-    });
-    return {
-      rosterAll,
-      rosterByClassName,
-    };
-  }
-
   function buildFinalTestSessionQuery({ teacherScopeKey, studentUserId, className }) {
     return {
       key: ADMIN_CONFIG_KEY,
@@ -711,7 +639,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   });
 
   app.get("/api/auth/status", async (_req, res) => {
-    const [totalUsers, totalTeachers] = await Promise.all([
+    const [totalUsers, totalAdmins] = await Promise.all([
       AuthUser.countDocuments({ role: "user" }),
       AuthUser.countDocuments({
         role: "admin",
@@ -722,14 +650,8 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     res.json({
       ok: true,
       hasAnyUser: totalUsers > 0,
-      hasAdmin: totalTeachers > 0 || FIXED_ADMIN_ACCOUNTS.length > 0,
+      hasAdmin: totalAdmins > 0,
       teacherRegistrationEnabled: !!TEACHER_REGISTRATION_INVITE_CODE,
-      adminUsernames: FIXED_ADMIN_ACCOUNTS.map((item) => item.username),
-      preloadedStudentCount: FIXED_STUDENT_ACCOUNTS.length,
-      preloadedStudentTeacherScopeKey: FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
-      preloadedStudentTeacherScopeLabel: getTeacherScopeLabel(
-        FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
-      ),
     });
   });
 
@@ -2095,10 +2017,22 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       return;
     }
 
-    const username = normalizeUsername(req.body?.username);
+    const profile = sanitizeUserProfile(req.body?.profile);
+    const username = normalizeUsername(
+      resolveRegistrationUsername({
+        registrationRole,
+        username: req.body?.username,
+        profile,
+      }),
+    );
     const password = String(req.body?.password || "");
     if (!username) {
-      res.status(400).json({ error: "请输入 2–64 位且不含空格的用户名。" });
+      res.status(400).json({
+        error:
+          registrationRole === "student"
+            ? "请输入正确的学号，学号将作为登录账号。"
+            : "请输入 2–64 位且不含空格的用户名。",
+      });
       return;
     }
     const passwordError = validatePassword(password);
@@ -2113,11 +2047,11 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       return;
     }
 
-    const profile = sanitizeUserProfile(req.body?.profile);
     let role = "user";
     let accountTag = "self_registration";
     let accountStatus = ACCOUNT_STATUS_PENDING_BINDING;
     let lockedTeacherScopeKey = "";
+    let authorizedClassNames = [];
 
     if (registrationRole === "teacher") {
       if (!TEACHER_REGISTRATION_INVITE_CODE) {
@@ -2137,15 +2071,15 @@ export function registerAuthUserClassroomRoutes(app, deps) {
         res.status(400).json({ error: "请填写真实的中文教师姓名。" });
         return;
       }
-      role = "admin";
+      role = "teacher";
       accountTag = SELF_REGISTERED_TEACHER_ACCOUNT_TAG;
       accountStatus = ACCOUNT_STATUS_ACTIVE;
       lockedTeacherScopeKey = SHI_GAOJUN_TEACHER_SCOPE_KEY;
     } else {
-      const profileErrors = validateUserProfile(profile);
+      const profileErrors = validateStudentRegistrationProfile(profile);
       if (Object.keys(profileErrors).length > 0) {
         res.status(400).json({
-          error: "请完整填写正确的学生信息。",
+          error: "请填写正确的姓名、学号和班级。",
           errors: profileErrors,
         });
         return;
@@ -2179,6 +2113,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
         accountTag,
         accountStatus,
         lockedTeacherScopeKey,
+        authorizedClassNames,
         profile,
       });
 
@@ -2202,13 +2137,8 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   app.post("/api/auth/login", loginRateLimiter, async (req, res) => {
     const username = normalizeUsername(req.body?.username);
     const password = String(req.body?.password || "");
-    const teacherScopeKey = sanitizeTeacherScopeKey(req.body?.teacherScopeKey);
     if (!username || !password) {
       res.status(400).json({ error: "请输入账号和密码。" });
-      return;
-    }
-    if (teacherScopeKey !== SHI_GAOJUN_TEACHER_SCOPE_KEY) {
-      res.status(400).json({ error: "当前入口仅支持施高俊老师的结对编程课堂。" });
       return;
     }
 
@@ -2217,6 +2147,10 @@ export function registerAuthUserClassroomRoutes(app, deps) {
 
     if (!user || !valid) {
       res.status(401).json({ error: "账号或密码错误。" });
+      return;
+    }
+    if (user.role !== "user") {
+      res.status(403).json({ error: "教师请使用「教师登录」。" });
       return;
     }
 
@@ -2232,28 +2166,14 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       return;
     }
 
-    const lockedTeacherScopeKey = resolveLoginLockedTeacherScopeKey(user);
-    if (
-      lockedTeacherScopeKey &&
-      lockedTeacherScopeKey !== SHI_GAOJUN_TEACHER_SCOPE_KEY
-    ) {
-      res.status(403).json({ error: "该账号不属于当前结对编程课堂。" });
+    const effectiveTeacherScopeKey = resolveLoginLockedTeacherScopeKey(user);
+    if (!effectiveTeacherScopeKey) {
+      res.status(403).json({ error: "该账号尚未绑定授课教师，请联系教师处理。" });
       return;
     }
-    const effectiveTeacherScopeKey = SHI_GAOJUN_TEACHER_SCOPE_KEY;
     const pairProgrammingAccess = isPairProgrammingTeacherScope(
       effectiveTeacherScopeKey,
     );
-    if (
-      pairProgrammingAccess &&
-      !isPairProgrammingInviteCodeValid(
-        req.body?.inviteCode,
-        PAIR_PROGRAMMING_INVITE_CODE,
-      )
-    ) {
-      res.status(403).json({ error: "结对编程邀请码不正确。" });
-      return;
-    }
 
     const token = signToken(
       {
@@ -2521,7 +2441,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     if (!(await authenticateAdminRequest(req, res))) return;
     const teacherScopeKey = SHANGGUAN_FUZE_TEACHER_SCOPE_KEY;
     const [{ rosterAll, rosterByClassName }, records] = await Promise.all([
-      loadFixedFinalTestRosterDirectory(teacherScopeKey),
+      loadClassroomRosterDirectory(teacherScopeKey),
       resolveMaybeLean(
         FinalTestSession.find({
           key: ADMIN_CONFIG_KEY,
@@ -2682,7 +2602,10 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     if (!admin) return;
     const [config, authorizedClassNames] = await Promise.all([
       readAdminAgentConfig(),
-      readAuthorizedClassNamesForTeacherScope(),
+      readAuthorizedClassNamesForTeacherScope(
+        SHI_GAOJUN_TEACHER_SCOPE_KEY,
+        admin,
+      ),
     ]);
 
     res.json({
@@ -3238,13 +3161,67 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   );
 
   app.put("/api/auth/admin/classroom-plans", async (req, res) => {
-    if (!(await authenticateAdminRequest(req, res))) return;
+    const admin = await authenticateAdminRequest(req, res);
+    if (!admin) return;
     const [previous, authorizedClassNames] = await Promise.all([
       readAdminAgentConfig(),
-      readAuthorizedClassNamesForTeacherScope(),
+      readAuthorizedClassNamesForTeacherScope(
+        SHI_GAOJUN_TEACHER_SCOPE_KEY,
+        admin,
+      ),
     ]);
     const previousSeatLayoutsByClass = normalizeSeatLayoutsByClassFromConfig(previous);
     const rawPlans = sanitizeAdminClassroomCoursePlansPayload(req.body?.teacherCoursePlans);
+    const requestedCourseIds = Array.from(
+      new Set(
+        rawPlans
+          .map((lesson) => sanitizeId(lesson?.courseId, ""))
+          .filter(Boolean),
+      ),
+    );
+    if (rawPlans.some((lesson) => !sanitizeId(lesson?.courseId, ""))) {
+      res.status(400).json({ error: "每个课时都必须绑定一门课程。" });
+      return;
+    }
+    const teachingCourses = requestedCourseIds.length > 0
+      ? await TeachingCourse.find(
+          { _id: { $in: requestedCourseIds } },
+          { ownerTeacherId: 1, classNames: 1 },
+        ).lean()
+      : [];
+    const teachingCourseById = new Map(
+      teachingCourses.map((course) => [String(course?._id || ""), course]),
+    );
+    if (teachingCourseById.size !== requestedCourseIds.length) {
+      res.status(400).json({ error: "课时绑定的课程不存在或已被删除。" });
+      return;
+    }
+    const currentAdminId = sanitizeId(admin?._id, "");
+    const isPlatformAdmin =
+      normalizeFinalTestUsernameKey(admin?.username) ===
+      TERMINAL_ADMIN_USERNAME_KEY;
+    const unauthorizedCourse = teachingCourses.find(
+      (course) =>
+        !isPlatformAdmin && String(course?.ownerTeacherId || "") !== currentAdminId,
+    );
+    if (unauthorizedCourse) {
+      res.status(403).json({ error: "不能修改其他教师绑定课程下的课时。" });
+      return;
+    }
+    const courseClassMismatch = rawPlans.find((lesson) => {
+      const course = teachingCourseById.get(String(lesson?.courseId || ""));
+      const lessonClassName = resolveClassroomLessonClassName(lesson);
+      const courseClassNames = Array.isArray(course?.classNames)
+        ? course.classNames.map(sanitizeClassroomUserClassName).filter(Boolean)
+        : [];
+      return !courseClassNames.includes(lessonClassName);
+    });
+    if (courseClassMismatch) {
+      res.status(400).json({
+        error: `课时“${sanitizeText(courseClassMismatch.courseName, "未命名课时", 80)}”选择的班级不属于当前课程。`,
+      });
+      return;
+    }
     const authorizedClassNameSet = new Set(authorizedClassNames);
     const unauthorizedLesson = rawPlans.find(
       (lesson) => !authorizedClassNameSet.has(resolveClassroomLessonClassName(lesson)),

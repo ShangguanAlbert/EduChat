@@ -6,6 +6,12 @@ async function readJson(resp) {
   }
 }
 
+function createApiError(message, status = 0) {
+  const error = new Error(message);
+  error.status = Number(status) || 0;
+  return error;
+}
+
 function authHeader(adminToken, extra = {}) {
   const token = String(adminToken || "").trim();
   return {
@@ -67,7 +73,7 @@ async function request(path, adminToken, options = {}) {
   if (!resp.ok) {
     const message =
       data?.error || data?.message || `请求失败（${resp.status}）`;
-    throw new Error(message);
+    throw createApiError(message, resp.status);
   }
   return data;
 }
@@ -80,6 +86,21 @@ export function fetchAdminMe(adminToken) {
   return request("/api/auth/admin/me", adminToken);
 }
 
+export function updateAdminPersonalProfile(adminToken, payload = {}) {
+  return request("/api/auth/admin/me", adminToken, {
+    method: "PATCH",
+    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+  });
+}
+
+export function createAdminTeachingCourseClass(adminToken, courseId, className) {
+  const safeCourseId = String(courseId || "").trim();
+  return request(`/api/auth/admin/teaching-courses/${encodeURIComponent(safeCourseId)}/classes`, adminToken, {
+    method: "POST",
+    body: JSON.stringify({ className: String(className || "").trim() }),
+  });
+}
+
 export function fetchAdminUserDirectory(adminToken) {
   return request("/api/auth/admin/user-directory", adminToken);
 }
@@ -89,6 +110,60 @@ export function createAdminUserDirectoryUser(adminToken, payload = {}) {
     method: "POST",
     body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
   });
+}
+
+export async function downloadAdminStudentImportTemplate(
+  adminToken,
+  teacherUserId = "",
+) {
+  const safeTeacherUserId = String(teacherUserId || "").trim();
+  const query = safeTeacherUserId
+    ? `?teacherUserId=${encodeURIComponent(safeTeacherUserId)}`
+    : "";
+  const resp = await fetch(
+    `/api/auth/admin/user-directory/student-import-template${query}`,
+    { headers: authHeader(adminToken) },
+  );
+  if (!resp.ok) {
+    const data = await readJson(resp);
+    throw createApiError(
+      data?.error || `下载模板失败（${resp.status}）`,
+      resp.status,
+    );
+  }
+  return {
+    blob: await resp.blob(),
+    filename:
+      readContentDispositionFilename(resp.headers.get("Content-Disposition")) ||
+      "学生账号批量导入模板.xlsx",
+  };
+}
+
+export async function importAdminStudentAccounts(
+  adminToken,
+  file,
+  teacherUserId = "",
+) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const safeTeacherUserId = String(teacherUserId || "").trim();
+  if (safeTeacherUserId) formData.append("teacherUserId", safeTeacherUserId);
+  const resp = await fetch(
+    "/api/auth/admin/user-directory/student-import",
+    {
+      method: "POST",
+      headers: authHeader(adminToken),
+      body: formData,
+    },
+  );
+  const data = await readJson(resp);
+  if (!resp.ok) {
+    throw createApiError(
+      data?.error || `批量导入失败（${resp.status}）`,
+      resp.status,
+    );
+  }
+  return data;
 }
 
 export function createAdminUserDirectoryClassCategory(
@@ -378,6 +453,53 @@ export function updateAdminCollaborationCourseMemoryConfig(
       method: "PATCH",
       body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
     },
+  );
+}
+
+export function fetchAdminTeachingCourses(adminToken) {
+  return request("/api/auth/admin/teaching-courses", adminToken);
+}
+
+export function fetchAdminTeachingCourseClassRoster(
+  adminToken,
+  courseId,
+  className,
+) {
+  const params = new URLSearchParams({
+    courseId: String(courseId || "").trim(),
+    className: String(className || "").trim(),
+  });
+  return request(
+    `/api/auth/admin/teaching-course-class-roster?${params.toString()}`,
+    adminToken,
+  );
+}
+
+export function createAdminTeachingCourse(adminToken, payload = {}) {
+  return request("/api/auth/admin/teaching-courses", adminToken, {
+    method: "POST",
+    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+  });
+}
+
+export function updateAdminTeachingCourse(adminToken, courseId, payload = {}) {
+  const safeCourseId = String(courseId || "").trim();
+  return request(
+    `/api/auth/admin/teaching-courses/${encodeURIComponent(safeCourseId)}`,
+    adminToken,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+    },
+  );
+}
+
+export function deleteAdminTeachingCourse(adminToken, courseId) {
+  const safeCourseId = String(courseId || "").trim();
+  return request(
+    `/api/auth/admin/teaching-courses/${encodeURIComponent(safeCourseId)}`,
+    adminToken,
+    { method: "DELETE" },
   );
 }
 

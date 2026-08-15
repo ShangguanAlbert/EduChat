@@ -11,6 +11,5 @@ export {
   verifyPassword,
   normalizeUsername,
   validatePassword,
-  ensureFixedAdminAccounts,
-  ensureFixedStudentAccounts,
+  ensurePlatformAdminAccount,
 } from "./core-runtime.js";
