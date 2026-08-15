@@ -28,9 +28,12 @@ test("final test stylesheet keeps the UI square", () => {
   assert.match(finalTestCssSource, /border-radius:\s*0\s*!important;/);
 });
 
-test("teacher home exposes a final test sidebar entry and editor panel", () => {
-  assert.match(teacherHomePageSource, /key:\s*"final-test"/);
-  assert.match(teacherHomePageSource, /label:\s*"期末测试"/);
+test("teacher home keeps the final test editor while hiding its sidebar entry", () => {
+  assert.doesNotMatch(
+    teacherHomePageSource,
+    /\{\s*key:\s*"final-test",\s*label:\s*"期末测试"/,
+  );
+  assert.match(teacherHomePageSource, /activePanel\s*===\s*"final-test"/);
   assert.match(teacherHomePageSource, /saveAdminFinalTestConfig/);
   assert.match(teacherHomePageSource, /添加任务/);
 });

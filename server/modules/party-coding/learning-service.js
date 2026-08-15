@@ -1,11 +1,36 @@
 import {
+  getPartyCollaborationMemoryCandidateModel,
   getPartyLearningEventModel,
+  getPartyMemoryUseModel,
   getPartyPaiaInterventionModel,
   getPartyWebWorkspaceModel,
 } from "./model.js";
+import {
+  normalizePublicCollaborationIntervention,
+} from "./collaboration-agent.js";
+import {
+  recordHumanValidatedCollaborationMemory,
+} from "./collaboration-memory.js";
+import {
+  linkLearningEventToRecentMemoryUses,
+  recordMemoryUseFeedback,
+} from "./memory-usage.js";
+import { GroupChatAiTask } from "../../models/group-chat-ai-task.js";
+import {
+  getGroupChatAiRedisClient,
+  getGroupChatAiRedisPrefix,
+} from "../../runtime/group-chat-ai-runtime.js";
+import {
+  enqueueGroupChatAiTaskId,
+  releasePartyParticipationAnalysisReservation,
+  reservePartyParticipationAnalysis,
+} from "../../runtime/group-chat-ai-redis.js";
+import {
+  PARTICIPATION_ANALYSIS_SCHEDULE_INTERVAL_MS,
+  buildParticipationAnalysisTriggerMessageId,
+} from "./participation-analysis.js";
 
 const ANALYSIS_WINDOW_MS = 5 * 60 * 1000;
-const INTERVENTION_COOLDOWN_MS = 3 * 60 * 1000;
 const AGREEMENT_PATTERN = /^(可以|行|好|好的|同意|没问题|就这样|可以的|嗯|ok|okay)[。！!，,\s]*$/i;
 const REASON_PATTERN = /(因为|原因|所以|考虑|如果|依据|我觉得|我认为|这样做|优点|缺点)/;
 
@@ -115,6 +140,10 @@ function findAiAnswerAdoption(events) {
   };
 }
 
+export function normalizePaiaIntervention(doc) {
+  return normalizePublicCollaborationIntervention(doc);
+}
+
 export function detectPaiaIntervention(rawEvents, context = {}, now = Date.now()) {
   const events = (Array.isArray(rawEvents) ? rawEvents : [])
     .filter((event) => now - eventTime(event) <= ANALYSIS_WINDOW_MS)
@@ -132,22 +161,8 @@ export function createPartyLearningService(deps) {
   const Workspace = getPartyWebWorkspaceModel(mongoose);
   const LearningEvent = getPartyLearningEventModel(mongoose);
   const Intervention = getPartyPaiaInterventionModel(mongoose);
-
-  function normalizeIntervention(doc) {
-    if (!doc) return null;
-    return {
-      id: String(doc?._id || ""),
-      triggerType: safeText(doc.triggerType, 80),
-      evidenceSummary: safeText(doc.evidenceSummary, 500),
-      prompt: safeText(doc.prompt, 800),
-      targetUserId: safeText(doc.targetUserId, 100),
-      feedback: safeText(doc.feedback, 20),
-      feedbackNote: safeText(doc.feedbackNote, 500),
-      feedbackByUserId: safeText(doc.feedbackByUserId, 100),
-      feedbackAt: doc.feedbackAt ? new Date(doc.feedbackAt).toISOString() : "",
-      createdAt: doc.createdAt ? new Date(doc.createdAt).toISOString() : "",
-    };
-  }
+  const MemoryUse = getPartyMemoryUseModel(mongoose);
+  const CollaborationMemoryCandidate = getPartyCollaborationMemoryCandidateModel(mongoose);
 
   async function readWorkspace(roomId) {
     return Workspace.findOne({ roomId: safeText(roomId, 100) }).lean();
@@ -165,6 +180,77 @@ export function createPartyLearningService(deps) {
     ).lean();
   }
 
+  async function enqueueParticipationAnalysis({
+    roomId,
+    triggerMessageId,
+    requestedByUserId,
+    requestedByUserName,
+  }) {
+    const safeRoomId = safeText(roomId, 100);
+    const safeTriggerMessageId = safeText(triggerMessageId, 100);
+    if (!safeRoomId || !safeTriggerMessageId) return null;
+    const monitoringState = await readMonitoringState(safeRoomId);
+    if (!monitoringState?.paiaMonitoringStartedAt) return null;
+
+    const redis = getGroupChatAiRedisClient(deps.env || process.env);
+    if (!redis) return null;
+    const redisPrefix = getGroupChatAiRedisPrefix(deps.env || process.env);
+    const taskId = String(new mongoose.Types.ObjectId());
+    const reserved = await reservePartyParticipationAnalysis(redis, {
+      prefix: redisPrefix,
+      roomId: safeRoomId,
+      taskId,
+      ttlMs: PARTICIPATION_ANALYSIS_SCHEDULE_INTERVAL_MS,
+    });
+    if (!reserved) return null;
+
+    try {
+      const task = await GroupChatAiTask.create({
+        _id: taskId,
+        taskKind: "participation_analysis",
+        roomId: safeRoomId,
+        triggerMessageId: buildParticipationAnalysisTriggerMessageId(
+          safeTriggerMessageId,
+        ),
+        placeholderMessageId: "",
+        requestedByUserId: safeText(requestedByUserId, 100) || "paia-monitor",
+        requestedByUserName: safeText(requestedByUserName, 60),
+        agentId: "A",
+        provider: "aliyun",
+        model: "qwen3.7-plus",
+        status: "pending",
+        contextSnapshot: {
+          monitoringStartedAt: new Date(
+            monitoringState.paiaMonitoringStartedAt,
+          ).toISOString(),
+          sourceTriggerMessageId: safeTriggerMessageId,
+        },
+        queueJobId: taskId,
+        attemptCount: 0,
+        lastQueuedAt: new Date(),
+      });
+      await enqueueGroupChatAiTaskId(redis, {
+        prefix: redisPrefix,
+        taskId,
+      });
+      return task;
+    } catch (error) {
+      await GroupChatAiTask.findByIdAndUpdate(taskId, {
+        $set: {
+          status: "failed",
+          finishedAt: new Date(),
+          lastError: error?.message || "参与度分析任务入队失败。",
+        },
+      }).catch(() => {});
+      await releasePartyParticipationAnalysisReservation(redis, {
+        prefix: redisPrefix,
+        roomId: safeRoomId,
+        taskId,
+      }).catch(() => {});
+      throw error;
+    }
+  }
+
   function resolveRole(workspace, userId) {
     const safeUserId = safeText(userId, 100);
     if (safeUserId && safeUserId === safeText(workspace?.driverUserId, 100)) return "driver";
@@ -180,7 +266,7 @@ export function createPartyLearningService(deps) {
       workspace ? Promise.resolve(workspace) : readWorkspace(safeRoomId),
     ]);
     if (!monitoringState) return null;
-    return LearningEvent.create({
+    const event = await LearningEvent.create({
       roomId: safeRoomId,
       taskId: `${safeRoomId}:${Math.max(1, Number(currentWorkspace?.taskRevision || 1))}`,
       taskStage: safeText(currentWorkspace?.taskStage, 30) || "understand",
@@ -191,92 +277,11 @@ export function createPartyLearningService(deps) {
       metadata,
       occurredAt: new Date(),
     });
-  }
-
-  async function maybeIntervene({ roomId, memberNames = {} }) {
-    const safeRoomId = safeText(roomId, 100);
-    if (!safeRoomId) return null;
-    const monitoringState = await readMonitoringState(safeRoomId);
-    if (!monitoringState) return null;
-    const monitoringStartedAt = monitoringState.paiaMonitoringStartedAt
-      ? new Date(monitoringState.paiaMonitoringStartedAt)
-      : new Date();
-    const analysisStartedAt = new Date(Math.max(
-      Date.now() - ANALYSIS_WINDOW_MS,
-      monitoringStartedAt.getTime(),
-    ));
-    const [workspace, latestIntervention, recentEvents] = await Promise.all([
-      readWorkspace(safeRoomId),
-      Intervention.findOne({
-        roomId: safeRoomId,
-        createdAt: { $gte: monitoringStartedAt },
-      }).sort({ createdAt: -1 }).lean(),
-      LearningEvent.find({
-        roomId: safeRoomId,
-        occurredAt: { $gte: analysisStartedAt },
-      }).sort({ occurredAt: 1 }).limit(120).lean(),
-    ]);
-    if (!workspace) return null;
-    if (latestIntervention && Date.now() - new Date(latestIntervention.createdAt).getTime() < INTERVENTION_COOLDOWN_MS) {
-      return null;
-    }
-    const decision = detectPaiaIntervention(recentEvents, {
-      driverUserId: safeText(workspace.driverUserId, 100),
-      navigatorUserId: safeText(workspace.navigatorUserId, 100),
-      memberNames,
-    });
-    if (!decision) return null;
-    if (latestIntervention?.feedback === "incorrect"
-      && latestIntervention?.triggerType === decision.triggerType
-      && Date.now() - new Date(latestIntervention.createdAt).getTime() < 15 * 60 * 1000) {
-      return null;
-    }
-    if (latestIntervention?.feedback === "partial"
-      && latestIntervention?.triggerType === decision.triggerType
-      && Date.now() - new Date(latestIntervention.createdAt).getTime() < 6 * 60 * 1000) {
-      return null;
-    }
-
-    const intervention = await Intervention.create({
-      roomId: safeRoomId,
-      taskId: `${safeRoomId}:${Math.max(1, Number(workspace.taskRevision || 1))}`,
-      taskStage: workspace.taskStage,
-      ...decision,
-    });
-    await recordEvent({
-      roomId: safeRoomId,
-      userName: "琳琳",
-      eventType: "paia_intervention",
-      metadata: {
-        interventionId: String(intervention._id),
-        triggerType: decision.triggerType,
-        evidenceSummary: decision.evidenceSummary,
-      },
-      workspace,
-    });
-
-    if (deps.GroupChatMessage && deps.normalizeGroupChatMessageDoc && deps.broadcastGroupChatMessageCreated) {
-      const messageDoc = await deps.GroupChatMessage.create({
-        roomId: safeRoomId,
-        type: "text",
-        senderKind: "ai",
-        senderUserId: "",
-        senderName: "琳琳",
-        content: `${decision.prompt}\n\n判断依据：${decision.evidenceSummary}`,
-        mentionNames: [],
-        reactions: [],
-      });
-      const message = deps.normalizeGroupChatMessageDoc(messageDoc);
-      if (message) deps.broadcastGroupChatMessageCreated(safeRoomId, message);
-    }
-
-    const normalized = normalizeIntervention(intervention);
-    deps.broadcastGroupChatWsPayload?.(safeRoomId, {
-      type: "coding_collab_intervention",
-      roomId: safeRoomId,
-      intervention: normalized,
-    });
-    return normalized;
+    await linkLearningEventToRecentMemoryUses({
+      MemoryUse,
+      event,
+    }).catch(() => {});
+    return event;
   }
 
   async function getLatestIntervention(roomId) {
@@ -292,7 +297,7 @@ export function createPartyLearningService(deps) {
       taskId,
       createdAt: { $gte: monitoringState.paiaMonitoringStartedAt || new Date() },
     }).sort({ createdAt: -1 }).lean();
-    return normalizeIntervention(doc);
+    return normalizePaiaIntervention(doc);
   }
 
   async function startTask({ roomId, userId, userName, taskText }) {
@@ -348,31 +353,70 @@ export function createPartyLearningService(deps) {
   async function submitFeedback({ roomId, interventionId, userId, feedback, note = "" }) {
     const safeFeedback = safeText(feedback, 20);
     if (!new Set(["correct", "partial", "incorrect"]).has(safeFeedback)) return null;
-    const updated = await Intervention.findOneAndUpdate(
-      { _id: interventionId, roomId: safeText(roomId, 100) },
+    const safeRoomId = safeText(roomId, 100);
+    const safeUserId = safeText(userId, 100);
+    const safeNote = safeText(note, 500);
+    const feedbackAt = new Date();
+    const interventionFilter = { _id: interventionId, roomId: safeRoomId };
+    let isNewFeedback = true;
+    let updated = await Intervention.findOneAndUpdate(
+      {
+        ...interventionFilter,
+        feedback: { $in: ["", null] },
+      },
       {
         $set: {
           feedback: safeFeedback,
-          feedbackNote: safeText(note, 500),
-          feedbackByUserId: safeText(userId, 100),
-          feedbackAt: new Date(),
+          feedbackNote: safeNote,
+          feedbackByUserId: safeUserId,
+          feedbackAt,
         },
       },
       { new: true },
     ).lean();
-    if (!updated) return null;
-    await recordEvent({
-      roomId,
-      userId,
-      eventType: "paia_feedback",
-      metadata: { interventionId: String(updated._id), feedback: safeFeedback, note: safeText(note, 500) },
+    if (!updated) {
+      const existing = await Intervention.findOne(interventionFilter).lean();
+      const isIdempotentRetry = existing
+        && safeText(existing.feedback, 20) === safeFeedback
+        && safeText(existing.feedbackNote, 500) === safeNote
+        && safeText(existing.feedbackByUserId, 100) === safeUserId;
+      if (!isIdempotentRetry) return null;
+      updated = existing;
+      isNewFeedback = false;
+    }
+    if (isNewFeedback) {
+      await recordEvent({
+        roomId: safeRoomId,
+        userId: safeUserId,
+        eventType: "paia_feedback",
+        metadata: {
+          interventionId: String(updated._id),
+          feedback: safeFeedback,
+          note: safeNote,
+        },
+      });
+    }
+    await recordHumanValidatedCollaborationMemory({
+      Candidate: CollaborationMemoryCandidate,
+      intervention: updated,
+      feedback: safeFeedback,
+      userId: safeUserId,
+      note: safeNote,
+      now: updated.feedbackAt || feedbackAt,
     });
-    return normalizeIntervention(updated);
+    await recordMemoryUseFeedback({
+      MemoryUse,
+      interventionId: updated._id,
+      feedback: safeFeedback,
+      userId: safeUserId,
+      feedbackAt: updated.feedbackAt || feedbackAt,
+    }).catch(() => {});
+    return normalizePaiaIntervention(updated);
   }
 
   return {
+    enqueueParticipationAnalysis,
     getLatestIntervention,
-    maybeIntervene,
     recordEvent,
     startTask,
     submitFeedback,

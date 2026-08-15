@@ -6,16 +6,6 @@ const TASKS = [
     command: "npm",
     args: ["run", "test:chat-state-preservation"],
   },
-  {
-    name: "session-notes",
-    command: "npm",
-    args: ["run", "test:session-notes"],
-  },
-  {
-    name: "session-notes:integration",
-    command: "npm",
-    args: ["run", "test:session-notes:integration"],
-  },
 ];
 
 function runTask(task) {

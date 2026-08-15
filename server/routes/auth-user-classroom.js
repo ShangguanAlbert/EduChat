@@ -19,6 +19,7 @@ import {
   resolveFinalTestVariant,
 } from "../../shared/finalTestState.js";
 import { sanitizeGroupChatAiConfig } from "../services/group-chat-ai-config.js";
+import { createAuthRateLimiter } from "../modules/auth/rate-limit.js";
 
 export function registerAuthUserClassroomRoutes(app, deps) {
   function readSignedUrlExpiryText(url) {
@@ -53,10 +54,19 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     ALIYUN_SEARCH_STRATEGIES,
     DEFAULT_TEACHER_SCOPE_KEY,
     SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
+    SHI_GAOJUN_TEACHER_SCOPE_KEY,
     YANG_JUNFENG_TEACHER_SCOPE_KEY,
     getTeacherScopeLabel,
     isDefaultTeacherScopeKey,
     sanitizeTeacherScopeKey,
+    PAIR_PROGRAMMING_INVITE_CODE,
+    TEACHER_REGISTRATION_INVITE_CODE,
+    SELF_REGISTERED_TEACHER_ACCOUNT_TAG,
+    ACCOUNT_STATUS_ACTIVE,
+    ACCOUNT_STATUS_PENDING_BINDING,
+    ACCOUNT_STATUS_DISABLED,
+    isPairProgrammingInviteCodeValid,
+    isPairProgrammingTeacherScope,
     FIXED_STUDENT_ACCOUNTS,
     FIXED_STUDENT_ACCOUNT_TAG,
     FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
@@ -65,7 +75,6 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS,
     CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS,
     CHAT_PREPARED_ATTACHMENT_MAX_REFS,
-    MAX_IMAGE_GENERATION_INPUT_FILES,
     MAX_PARSED_CHARS_PER_FILE,
     ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS,
     EXCEL_PREVIEW_MAX_ROWS,
@@ -135,8 +144,6 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     FIXED_STUDENT_USERNAME_KEYS,
     RESERVED_ADMIN_USERNAME_KEYS,
     CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE,
-    IMAGE_GENERATION_INPUT_OSS_SCOPE,
-    IMAGE_GENERATION_OUTPUT_OSS_SCOPE,
     ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES,
     ALIYUN_DASHSCOPE_PDF_RENDER_DPI,
     ALIYUN_DASHSCOPE_PDF_RENDER_TIMEOUT_MS,
@@ -249,8 +256,8 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     normalizeUsername,
     toUsernameKey,
     isReservedAdminUsernameKey,
-    isFixedAdminUser,
-    isFixedStudentUser,
+    isTeacherAdminUser,
+    readAccountStatus,
     resolveLoginLockedTeacherScopeKey,
     validatePassword,
     hashPassword,
@@ -271,6 +278,17 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   app.use(cors());
   app.use(express.json({ limit: "2mb" }));
 
+  const loginRateLimiter = createAuthRateLimiter({
+    windowMs: 10 * 60 * 1000,
+    maxAttempts: 20,
+    errorMessage: "登录尝试次数过多，请 10 分钟后再试。",
+  });
+  const registrationRateLimiter = createAuthRateLimiter({
+    windowMs: 30 * 60 * 1000,
+    maxAttempts: 8,
+    errorMessage: "注册尝试次数过多，请 30 分钟后再试。",
+  });
+
   const CLASSROOM_TARGET_CLASS_NAMES = Object.freeze(["810班", "811班"]);
   const CLASSROOM_DEFAULT_TARGET_CLASS_NAME = CLASSROOM_TARGET_CLASS_NAMES[0];
 
@@ -288,14 +306,37 @@ export function registerAuthUserClassroomRoutes(app, deps) {
 
   function sanitizeClassroomTargetClassName(value, fallback = CLASSROOM_DEFAULT_TARGET_CLASS_NAME) {
     const className = sanitizeText(value, "", 40).replace(/\s+/g, "");
-    if (CLASSROOM_TARGET_CLASS_NAMES.includes(className)) return className;
+    if (className) return className;
     return sanitizeText(fallback, CLASSROOM_DEFAULT_TARGET_CLASS_NAME, 40).replace(/\s+/g, "");
   }
 
   function sanitizeClassroomUserClassName(value) {
-    const className = sanitizeText(value, "", 40).replace(/\s+/g, "");
-    if (!className) return "";
-    return CLASSROOM_TARGET_CLASS_NAMES.includes(className) ? className : "";
+    return sanitizeText(value, "", 40).replace(/\s+/g, "");
+  }
+
+  async function readAuthorizedClassNamesForTeacherScope(
+    teacherScopeKey = SHI_GAOJUN_TEACHER_SCOPE_KEY,
+  ) {
+    const users = await AuthUser.find(
+      {
+        role: "user",
+        lockedTeacherScopeKey: sanitizeTeacherScopeKey(teacherScopeKey),
+      },
+      { profile: 1 },
+    ).lean();
+    return Array.from(
+      new Set(
+        (Array.isArray(users) ? users : [])
+          .map((user) =>
+            sanitizeClassroomUserClassName(
+              sanitizeUserProfile(user?.profile).className,
+            ),
+          )
+          .filter(Boolean),
+      ),
+    ).sort((a, b) =>
+      a.localeCompare(b, "zh-CN", { numeric: true, sensitivity: "base" }),
+    );
   }
 
   function resolveClassroomLessonClassName(lesson) {
@@ -670,12 +711,19 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   });
 
   app.get("/api/auth/status", async (_req, res) => {
-    const totalUsers = await AuthUser.countDocuments({ role: "user" });
+    const [totalUsers, totalTeachers] = await Promise.all([
+      AuthUser.countDocuments({ role: "user" }),
+      AuthUser.countDocuments({
+        role: "admin",
+        accountStatus: { $ne: ACCOUNT_STATUS_DISABLED },
+      }),
+    ]);
 
     res.json({
       ok: true,
       hasAnyUser: totalUsers > 0,
-      hasAdmin: FIXED_ADMIN_ACCOUNTS.length > 0,
+      hasAdmin: totalTeachers > 0 || FIXED_ADMIN_ACCOUNTS.length > 0,
+      teacherRegistrationEnabled: !!TEACHER_REGISTRATION_INVITE_CODE,
       adminUsernames: FIXED_ADMIN_ACCOUNTS.map((item) => item.username),
       preloadedStudentCount: FIXED_STUDENT_ACCOUNTS.length,
       preloadedStudentTeacherScopeKey: FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
@@ -2038,92 +2086,129 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     res.status(404).json({ error: "附件缺少可下载地址。" });
   });
 
-  app.post("/api/auth/register", async (req, res) => {
+  app.post("/api/auth/register", registrationRateLimiter, async (req, res) => {
+    const registrationRole = String(req.body?.registrationRole || "student")
+      .trim()
+      .toLowerCase();
+    if (!new Set(["student", "teacher"]).has(registrationRole)) {
+      res.status(400).json({ error: "请选择学生或教师身份。" });
+      return;
+    }
+
+    const username = normalizeUsername(req.body?.username);
     const password = String(req.body?.password || "");
-    const usernameInput = String(req.body?.username || "");
-    const profile = sanitizeUserProfile(req.body?.profile);
+    if (!username) {
+      res.status(400).json({ error: "请输入 2–64 位且不含空格的用户名。" });
+      return;
+    }
     const passwordError = validatePassword(password);
     if (passwordError) {
       res.status(400).json({ error: passwordError });
       return;
     }
 
-    const username = normalizeUsername(usernameInput);
-
-    if (!username) {
-      res.status(400).json({ error: "请输入用户名。" });
-      return;
-    }
-
-    const profileErrors = validateUserProfile(profile);
-    if (Object.keys(profileErrors).length > 0) {
-      res.status(400).json({ error: "请完整填写正确的学生信息。", errors: profileErrors });
-      return;
-    }
-
     const usernameKey = toUsernameKey(username);
     if (isReservedAdminUsernameKey(usernameKey)) {
-      res.status(400).json({ error: "该用户名为管理员保留账号，请使用其他用户名。" });
+      res.status(400).json({ error: "该用户名为系统保留账号，请更换后重试。" });
       return;
     }
 
-    const existing = await AuthUser.findOne({ usernameKey }).lean();
-    if (existing) {
-      res.status(409).json({ error: "该账号已存在，请更换用户名。" });
-      return;
+    const profile = sanitizeUserProfile(req.body?.profile);
+    let role = "user";
+    let accountTag = "self_registration";
+    let accountStatus = ACCOUNT_STATUS_PENDING_BINDING;
+    let lockedTeacherScopeKey = "";
+
+    if (registrationRole === "teacher") {
+      if (!TEACHER_REGISTRATION_INVITE_CODE) {
+        res.status(503).json({ error: "教师注册尚未开放，请联系系统管理员。" });
+        return;
+      }
+      if (
+        !isPairProgrammingInviteCodeValid(
+          req.body?.teacherInviteCode,
+          TEACHER_REGISTRATION_INVITE_CODE,
+        )
+      ) {
+        res.status(403).json({ error: "教师邀请码不正确。" });
+        return;
+      }
+      if (!profile.name || !/^[\u4e00-\u9fa5]+$/.test(profile.name)) {
+        res.status(400).json({ error: "请填写真实的中文教师姓名。" });
+        return;
+      }
+      role = "admin";
+      accountTag = SELF_REGISTERED_TEACHER_ACCOUNT_TAG;
+      accountStatus = ACCOUNT_STATUS_ACTIVE;
+      lockedTeacherScopeKey = SHI_GAOJUN_TEACHER_SCOPE_KEY;
+    } else {
+      const profileErrors = validateUserProfile(profile);
+      if (Object.keys(profileErrors).length > 0) {
+        res.status(400).json({
+          error: "请完整填写正确的学生信息。",
+          errors: profileErrors,
+        });
+        return;
+      }
+      if (
+        !isPairProgrammingInviteCodeValid(
+          req.body?.classInviteCode,
+          PAIR_PROGRAMMING_INVITE_CODE,
+        )
+      ) {
+        res.status(403).json({ error: "结对编程课堂邀请码不正确。" });
+        return;
+      }
     }
 
-    const passwordHash = await hashPassword(password);
-    const user = await AuthUser.create({
-      username,
-      usernameKey,
-      role: "user",
-      passwordHash,
-      passwordPlain: password,
-      profile,
-    });
+    try {
+      const existing = await AuthUser.findOne({ usernameKey })
+        .select({ _id: 1 })
+        .lean();
+      if (existing) {
+        res.status(409).json({ error: "该账号已存在，请更换用户名。" });
+        return;
+      }
 
-    res.status(201).json({
-      ok: true,
-      user: toPublicUser(user),
-    });
+      const passwordHash = await hashPassword(password);
+      const user = await AuthUser.create({
+        username,
+        usernameKey,
+        role,
+        passwordHash,
+        accountTag,
+        accountStatus,
+        lockedTeacherScopeKey,
+        profile,
+      });
+
+      res.status(201).json({
+        ok: true,
+        registrationRole,
+        accountStatus,
+        requiresTeacherBinding:
+          accountStatus === ACCOUNT_STATUS_PENDING_BINDING,
+        user: toPublicUser(user),
+      });
+    } catch (error) {
+      if (Number(error?.code) === 11000) {
+        res.status(409).json({ error: "该账号已存在，请更换用户名。" });
+        return;
+      }
+      res.status(500).json({ error: error?.message || "注册失败，请稍后重试。" });
+    }
   });
 
-  app.get("/api/auth/login/teacher-scope-lock", async (req, res) => {
-    const username = normalizeUsername(req.query?.username);
-    if (!username) {
-      res.json({
-        ok: true,
-        lockedTeacherScopeKey: "",
-        teacherScopeLabel: "",
-      });
-      return;
-    }
-
-    const user = await AuthUser.findOne({ usernameKey: toUsernameKey(username) }).lean();
-    if (!user) {
-      res.json({
-        ok: true,
-        lockedTeacherScopeKey: "",
-        teacherScopeLabel: "",
-      });
-      return;
-    }
-
-    const lockedTeacherScopeKey = resolveLoginLockedTeacherScopeKey(user);
-    res.json({
-      ok: true,
-      lockedTeacherScopeKey,
-      teacherScopeLabel: lockedTeacherScopeKey ? getTeacherScopeLabel(lockedTeacherScopeKey) : "",
-    });
-  });
-
-  app.post("/api/auth/login", async (req, res) => {
+  app.post("/api/auth/login", loginRateLimiter, async (req, res) => {
     const username = normalizeUsername(req.body?.username);
     const password = String(req.body?.password || "");
     const teacherScopeKey = sanitizeTeacherScopeKey(req.body?.teacherScopeKey);
     if (!username || !password) {
       res.status(400).json({ error: "请输入账号和密码。" });
+      return;
+    }
+    if (teacherScopeKey !== SHI_GAOJUN_TEACHER_SCOPE_KEY) {
+      res.status(400).json({ error: "当前入口仅支持施高俊老师的结对编程课堂。" });
       return;
     }
 
@@ -2135,8 +2220,40 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       return;
     }
 
+    const accountStatus = readAccountStatus(user);
+    if (accountStatus === ACCOUNT_STATUS_PENDING_BINDING) {
+      res.status(403).json({
+        error: "账号已注册，正在等待施高俊老师确认并绑定学生身份。",
+      });
+      return;
+    }
+    if (accountStatus === ACCOUNT_STATUS_DISABLED) {
+      res.status(403).json({ error: "该账号已停用，请联系指导教师。" });
+      return;
+    }
+
     const lockedTeacherScopeKey = resolveLoginLockedTeacherScopeKey(user);
-    const effectiveTeacherScopeKey = lockedTeacherScopeKey || teacherScopeKey;
+    if (
+      lockedTeacherScopeKey &&
+      lockedTeacherScopeKey !== SHI_GAOJUN_TEACHER_SCOPE_KEY
+    ) {
+      res.status(403).json({ error: "该账号不属于当前结对编程课堂。" });
+      return;
+    }
+    const effectiveTeacherScopeKey = SHI_GAOJUN_TEACHER_SCOPE_KEY;
+    const pairProgrammingAccess = isPairProgrammingTeacherScope(
+      effectiveTeacherScopeKey,
+    );
+    if (
+      pairProgrammingAccess &&
+      !isPairProgrammingInviteCodeValid(
+        req.body?.inviteCode,
+        PAIR_PROGRAMMING_INVITE_CODE,
+      )
+    ) {
+      res.status(403).json({ error: "结对编程邀请码不正确。" });
+      return;
+    }
 
     const token = signToken(
       {
@@ -2144,6 +2261,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
         role: user.role,
         scope: "chat",
         tkey: effectiveTeacherScopeKey,
+        pairProgrammingAccess,
       },
       AUTH_TOKEN_TTL_SECONDS,
     );
@@ -2158,84 +2276,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     });
   });
 
-  app.post("/api/auth/forgot/verify", async (req, res) => {
-    const username = normalizeUsername(req.body?.username);
-    if (!username) {
-      res.status(400).json({ error: "请输入账号。" });
-      return;
-    }
-
-    if (isReservedAdminUsernameKey(toUsernameKey(username))) {
-      res.json({
-        ok: true,
-        exists: false,
-        username: "",
-      });
-      return;
-    }
-
-    const user = await AuthUser.findOne({ usernameKey: toUsernameKey(username) }).lean();
-    if (isFixedStudentUser(user)) {
-      res.status(403).json({
-        error: "该学生账号为系统预置账号，不支持在此重置密码，请使用学号作为密码登录。",
-      });
-      return;
-    }
-
-    res.json({
-      ok: true,
-      exists: !!user,
-      username: user?.username || "",
-    });
-  });
-
-  app.post("/api/auth/forgot/reset", async (req, res) => {
-    const username = normalizeUsername(req.body?.username);
-    const newPassword = String(req.body?.newPassword || "");
-    const confirmPassword = String(req.body?.confirmPassword || "");
-
-    if (!username) {
-      res.status(400).json({ error: "请输入账号。" });
-      return;
-    }
-
-    if (isReservedAdminUsernameKey(toUsernameKey(username))) {
-      res.status(403).json({ error: "管理员账号为固定分配，不支持在此重置密码。" });
-      return;
-    }
-
-    const passwordError = validatePassword(newPassword);
-    if (passwordError) {
-      res.status(400).json({ error: passwordError });
-      return;
-    }
-
-    if (newPassword !== confirmPassword) {
-      res.status(400).json({ error: "两次输入的新密码不一致。" });
-      return;
-    }
-
-    const user = await AuthUser.findOne({ usernameKey: toUsernameKey(username) });
-    if (!user) {
-      res.status(404).json({ error: "未找到该账号。" });
-      return;
-    }
-
-    if (isFixedStudentUser(user)) {
-      res.status(403).json({
-        error: "该学生账号为系统预置账号，不支持在此重置密码，请使用学号作为密码登录。",
-      });
-      return;
-    }
-
-    user.passwordHash = await hashPassword(newPassword);
-    user.passwordPlain = newPassword;
-    await user.save();
-
-    res.json({ ok: true, message: "密码已重置。" });
-  });
-
-  app.post("/api/auth/admin/login", async (req, res) => {
+  app.post("/api/auth/admin/login", loginRateLimiter, async (req, res) => {
     const username = normalizeUsername(req.body?.username);
     const password = String(req.body?.password || "");
 
@@ -2251,7 +2292,9 @@ export function registerAuthUserClassroomRoutes(app, deps) {
 
     const user = await AuthUser.findOne({ usernameKey: toUsernameKey(username) });
     const valid = user ? await verifyPassword(password, user.passwordHash) : false;
-    const isAdmin = isFixedAdminUser(user);
+    const isAdmin =
+      isTeacherAdminUser(user) &&
+      readAccountStatus(user) === ACCOUNT_STATUS_ACTIVE;
 
     if (!valid || !isAdmin) {
       res.status(401).json({ error: "管理员账号或密码错误。" });
@@ -2274,9 +2317,14 @@ export function registerAuthUserClassroomRoutes(app, deps) {
     const admin = await authenticateAdminRequest(req, res);
     if (!admin) return;
 
-    const teacherScopeKey = sanitizeTeacherScopeKey(
-      req.body?.teacherScopeKey || SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
-    );
+    const isInviteRegisteredTeacher =
+      String(admin?.accountTag || "").trim() ===
+      SELF_REGISTERED_TEACHER_ACCOUNT_TAG;
+    const teacherScopeKey = isInviteRegisteredTeacher
+      ? SHI_GAOJUN_TEACHER_SCOPE_KEY
+      : sanitizeTeacherScopeKey(
+          req.body?.teacherScopeKey || SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
+        );
     const token = signToken(
       {
         uid: String(admin._id),
@@ -2632,7 +2680,10 @@ export function registerAuthUserClassroomRoutes(app, deps) {
   app.get("/api/auth/admin/classroom-plans", async (req, res) => {
     const admin = await authenticateAdminRequest(req, res);
     if (!admin) return;
-    const config = await readAdminAgentConfig();
+    const [config, authorizedClassNames] = await Promise.all([
+      readAdminAgentConfig(),
+      readAuthorizedClassNamesForTeacherScope(),
+    ]);
 
     res.json({
       ok: true,
@@ -2646,6 +2697,7 @@ export function registerAuthUserClassroomRoutes(app, deps) {
       shangguanClassTaskProductImprovementEnabled:
         !!config.shangguanClassTaskProductImprovementEnabled,
       teacherCoursePlans: config.teacherCoursePlans,
+      authorizedClassNames,
       classroomDisciplineConfig: config.classroomDisciplineConfig,
       seatLayoutsByClass: normalizeSeatLayoutsByClassFromConfig(config),
       finalTestConfig: normalizeFinalTestContentConfig(config.finalTestConfig),
@@ -3187,9 +3239,24 @@ export function registerAuthUserClassroomRoutes(app, deps) {
 
   app.put("/api/auth/admin/classroom-plans", async (req, res) => {
     if (!(await authenticateAdminRequest(req, res))) return;
-    const previous = await readAdminAgentConfig();
+    const [previous, authorizedClassNames] = await Promise.all([
+      readAdminAgentConfig(),
+      readAuthorizedClassNamesForTeacherScope(),
+    ]);
     const previousSeatLayoutsByClass = normalizeSeatLayoutsByClassFromConfig(previous);
     const rawPlans = sanitizeAdminClassroomCoursePlansPayload(req.body?.teacherCoursePlans);
+    const authorizedClassNameSet = new Set(authorizedClassNames);
+    const unauthorizedLesson = rawPlans.find(
+      (lesson) => !authorizedClassNameSet.has(resolveClassroomLessonClassName(lesson)),
+    );
+    if (unauthorizedLesson) {
+      res.status(400).json({
+        error: authorizedClassNames.length > 0
+          ? `课时“${sanitizeText(unauthorizedLesson.courseName, "未命名课时", 80)}”选择了未授权班级。`
+          : "当前教师尚未绑定任何班级，请先在“学生与账号”中绑定学生。",
+      });
+      return;
+    }
     const previousById = new Map(
       previous.teacherCoursePlans.map((item) => [String(item?.id || ""), item]),
     );

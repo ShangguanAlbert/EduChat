@@ -2,7 +2,6 @@ import {
   Copy,
   Download,
   Forward,
-  NotebookPen,
   RotateCcw,
   Sparkles,
   ThumbsDown,
@@ -242,7 +241,6 @@ const MessageList = forwardRef(function MessageList({
   onAssistantRegenerate,
   onAssistantForward,
   assistantForwardLabel = "转发到左侧对话",
-  onSaveNote,
   onAskSelection,
   onLatestChange,
   showAssistantActions = true,
@@ -482,7 +480,6 @@ const MessageList = forwardRef(function MessageList({
           onAssistantRegenerate={onAssistantRegenerate}
           onAssistantForward={onAssistantForward}
           assistantForwardLabel={assistantForwardLabel}
-          onSaveNote={onSaveNote}
           onReasoningToggle={prepareForReasoningToggle}
           promptMessageId={promptMap.get(m.id) || ""}
           showAssistantActions={showAssistantActions}
@@ -498,7 +495,6 @@ const MessageList = forwardRef(function MessageList({
       onAssistantRegenerate,
       onAssistantForward,
       assistantForwardLabel,
-      onSaveNote,
       prepareForReasoningToggle,
       promptMap,
       showAssistantActions,
@@ -954,7 +950,6 @@ const MessageItem = memo(function MessageItem({
   onAssistantRegenerate,
   onAssistantForward,
   assistantForwardLabel = "转发到左侧对话",
-  onSaveNote,
   onReasoningToggle,
   promptMessageId,
   showAssistantActions,
@@ -989,16 +984,11 @@ const MessageItem = memo(function MessageItem({
   const runtime = normalizeRuntimeSnapshot(m.runtime);
   const showAssistantActionRow =
     showAssistantActions && m.role === "assistant" && !m.streaming;
-  const showSaveNoteAction =
-    typeof onSaveNote === "function" &&
-    m.role === "assistant" &&
-    !m.streaming &&
-    !!contentMarkdown.trim();
   const showRuntimeDebug =
     m.role === "assistant" &&
     runtime?.usage &&
     Number.isFinite(runtime.usage.total_tokens);
-  const showMessageFooter = showAssistantActionRow || showSaveNoteAction || showRuntimeDebug;
+  const showMessageFooter = showAssistantActionRow || showRuntimeDebug;
   const openImagePreview = useCallback((image) => {
     const imageSrc = String(image?.src || "").trim();
     const isLoadingOriginal = Boolean(image?.isLoadingOriginal);
@@ -1231,22 +1221,6 @@ const MessageItem = memo(function MessageItem({
     });
   }
 
-  function readSelectedTextWithinCurrentMessage(event) {
-    if (typeof window === "undefined") return "";
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return "";
-    const messageNode = event?.currentTarget?.closest?.(".msg");
-    if (!messageNode) return "";
-    const anchorEl = getElementFromNode(selection.anchorNode);
-    const focusEl = getElementFromNode(selection.focusNode);
-    if (!anchorEl || !focusEl) return "";
-    if (!messageNode.contains(anchorEl) || !messageNode.contains(focusEl)) return "";
-    const anchorText = anchorEl.closest(".msg-text");
-    const focusText = focusEl.closest(".msg-text");
-    if (!anchorText || !focusText || anchorText !== focusText) return "";
-    return selection.toString().replace(/\s+/g, " ").trim();
-  }
-
   return (
     <>
       <div className={`msg ${m.role}`}>
@@ -1452,47 +1426,8 @@ const MessageItem = memo(function MessageItem({
                   </button>
                 ) : null}
 
-                {showSaveNoteAction ? (
-                  <button
-                    type="button"
-                    className="msg-action-btn"
-                    title="保存为笔记"
-                    aria-label="保存为笔记"
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={(event) =>
-                      onSaveNote?.(m, {
-                        selectedText: readSelectedTextWithinCurrentMessage(event),
-                        promptMessageId,
-                      })
-                    }
-                    disabled={isStreaming}
-                  >
-                    <NotebookPen size={16} />
-                  </button>
-                ) : null}
               </div>
             )}
-
-            {!showAssistantActionRow && showSaveNoteAction ? (
-              <div className="msg-actions">
-                <button
-                  type="button"
-                  className="msg-action-btn"
-                  title="保存为笔记"
-                  aria-label="保存为笔记"
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={(event) =>
-                    onSaveNote?.(m, {
-                      selectedText: readSelectedTextWithinCurrentMessage(event),
-                      promptMessageId,
-                    })
-                  }
-                  disabled={isStreaming}
-                >
-                  <NotebookPen size={16} />
-                </button>
-              </div>
-            ) : null}
 
             {showRuntimeDebug && (
               <div className="msg-runtime-debug">

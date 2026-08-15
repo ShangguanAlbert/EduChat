@@ -5,10 +5,6 @@ import { compactReturnUrlSearch } from "../app/returnNavigation.js";
 import { sanitizeChatSessionId } from "../../shared/contracts/chat.js";
 import { fetchChatBootstrap } from "../features/chat/api/chatApi.js";
 import { resolveBootstrapTargetSessionId } from "../features/chat/services/ChatConversationService.js";
-import {
-  loadImageReturnContext,
-  normalizeImageReturnContext,
-} from "./image/returnContext.js";
 
 function buildCanonicalChatHref(sessionId = "", search = "") {
   const safeSessionId = sanitizeChatSessionId(sessionId);
@@ -39,19 +35,10 @@ export default function ChatEntryPage() {
 
         const state = data?.state && typeof data.state === "object" ? data.state : {};
         const sessions = Array.isArray(state.sessions) ? state.sessions : [];
-        const restoreContext = location.state?.fromImageGeneration
-          ? normalizeImageReturnContext(
-              location.state?.restoreContext || loadImageReturnContext(),
-            )
-          : null;
-
-        const restoreSessionId = sanitizeChatSessionId(
-          restoreContext?.sessionId,
-        );
         const targetSessionId = resolveBootstrapTargetSessionId({
           sessions,
           activeId: state.activeId,
-          restoreSessionId,
+          restoreSessionId: "",
         });
 
         navigate(buildCanonicalChatHref(targetSessionId, location.search), {

@@ -43,8 +43,8 @@ runCase("默认聊天状态不再自动创建占位会话", () => {
 });
 
 runCase("固定公开 Agent 的 provider / model 映射正确", () => {
-  assert.equal(getProviderByAgent("A"), "packycode");
-  assert.equal(getModelByAgent("A"), "gpt-5.4");
+  assert.equal(getProviderByAgent("A"), "volcengine");
+  assert.equal(getModelByAgent("A"), "doubao-seed-2-0-pro-260215");
 
   assert.equal(getProviderByAgent("B"), "reserved");
   assert.equal(getModelByAgent("B"), "reserved");
@@ -59,7 +59,7 @@ runCase("固定公开 Agent 的 provider / model 映射正确", () => {
 runCase("Agent B 的运行时配置会保持为后续 Provider 的预留占位", () => {
   const config = sanitizeSingleAgentRuntimeConfig(
     {
-      provider: "packycode",
+      provider: "volcengine",
       model: "glm-4-7-251222",
       protocol: "responses",
       temperature: 0.2,
@@ -98,7 +98,7 @@ await runAsyncCase("聊天前端已切换为先选 Agent 再建会话", async ()
   assert.doesNotMatch(chatPageSource, /resolveLockedAgentByTeacherScope/);
 });
 
-await runAsyncCase("聊天顶部 Agent 展示已改为只读，侧边栏含音乐入口", async () => {
+await runAsyncCase("聊天顶部 Agent 展示只读，侧边栏保持结对编程轻量入口", async () => {
   const chatPageSource = await readFile(
     path.join(repoRoot, "src/pages/chat/desktop/ChatDesktopPage.jsx"),
     "utf8",
@@ -109,8 +109,8 @@ await runAsyncCase("聊天顶部 Agent 展示已改为只读，侧边栏含音�
   );
 
   assert.match(chatPageSource, /<AgentSelect[\s\S]*readOnly/);
-  assert.match(sidebarSource, /音乐生成/);
-  assert.match(sidebarSource, /sidebar-music-entry/);
+  assert.doesNotMatch(sidebarSource, /音乐生成|图片生成|笔记/);
+  assert.doesNotMatch(sidebarSource, /sidebar-(music|image|notes)-entry/);
 });
 
 console.log("\n全部通过：会话级 Agent 锁定与前端入口未发现回归。");

@@ -1,9 +1,5 @@
 import { AGENT_META } from "../../../pages/chat/constants.js";
-import {
-  PACKYCODE_DEFAULT_MODEL,
-  PACKYCODE_PROVIDER,
-  resolveProviderDefaultModel,
-} from "../../../pages/chat/agentRuntimeConfig.js";
+import { resolveProviderDefaultModel } from "../../../pages/chat/agentRuntimeConfig.js";
 import {
   buildApiMessages,
   buildSessionRenameAnswer,
@@ -25,20 +21,14 @@ function stripIndexedItem(item) {
   return rest;
 }
 
-function sanitizeProvider(value, fallback = "packycode") {
+function sanitizeProvider(value, fallback = "volcengine") {
   const key = String(value || "").trim().toLowerCase();
   if (
-    key === "packycode" ||
-    key === "packy" ||
     key === "volcengine" ||
     key === "aliyun" ||
     key === "reserved"
   ) {
-    if (key === "packy") return "packycode";
     return key;
-  }
-  if (key === "packyapi") {
-    return "packycode";
   }
   if (key === "volc" || key === "ark") {
     return "volcengine";
@@ -56,9 +46,9 @@ export function resolveAgentProvider(agentId, runtimeConfig, providerDefaults, l
   }
   const runtimeProvider = String(runtimeConfig?.provider || "").trim().toLowerCase();
   if (runtimeProvider && runtimeProvider !== "inherit") {
-    return sanitizeProvider(runtimeProvider, "packycode");
+    return sanitizeProvider(runtimeProvider, "volcengine");
   }
-  return sanitizeProvider(providerDefaults?.[safeAgentId], "packycode");
+  return sanitizeProvider(providerDefaults?.[safeAgentId], "volcengine");
 }
 
 export function resolveRuntimeModelForProvider(agentId, runtimeConfig, providerDefaults, lockedProvider = "") {
@@ -66,17 +56,6 @@ export function resolveRuntimeModelForProvider(agentId, runtimeConfig, providerD
   const explicitModel = String(runtimeConfig?.model || "").trim();
   if (explicitModel) return explicitModel;
   return resolveProviderDefaultModel(provider, agentId);
-}
-
-export function isPackyTokenBudgetRuntime(agentId, runtimeConfig, providerDefaults) {
-  const provider = resolveAgentProvider(agentId, runtimeConfig, providerDefaults);
-  if (provider !== PACKYCODE_PROVIDER) return false;
-  const model = String(
-    resolveRuntimeModelForProvider(agentId, runtimeConfig, providerDefaults) || "",
-  )
-    .trim()
-    .toLowerCase();
-  return !model || model === PACKYCODE_DEFAULT_MODEL;
 }
 
 export function shouldUseVolcengineFilesApi(agentId, runtimeConfig, providerDefaults) {
@@ -278,10 +257,10 @@ export function buildHistoryForApi({
   providerDefaults = {},
   contextRounds = DEFAULT_CONTEXT_USER_ROUNDS,
 } = {}) {
-  const usePackyContextSummary = isPackyTokenBudgetRuntime(agentId, runtimeConfig, providerDefaults);
-  const narrowedHistory = usePackyContextSummary
-    ? history
-    : pickRecentRounds(history, runtimeConfig.contextRounds || contextRounds);
+  const narrowedHistory = pickRecentRounds(
+    history,
+    runtimeConfig.contextRounds || contextRounds,
+  );
 
   return buildApiMessages(narrowedHistory, {
     useVolcengineResponsesFileRefs: shouldUseVolcengineFilesApi(
@@ -289,7 +268,6 @@ export function buildHistoryForApi({
       runtimeConfig,
       providerDefaults,
     ),
-    usePackyContextSummary,
   });
 }
 
@@ -317,7 +295,6 @@ export async function suggestSessionTitleForExchange({
 
 export const ChatSessionService = {
   buildHistoryForApi,
-  isPackyTokenBudgetRuntime,
   isUntitledSessionTitle,
   normalizeSuggestedSessionTitle,
   prepareComposerFiles,

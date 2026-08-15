@@ -7,7 +7,13 @@ export default function RequireAdminAuth({ children }) {
   const activeSlot = resolveActiveAuthSlot(location.search);
   const token = getAdminToken();
   if (!token) {
-    return <Navigate to={withAuthSlot("/login", activeSlot)} replace />;
+    return (
+      <Navigate
+        to={withAuthSlot("/login", activeSlot)}
+        replace
+        state={{ from: location }}
+      />
+    );
   }
 
   return children;

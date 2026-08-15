@@ -1,0 +1,331 @@
+.teacher-collab-observer-page {
+  --observer-accent: #c45b35;
+  --observer-border: #e5ded3;
+  --observer-surface: #fffdf9;
+  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+  padding: 16px;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 12px;
+  color: #332f2a;
+  background: #f7f5f0;
+}
+
+.teacher-collab-observer-page.is-loading,
+.teacher-collab-observer-page.is-error {
+  place-content: center;
+  justify-items: center;
+  text-align: center;
+}
+
+.teacher-collab-observer-page.is-loading {
+  display: grid;
+  grid-template-rows: auto auto;
+}
+
+.teacher-collab-observer-page.is-error {
+  display: grid;
+  grid-template-rows: repeat(4, auto);
+  max-width: none;
+}
+
+.teacher-collab-observer-page.is-error p {
+  margin: 0;
+  color: #756e65;
+}
+
+.teacher-collab-observer-page.is-error > div {
+  display: flex;
+  gap: 10px;
+}
+
+.teacher-collab-observer-page button {
+  font: inherit;
+}
+
+.teacher-collab-observer-header,
+.teacher-collab-observer-summary,
+.teacher-collab-observer-chat,
+.teacher-collab-observer-workspace > .party-web-coding-column {
+  border: 1px solid var(--observer-border);
+  background: var(--observer-surface);
+  box-shadow: 0 10px 30px rgba(72, 56, 42, 0.05);
+}
+
+.teacher-collab-observer-header {
+  min-height: 72px;
+  padding: 12px 16px;
+  border-radius: 18px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.teacher-collab-observer-header > button,
+.teacher-collab-observer-page.is-error button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--observer-border);
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #4f4942;
+  background: #fff;
+  cursor: pointer;
+}
+
+.teacher-collab-observer-header h1 {
+  margin: 2px 0 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.teacher-collab-observer-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--observer-accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.teacher-collab-observer-connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #81786e;
+  font-size: 13px;
+}
+
+.teacher-collab-observer-connection > span {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #c3bbb0;
+}
+
+.teacher-collab-observer-connection.connected > span {
+  background: #33b86b;
+  box-shadow: 0 0 0 4px rgba(51, 184, 107, 0.12);
+}
+
+.teacher-collab-observer-summary {
+  min-height: 58px;
+  padding: 10px 16px;
+  border-radius: 16px;
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(260px, 1.3fr) auto;
+  align-items: center;
+  gap: 18px;
+}
+
+.teacher-collab-observer-summary > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.teacher-collab-observer-summary strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #8b8176;
+}
+
+.teacher-collab-observer-summary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.teacher-collab-observer-summary p {
+  margin: 0;
+  max-width: 340px;
+  color: #9b725f;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.teacher-collab-observer-inline-error {
+  padding: 9px 12px;
+  border: 1px solid #efc7ba;
+  border-radius: 12px;
+  color: #a13f25;
+  background: #fff3ef;
+  font-size: 13px;
+}
+
+.teacher-collab-observer-workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(320px, 0.42fr) minmax(520px, 0.58fr);
+  gap: 12px;
+}
+
+.teacher-collab-observer-chat,
+.teacher-collab-observer-workspace > .party-web-coding-column {
+  min-width: 0;
+  min-height: 0;
+  border-radius: 18px;
+  overflow: hidden;
+}
+
+.teacher-collab-observer-chat {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.teacher-collab-observer-chat > header {
+  min-height: 58px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--observer-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #6e655c;
+}
+
+.teacher-collab-observer-chat > header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.teacher-collab-observer-chat > header strong {
+  color: #302c28;
+  font-size: 15px;
+}
+
+.teacher-collab-observer-chat > header span {
+  font-size: 12px;
+}
+
+.teacher-collab-observer-messages {
+  min-height: 0;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  background: #fbfaf7;
+}
+
+.teacher-observer-system-message {
+  align-self: center;
+  max-width: 88%;
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: #8b8177;
+  background: #efebe4;
+  font-size: 12px;
+  text-align: center;
+}
+
+.teacher-observer-message {
+  align-self: flex-start;
+  width: min(88%, 620px);
+  padding: 10px 12px;
+  border: 1px solid #e7e1d8;
+  border-radius: 4px 14px 14px 14px;
+  background: #fff;
+}
+
+.teacher-observer-message.is-ai {
+  border-color: #ead7cb;
+  background: #fff8f4;
+}
+
+.teacher-observer-message > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.teacher-observer-message > header span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #615950;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.teacher-observer-message time {
+  color: #a59d94;
+  font-size: 11px;
+}
+
+.teacher-observer-message p {
+  margin: 7px 0 0;
+  color: #39342f;
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.teacher-observer-message img {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  margin-top: 8px;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
+.teacher-observer-file-message {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #6f675f;
+  font-size: 13px;
+}
+
+.teacher-collab-observer-empty {
+  margin: auto;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  color: #9a9187;
+  font-size: 13px;
+}
+
+.teacher-collab-observer-workspace > .party-web-coding-column {
+  width: auto;
+  height: auto;
+  max-width: none;
+}
+
+@media (max-width: 980px) {
+  .teacher-collab-observer-page {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .teacher-collab-observer-summary,
+  .teacher-collab-observer-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .teacher-collab-observer-summary p {
+    max-width: none;
+  }
+
+  .teacher-collab-observer-chat {
+    min-height: 420px;
+  }
+
+  .teacher-collab-observer-workspace > .party-web-coding-column {
+    min-height: 700px;
+  }
+}

@@ -277,9 +277,6 @@ export function registerPartyCodingRoutes(app, deps) {
           workspace,
         });
       }
-      await learning.maybeIntervene({ roomId: member.roomId }).catch((error) => {
-        console.error("[party-web] preview intervention evaluation failed", error);
-      });
       const normalized = normalizeWorkspace(workspace);
       broadcastGroupChatWsPayload(member.roomId, {
         type: "coding_collab_workspace_updated",

@@ -2,6 +2,7 @@ import { buildAdminHomeRedirect } from "../../app/routes/navigationTargets.js";
 import AdminClassroomSettingsPage from "./pages/AdminClassroomSettingsPage.jsx";
 import AdminOnlineUsersPage from "./pages/AdminOnlineUsersPage.jsx";
 import AdminSettingsPage from "./pages/AdminSettingsPage.jsx";
+import TeacherCollaborationObserverPage from "./pages/TeacherCollaborationObserverPage.jsx";
 import TeacherHomePage from "./pages/TeacherHomePage.jsx";
 
 export const adminRoutes = [
@@ -13,6 +14,11 @@ export const adminRoutes = [
   {
     path: "/admin/agent-settings",
     component: AdminSettingsPage,
+    auth: "admin",
+  },
+  {
+    path: "/admin/collaboration-observer/:roomId",
+    component: TeacherCollaborationObserverPage,
     auth: "admin",
   },
   {

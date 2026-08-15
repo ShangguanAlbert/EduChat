@@ -28,9 +28,9 @@ const TASK_STAGE_OPTIONS = [
   { value: "reflect", label: "总结反思" },
 ];
 const FEEDBACK_OPTIONS = [
-  { value: "correct", label: "判断正确" },
-  { value: "partial", label: "部分正确" },
-  { value: "incorrect", label: "不正确" },
+  { value: "correct", label: "很贴合" },
+  { value: "partial", label: "有些贴合" },
+  { value: "incorrect", label: "这次不太适合" },
 ];
 const COLLABORATOR_COLORS = [
   { color: "#3a8dde", colorLight: "#3a8dde33" },
@@ -89,6 +89,7 @@ export default function WebCollabPanel({
   onCollaborationUpdate,
   onCollaborationAwareness,
   subscribeToCollaboration,
+  readOnlyObserver = false,
 }) {
   const [activeDocument, setActiveDocument] = useState("html");
   const [ready, setReady] = useState(false);
@@ -134,18 +135,20 @@ export default function WebCollabPanel({
     setWorkspace(null);
     setLatestIntervention(null);
     setActionError("");
-    awareness.setLocalStateField("user", {
-      name: String(me?.name || "成员").trim() || "成员",
-      color: collaboratorColor.color,
-      colorLight: collaboratorColor.colorLight,
-    });
+    if (!readOnlyObserver) {
+      awareness.setLocalStateField("user", {
+        name: String(me?.name || "成员").trim() || "成员",
+        color: collaboratorColor.color,
+        colorLight: collaboratorColor.colorLight,
+      });
+    }
 
     const handleDocumentUpdate = (update, origin) => {
-      if (origin === REMOTE_DOCUMENT_ORIGIN) return;
+      if (origin === REMOTE_DOCUMENT_ORIGIN || readOnlyObserver) return;
       callbacksRef.current.onCollaborationUpdate?.(roomId, encodeBase64(update));
     };
     const handleAwarenessUpdate = ({ added, updated, removed }, origin) => {
-      if (origin === REMOTE_AWARENESS_ORIGIN) return;
+      if (origin === REMOTE_AWARENESS_ORIGIN || readOnlyObserver) return;
       const clientIds = [...added, ...updated, ...removed];
       if (!clientIds.length) return;
       callbacksRef.current.onCollaborationAwareness?.(
@@ -160,7 +163,7 @@ export default function WebCollabPanel({
         const update = decodeBase64(payload?.update);
         if (!update) return;
         Y.applyUpdate(doc, update, REMOTE_DOCUMENT_ORIGIN);
-        if (!session.initialized) {
+        if (!session.initialized || readOnlyObserver) {
           session.initialized = true;
           const initialHtml = htmlText.toString();
           const initialCss = cssText.toString();
@@ -205,7 +208,7 @@ export default function WebCollabPanel({
         editingRef.current = false;
         callbacksRef.current.onEditingChange?.(roomId, false);
       }
-      awareness.setLocalState(null);
+      if (!readOnlyObserver) awareness.setLocalState(null);
       awareness.off("update", handleAwarenessUpdate);
       doc.off("update", handleDocumentUpdate);
       unsubscribe();
@@ -213,7 +216,7 @@ export default function WebCollabPanel({
       doc.destroy();
       if (sessionRef.current === session) sessionRef.current = null;
     };
-  }, [me?.id, me?.name, roomId]);
+  }, [me?.id, me?.name, readOnlyObserver, roomId]);
 
   const assignedStudentIds = [workspace?.driverUserId, workspace?.navigatorUserId]
     .map((userId) => String(userId || ""))
@@ -235,19 +238,20 @@ export default function WebCollabPanel({
     return [
       activeDocument === "html" ? htmlLanguage() : cssLanguage(),
       EditorView.lineWrapping,
-      EditorView.editable.of(pairReady && isDriver),
+      EditorView.editable.of(!readOnlyObserver && pairReady && isDriver),
       yCollab(activeText, sessionRef.current.awareness),
     ];
-  }, [activeDocument, activeText, isDriver, pairReady, ready]);
+  }, [activeDocument, activeText, isDriver, pairReady, readOnlyObserver, ready]);
 
   async function refreshPreview({ openPreview = false } = {}) {
-    if (!isDriver || actionSubmitting) return;
+    if ((!readOnlyObserver && !isDriver) || actionSubmitting) return;
     const html = sessionRef.current?.htmlText.toString() || "";
     const css = sessionRef.current?.cssText.toString() || "";
     const nextDiagnostics = analyzeWebCode(html, css);
     setPreviewDocument(buildSafePreviewDocument(html, css));
     setDiagnostics(nextDiagnostics);
     if (openPreview) setPreviewOpen(true);
+    if (readOnlyObserver) return;
     setActionSubmitting(true);
     try {
       const result = await recordPartyWebPreview(roomId, nextDiagnostics);
@@ -312,7 +316,7 @@ export default function WebCollabPanel({
         <select
           value={workspace?.taskStage || "understand"}
           onChange={(event) => void updateSession({ action: "stage", taskStage: event.target.value })}
-          disabled={!workspace || actionSubmitting}
+          disabled={readOnlyObserver || !workspace || actionSubmitting}
           aria-label="当前任务阶段"
         >
           {TASK_STAGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -349,14 +353,15 @@ export default function WebCollabPanel({
           {codingEditors.slice(0, 3).map((editor) => <span className="party-coding-editor-avatar" key={editor.userId} title={`${editor.name}正在编辑`}>{getEditorInitial(editor.name)}</span>)}
         </div> : null}
         <div className="party-coding-head-buttons">
-          <button type="button" onClick={() => void refreshPreview()} disabled={!ready || !pairReady || !isDriver || actionSubmitting}><RefreshCcw size={14} />运行检查</button>
-          <button type="button" onClick={() => void refreshPreview({ openPreview: true })} disabled={!ready || !pairReady || !isDriver || actionSubmitting}><Eye size={14} />预览</button>
-          <button type="button" onClick={downloadWebPage} disabled={!ready} title="下载可独立打开的 HTML 文件"><Download size={14} /></button>
+          <button type="button" onClick={() => void refreshPreview()} disabled={!ready || (!readOnlyObserver && (!pairReady || !isDriver)) || actionSubmitting}><RefreshCcw size={14} />{readOnlyObserver ? "同步检查" : "运行检查"}</button>
+          <button type="button" onClick={() => void refreshPreview({ openPreview: true })} disabled={!ready || (!readOnlyObserver && (!pairReady || !isDriver)) || actionSubmitting}><Eye size={14} />{readOnlyObserver ? "查看预览" : "预览"}</button>
+          {!readOnlyObserver ? <button type="button" onClick={downloadWebPage} disabled={!ready} title="下载可独立打开的 HTML 文件"><Download size={14} /></button> : null}
         </div>
       </div>
     </div>
 
-    {!pairReady ? <div className="party-web-role-notice is-waiting">当前只有一名学生。第二名学生加入后，系统会分配 Driver 和 Navigator，随后才能开始共同编程。</div>
+    {readOnlyObserver ? <div className="party-web-role-notice is-observer">教师旁观模式：代码、任务阶段和预览均为只读，您的访问不会改变学生角色或协作状态。</div>
+      : !pairReady ? <div className="party-web-role-notice is-waiting">当前只有一名学生。第二名学生加入后，系统会分配 Driver 和 Navigator，随后才能开始共同编程。</div>
       : isDriver ? <div className="party-web-role-notice is-driver">你当前是 Driver：根据两人的讨论输入 HTML/CSS、刷新预览；完成一轮后点击“交棒”。</div>
         : isNavigator ? <div className="party-web-role-notice is-navigator">你当前是 Navigator：暂时不能输入代码，请在群聊中提出建议、发现问题，并和 Driver 一起检查预览。</div>
           : <div className="party-web-role-notice is-observer">你当前未分配结对角色，只能查看本轮过程。请联系老师调整小教室成员。</div>}
@@ -366,7 +371,7 @@ export default function WebCollabPanel({
         value={activeText.toString()}
         height="100%"
         extensions={editorExtensions}
-        onFocus={() => pairReady && isDriver && setEditingPresence(true)}
+        onFocus={() => !readOnlyObserver && pairReady && isDriver && setEditingPresence(true)}
         onBlur={() => setEditingPresence(false)}
         basicSetup={{ lineNumbers: true, bracketMatching: true, closeBrackets: true, indentOnInput: true }}
         aria-label={`${activeDocument.toUpperCase()} 共享代码编辑器`}
@@ -381,7 +386,7 @@ export default function WebCollabPanel({
       {diagnostics.length ? <ul className="party-web-diagnostics">
         {diagnostics.map((item) => <li key={item}>
           <span>{item}</span>
-          <button type="button" onClick={() => onAskPaia?.(item)}>让琳琳解释</button>
+          {!readOnlyObserver ? <button type="button" onClick={() => onAskPaia?.(item)}>让琳琳解释</button> : null}
         </li>)}
       </ul> : null}
     </section>
@@ -389,18 +394,18 @@ export default function WebCollabPanel({
     {latestIntervention ? <section className="party-paia-intervention has-intervention" aria-label="琳琳的协作提示">
       <div className="party-paia-intervention-head">
         <strong><Bot size={14} />琳琳</strong>
-        <span>{latestIntervention.feedback ? "判断已被学生纠正" : "发现可能需要关注的情况"}</span>
+        <span>{latestIntervention.feedback ? "已收到你们对这条建议的反馈" : "一起试试这个协作步骤"}</span>
       </div>
       <>
-        <div className="party-paia-evidence"><span>为什么提醒</span><p>{latestIntervention.evidenceSummary}</p></div>
         <div className="party-paia-prompt"><span>建议下一步</span><p>{latestIntervention.prompt}</p></div>
-      {!latestIntervention.feedback ? <div className="party-paia-feedback-box">
-        <strong>琳琳判断得准确吗？</strong>
-        <small>你们可以纠正她，反馈会用于调整本任务中的后续提醒。</small>
+      {!latestIntervention.feedback && readOnlyObserver ? <div className="party-web-observer-note">教师旁观模式下仅展示琳琳的协作建议，不能代替学生提交反馈。</div>
+        : !latestIntervention.feedback ? <div className="party-paia-feedback-box">
+        <strong>这条建议对你们有帮助吗？</strong>
+        <small>你们的反馈会作为小组协作记忆，帮助琳琳调整同类情境下的支持方式。</small>
         <textarea
           value={feedbackNote}
           onChange={(event) => setFeedbackNote(event.target.value)}
-          placeholder="可选：说明实际情况，例如“Navigator 已经在口头提出建议”"
+          placeholder="可选：说明这条建议和你们当前协作情况是否贴合"
           maxLength={500}
         />
         <div className="party-paia-feedback-actions">
@@ -412,10 +417,10 @@ export default function WebCollabPanel({
           >{option.label}</button>)}
         </div>
       </div> : <div className="party-paia-feedback-result">
-        <strong>{feedbackByName}的纠正：</strong>
+        <strong>{feedbackByName}的反馈：</strong>
         {FEEDBACK_OPTIONS.find((item) => item.value === latestIntervention.feedback)?.label || latestIntervention.feedback}
         {latestIntervention.feedbackNote ? <p>{latestIntervention.feedbackNote}</p> : null}
-        <small>琳琳已记录本次纠正，并会降低同类误判的重复提醒。</small>
+        <small>琳琳已记录这次反馈，并会调整同类情境下的支持方式。</small>
       </div>}
       </>
     </section> : null}

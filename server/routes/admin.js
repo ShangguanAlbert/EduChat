@@ -2,7 +2,81 @@ import {
   buildAdminGroupChatsZipBundle,
 } from "../services/admin-group-chat-export.js";
 import { buildFinalTestExportBundle } from "../services/final-test-export.js";
-import { getPartyWebWorkspaceModel } from "../modules/party-coding/model.js";
+import {
+  getPartyCollaborationMemoryModel,
+  getPartyLearningEventModel,
+  getPartyLongitudinalMemoryCandidateModel,
+  getPartyLongitudinalMemoryModel,
+  getPartyMemoryCompilationStateModel,
+  getPartyMemoryUseModel,
+  getPartyWebWorkspaceModel,
+} from "../modules/party-coding/model.js";
+import { normalizeMemoryUseForAdmin } from "../modules/party-coding/memory-usage.js";
+import {
+  buildPairClassroomMonitoringFields,
+  validatePairClassroomStudentUserIds,
+} from "../modules/party-coding/classroom-management.js";
+import {
+  DEFAULT_HTML_CSS_KNOWLEDGE_POINTS,
+} from "../modules/party-coding/longitudinal-memory.js";
+
+const PAIA_COURSE_KNOWLEDGE_POINT_LIMIT = 80;
+
+function sanitizePaiaCourseKnowledgePoints(rawPoints) {
+  const usedKeys = new Set();
+  return (Array.isArray(rawPoints) ? rawPoints : [])
+    .slice(0, PAIA_COURSE_KNOWLEDGE_POINT_LIMIT)
+    .map((rawPoint, index) => {
+      const label = String(rawPoint?.label || rawPoint?.name || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 80);
+      if (!label) return null;
+      let key = String(rawPoint?.key || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 80) || `teacher-point-${index + 1}`;
+      if (usedKeys.has(key)) key = `${key}-${index + 1}`.slice(0, 80);
+      usedKeys.add(key);
+      return {
+        key,
+        label,
+        unitTitle: String(rawPoint?.unitTitle || "").replace(/\s+/g, " ").trim().slice(0, 80),
+        description: String(rawPoint?.description || "").replace(/\s+/g, " ").trim().slice(0, 300),
+        prerequisiteKeys: Array.from(new Set(
+          (Array.isArray(rawPoint?.prerequisiteKeys) ? rawPoint.prerequisiteKeys : [])
+            .map((item) => String(item || "").trim().toLowerCase().slice(0, 80))
+            .filter(Boolean),
+        )).slice(0, 12),
+      };
+    })
+    .filter(Boolean);
+}
+
+function normalizePaiaCourseMemoryConfig(rawConfig = {}) {
+  const knowledgePoints = sanitizePaiaCourseKnowledgePoints(rawConfig?.knowledgePoints);
+  const updatedAtDate = rawConfig?.updatedAt ? new Date(rawConfig.updatedAt) : null;
+  return {
+    courseId: String(rawConfig?.courseId || "html-css").trim().slice(0, 80) || "html-css",
+    courseName: String(rawConfig?.courseName || "HTML 与 CSS 网页创作").trim().slice(0, 100) || "HTML 与 CSS 网页创作",
+    termName: String(rawConfig?.termName || "").trim().slice(0, 80),
+    syllabusText: String(rawConfig?.syllabusText || "").replace(/\r\n/g, "\n").trim().slice(0, 20_000),
+    knowledgePoints: knowledgePoints.length
+      ? knowledgePoints
+      : DEFAULT_HTML_CSS_KNOWLEDGE_POINTS.map((point) => ({
+          key: point.key,
+          label: point.label,
+          unitTitle: point.unitTitle,
+          description: point.description,
+          prerequisiteKeys: point.prerequisiteKeys,
+        })),
+    updatedAt: updatedAtDate && Number.isFinite(updatedAtDate.getTime())
+      ? updatedAtDate.toISOString()
+      : "",
+  };
+}
 
 export function registerAdminRoutes(app, deps) {
   const {
@@ -21,6 +95,7 @@ export function registerAdminRoutes(app, deps) {
     buildTeacherScopedStorageUserId,
     getTeacherScopeLabel,
     isDefaultTeacherScopeKey,
+    isStudentTeacherScopeSelectable,
     sanitizeTeacherScopeKey,
     FIXED_STUDENT_ACCOUNTS,
     FIXED_STUDENT_ACCOUNT_TAG,
@@ -31,7 +106,6 @@ export function registerAdminRoutes(app, deps) {
     CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS,
     CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS,
     CHAT_PREPARED_ATTACHMENT_MAX_REFS,
-    MAX_IMAGE_GENERATION_INPUT_FILES,
     MAX_PARSED_CHARS_PER_FILE,
     ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS,
     EXCEL_PREVIEW_MAX_ROWS,
@@ -94,13 +168,13 @@ export function registerAdminRoutes(app, deps) {
     STUDENT_HOMEWORK_OSS_SUB_SCOPE,
     STUDENT_HOMEWORK_UPLOAD_MAX_FILES,
     STUDENT_HOMEWORK_MAX_FILES_PER_LESSON_PER_STUDENT,
+    ACCOUNT_STATUS_ACTIVE,
+    ACCOUNT_STATUS_PENDING_BINDING,
     FIXED_ADMIN_ACCOUNTS,
     FIXED_ADMIN_USERNAME_KEYS,
     FIXED_STUDENT_USERNAME_KEYS,
     RESERVED_ADMIN_USERNAME_KEYS,
     CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE,
-    IMAGE_GENERATION_INPUT_OSS_SCOPE,
-    IMAGE_GENERATION_OUTPUT_OSS_SCOPE,
     ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES,
     ALIYUN_DASHSCOPE_PDF_RENDER_DPI,
     ALIYUN_DASHSCOPE_PDF_RENDER_TIMEOUT_MS,
@@ -169,12 +243,12 @@ export function registerAdminRoutes(app, deps) {
     sanitizeText,
     sanitizeIsoDate,
     sanitizeGroupChatRoomName,
-    buildGroupChatDisplayName,
     generateUniqueGroupChatRoomCode,
     sanitizeGroupChatMemberUserIds,
     sanitizeGroupChatMutedMemberUserIds,
     normalizeGroupChatReadStates,
     normalizeGroupChatRoomDoc,
+    normalizeGroupChatMessageDoc,
     sanitizeGroupChatImageFileName,
     sanitizeGroupChatFileName,
     buildAttachmentContentDisposition,
@@ -190,22 +264,21 @@ export function registerAdminRoutes(app, deps) {
     findGroupChatStoredFileByRoomAndId,
     sanitizeGroupChatReactionEmoji,
     createGroupChatSystemMessage,
-    markGroupChatRoomReadByMessageId,
     isMongoObjectIdLike,
-    clearGroupChatRoomSockets,
     broadcastGroupChatMessageCreated,
     broadcastGroupChatRoomUpdated,
-    broadcastGroupChatRoomDissolved,
     normalizeUsername,
     toUsernameKey,
     isReservedAdminUsernameKey,
     isFixedStudentUsernameKey,
+    readAccountStatus,
     readLockedTeacherScopeKey,
     resolveLoginLockedTeacherScopeKey,
     validatePassword,
     hashPassword,
     authenticateAdminRequest,
     authenticateAdminRequestFromHeaderOrQuery,
+    signToken,
     buildAdminUsersExportTxt,
     buildAdminChatsExportTxt,
     buildSingleUserChatExportTxt,
@@ -219,7 +292,6 @@ export function registerAdminRoutes(app, deps) {
   } = deps;
 
   const TERMINAL_ADMIN_USERNAME_KEY = toUsernameKey("上官福泽");
-  const SHI_GAOJUN_ADMIN_USERNAME_KEY = toUsernameKey("施高俊");
   const SHI_GAOJUN_TEACHER_SCOPE_KEY = "shi-gaojun";
   const USER_DIRECTORY_DEFAULT_TARGET_CLASSES = Object.freeze([
     "教技231",
@@ -265,6 +337,10 @@ export function registerAdminRoutes(app, deps) {
 
   function isTerminalAdminAccount(admin) {
     return toUsernameKey(admin?.username) === TERMINAL_ADMIN_USERNAME_KEY;
+  }
+
+  function canManageCollaborationClassrooms(admin) {
+    return String(admin?.role || "").trim().toLowerCase() === "admin";
   }
 
   function normalizeClassNameKey(value) {
@@ -330,6 +406,7 @@ export function registerAdminRoutes(app, deps) {
       usernameKey: toUsernameKey(user?.username || user?.usernameKey),
       role,
       accountTag: sanitizeText(user?.accountTag, "", 40),
+      accountStatus: readAccountStatus(user),
       lockedTeacherScopeKey: readLockedTeacherScopeKey(
         user?.lockedTeacherScopeKey,
       ),
@@ -517,6 +594,7 @@ export function registerAdminRoutes(app, deps) {
         id: String(admin?._id || ""),
         username: admin?.username || "",
         role: admin?.role || "admin",
+        accountTag: sanitizeText(admin?.accountTag, "", 40),
         createdAt: sanitizeIsoDate(admin?.createdAt),
         updatedAt: sanitizeIsoDate(admin?.updatedAt),
       },
@@ -536,7 +614,7 @@ export function registerAdminRoutes(app, deps) {
       users: users.map((item) => ({
         username: item.username,
         role: item.role,
-        password: item.passwordPlain || "",
+        accountStatus: readAccountStatus(item),
         createdAt: item.createdAt,
         updatedAt: item.updatedAt,
       })),
@@ -567,6 +645,9 @@ export function registerAdminRoutes(app, deps) {
             return acc;
           }
           acc.studentCount += 1;
+          if (item.accountStatus === ACCOUNT_STATUS_PENDING_BINDING) {
+            acc.pendingBindingStudentCount += 1;
+          }
           if (item.classBucket === "target") {
             acc.targetClassStudentCount += 1;
           } else if (item.classBucket === "other") {
@@ -580,6 +661,7 @@ export function registerAdminRoutes(app, deps) {
           totalCount: 0,
           adminCount: 0,
           studentCount: 0,
+          pendingBindingStudentCount: 0,
           targetClassStudentCount: 0,
           otherClassStudentCount: 0,
           unassignedStudentCount: 0,
@@ -590,6 +672,7 @@ export function registerAdminRoutes(app, deps) {
         ok: true,
         updatedAt: new Date().toISOString(),
         canManageUsers: isTerminalAdminAccount(admin),
+        canBindStudents: canManageCollaborationClassrooms(admin),
         targetClasses,
         summary,
         users: items,
@@ -687,6 +770,10 @@ export function registerAdminRoutes(app, deps) {
         return;
       }
       lockedTeacherScopeKey = sanitizeTeacherScopeKey(lockedTeacherScopeInput);
+      if (!isStudentTeacherScopeSelectable(lockedTeacherScopeKey)) {
+        res.status(400).json({ error: "该授课教师已停止接受新的学生绑定。" });
+        return;
+      }
     }
 
     const username =
@@ -750,7 +837,9 @@ export function registerAdminRoutes(app, deps) {
         usernameKey,
         role: "user",
         passwordHash,
-        passwordPlain: password,
+        accountStatus: bindTeacher
+          ? ACCOUNT_STATUS_ACTIVE
+          : ACCOUNT_STATUS_PENDING_BINDING,
         profile: {
           name: profile.name,
           studentId: profile.studentId,
@@ -772,6 +861,45 @@ export function registerAdminRoutes(app, deps) {
       });
     }
   });
+
+  app.post(
+    "/api/auth/admin/user-directory/users/:userId/bind-teacher",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "仅该结对编程课堂的指导教师可确认学生。" });
+        return;
+      }
+
+      const userId = sanitizeId(req.params?.userId, "");
+      if (!userId || !isMongoObjectIdLike(userId)) {
+        res.status(400).json({ error: "无效用户 ID。" });
+        return;
+      }
+
+      try {
+        const user = await AuthUser.findById(userId);
+        if (!user || user.role !== "user") {
+          res.status(404).json({ error: "待绑定的学生账号不存在。" });
+          return;
+        }
+        user.lockedTeacherScopeKey = SHI_GAOJUN_TEACHER_SCOPE_KEY;
+        user.accountStatus = ACCOUNT_STATUS_ACTIVE;
+        await user.save();
+
+        res.json({
+          ok: true,
+          updatedAt: new Date().toISOString(),
+          user: buildUserDirectoryItem(user),
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "确认学生身份失败，请稍后重试。",
+        });
+      }
+    },
+  );
 
   app.put("/api/auth/admin/user-directory/users/:userId", async (req, res) => {
     const admin = await authenticateAdminRequest(req, res);
@@ -1237,7 +1365,7 @@ export function registerAdminRoutes(app, deps) {
     }
   });
 
-  app.get("/api/auth/admin/group-chat/rooms", async (req, res) => {
+  app.get("/api/auth/admin/collaboration-classrooms", async (req, res) => {
     if (!(await authenticateAdminRequest(req, res))) return;
 
     const adminOrderMap = new Map(
@@ -1301,25 +1429,34 @@ export function registerAdminRoutes(app, deps) {
     };
 
     try {
-      const rawRooms = await GroupChatRoom.find(
-        {},
-        {
-          roomCode: 1,
-          name: 1,
-          ownerUserId: 1,
-          memberUserIds: 1,
-          teacherScopeKey: 1,
-          partyAgentMemberEnabled: 1,
-          paiaMonitoringEnabled: 1,
-          paiaMonitoringStartedAt: 1,
-          paiaMonitoringUpdatedAt: 1,
-          paiaMonitoringUpdatedByAdminId: 1,
-          createdAt: 1,
-          updatedAt: 1,
-        },
-      )
-        .sort({ updatedAt: -1, _id: 1 })
-        .lean();
+      const [rawRooms, participationMonitoringConfig] = await Promise.all([
+        GroupChatRoom.find(
+          { teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY },
+          {
+            roomCode: 1,
+            name: 1,
+            ownerUserId: 1,
+            memberUserIds: 1,
+            teacherScopeKey: 1,
+            partyAgentMemberEnabled: 1,
+            paiaMonitoringEnabled: 1,
+            paiaMonitoringStartedAt: 1,
+            paiaMonitoringUpdatedAt: 1,
+            paiaMonitoringUpdatedByAdminId: 1,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        )
+          .sort({ updatedAt: -1, _id: 1 })
+          .lean(),
+        AdminConfig.findOne(
+          { key: ADMIN_CONFIG_KEY },
+          {
+            paiaParticipationMonitoringEnabled: 1,
+            paiaParticipationMonitoringUpdatedAt: 1,
+          },
+        ).lean(),
+      ]);
       const rooms = (Array.isArray(rawRooms) ? rawRooms : [])
         .map((room) => normalizeGroupChatRoomDoc(room))
         .filter(Boolean);
@@ -1539,6 +1676,15 @@ export function registerAdminRoutes(app, deps) {
         ok: true,
         updatedAt: new Date().toISOString(),
         totalRoomCount: payloadRooms.length,
+        collaborationMonitoring: {
+          enabled: sanitizeRuntimeBoolean(
+            participationMonitoringConfig?.paiaParticipationMonitoringEnabled,
+            false,
+          ),
+          updatedAt: sanitizeIsoDate(
+            participationMonitoringConfig?.paiaParticipationMonitoringUpdatedAt,
+          ),
+        },
         users: userOptions,
         rooms: payloadRooms,
       });
@@ -1549,13 +1695,785 @@ export function registerAdminRoutes(app, deps) {
     }
   });
 
+  app.post(
+    "/api/auth/admin/collaboration-classrooms/:roomId/observer-session",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "当前账号无权旁观结对编程小教室。" });
+        return;
+      }
+
+      const roomId = sanitizeId(req.params?.roomId, "");
+      if (!roomId || !isMongoObjectIdLike(roomId)) {
+        res.status(400).json({ error: "无效的协作小教室 ID。" });
+        return;
+      }
+
+      try {
+        const roomDoc = await GroupChatRoom.findOne(
+          {
+            _id: roomId,
+            teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY,
+          },
+          {
+            name: 1,
+            roomCode: 1,
+            ownerUserId: 1,
+            memberUserIds: 1,
+            teacherScopeKey: 1,
+            announcement: 1,
+            paiaMonitoringEnabled: 1,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        ).lean();
+        const room = normalizeGroupChatRoomDoc(roomDoc);
+        if (!room) {
+          res.status(404).json({ error: "结对编程小教室不存在。" });
+          return;
+        }
+
+        const memberUserIds = sanitizeGroupChatMemberUserIds(
+          room.memberUserIds,
+        ).slice(0, 2);
+        const [memberDocs, messageDocs] = await Promise.all([
+          AuthUser.find(
+            { _id: { $in: memberUserIds } },
+            { username: 1, profile: 1, role: 1 },
+          ).lean(),
+          GroupChatMessage.find({ roomId })
+            .sort({ createdAt: -1 })
+            .limit(GROUP_CHAT_DEFAULT_MESSAGES_LIMIT)
+            .lean(),
+        ]);
+        const membersById = new Map(
+          (Array.isArray(memberDocs) ? memberDocs : []).map((user) => [
+            sanitizeId(user?._id, ""),
+            user,
+          ]),
+        );
+        const members = memberUserIds
+          .map((userId) => {
+            const user = membersById.get(userId);
+            if (!user) return null;
+            const profile = sanitizeUserProfile(user?.profile);
+            const username = sanitizeText(user?.username, "", 64);
+            return {
+              id: userId,
+              username,
+              name: sanitizeText(
+                profile.name || username,
+                username || "学生",
+                64,
+              ),
+              role: "user",
+              className: sanitizeText(profile.className, "", 40),
+              studentId: sanitizeText(profile.studentId, "", 20),
+            };
+          })
+          .filter(Boolean);
+        const observerToken = signToken(
+          {
+            uid: String(admin._id),
+            role: "admin",
+            scope: "chat",
+            tkey: SHI_GAOJUN_TEACHER_SCOPE_KEY,
+            pairProgrammingAccess: true,
+            collaborationObserver: true,
+            observerRoomId: roomId,
+          },
+          AUTH_TOKEN_TTL_SECONDS,
+        );
+
+        res.json({
+          ok: true,
+          observerToken,
+          observer: {
+            id: sanitizeId(admin?._id, ""),
+            name: sanitizeText(admin?.username, "教师", 64),
+            role: "admin",
+          },
+          room: {
+            ...room,
+            members,
+          },
+          messages: (Array.isArray(messageDocs) ? messageDocs.reverse() : [])
+            .map((message) => normalizeGroupChatMessageDoc(message))
+            .filter(Boolean),
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "创建教师旁观会话失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
+  app.get(
+    "/api/auth/admin/collaboration-course-memory-config",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "当前账号无权查看结对编程课程记忆配置。" });
+        return;
+      }
+      try {
+        const configDoc = await AdminConfig.findOne(
+          { key: ADMIN_CONFIG_KEY },
+          { paiaCourseMemoryConfig: 1 },
+        ).lean();
+        res.json({
+          ok: true,
+          config: normalizePaiaCourseMemoryConfig(
+            configDoc?.paiaCourseMemoryConfig || {},
+          ),
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "读取结对编程课程大纲失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/auth/admin/collaboration-course-memory-config",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "当前账号无权配置结对编程课程大纲。" });
+        return;
+      }
+      try {
+        const normalized = normalizePaiaCourseMemoryConfig(req.body || {});
+        const now = new Date();
+        const storedConfig = {
+          ...normalized,
+          updatedAt: now,
+          updatedByAdminId: sanitizeId(admin?._id, ""),
+        };
+        const configDoc = await AdminConfig.findOneAndUpdate(
+          { key: ADMIN_CONFIG_KEY },
+          {
+            $set: {
+              key: ADMIN_CONFIG_KEY,
+              paiaCourseMemoryConfig: storedConfig,
+            },
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true },
+        ).lean();
+        res.json({
+          ok: true,
+          config: normalizePaiaCourseMemoryConfig(
+            configDoc?.paiaCourseMemoryConfig || storedConfig,
+          ),
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "保存结对编程课程大纲失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
+  app.get(
+    "/api/auth/admin/collaboration-classrooms/:roomId/memories",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "当前账号无权查看结对编程记忆档案。" });
+        return;
+      }
+      const roomId = sanitizeId(req.params?.roomId, "");
+      if (!roomId || !isMongoObjectIdLike(roomId)) {
+        res.status(400).json({ error: "无效的协作小教室 ID。" });
+        return;
+      }
+      try {
+        const room = await GroupChatRoom.findOne({
+          _id: roomId,
+          teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY,
+        }, {
+          name: 1,
+          announcement: 1,
+          announcementAttachments: 1,
+          memberUserIds: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        }).lean();
+        if (!room) {
+          res.status(404).json({ error: "协作小教室不存在或不属于施高俊授课范围。" });
+          return;
+        }
+        const LongitudinalMemory = getPartyLongitudinalMemoryModel(mongoose);
+        const LongitudinalCandidate = getPartyLongitudinalMemoryCandidateModel(mongoose);
+        const CollaborationMemory = getPartyCollaborationMemoryModel(mongoose);
+        const CompilationState = getPartyMemoryCompilationStateModel(mongoose);
+        const MemoryUse = getPartyMemoryUseModel(mongoose);
+        const memberUserIds = sanitizeGroupChatMemberUserIds(room?.memberUserIds).slice(0, 2);
+        const [memories, compilation, pendingCandidateCount, strategyMemories, uses, memberDocs] = await Promise.all([
+          LongitudinalMemory.find({ roomId, expiresAt: { $gt: new Date() } })
+            .sort({ lastBoundaryAt: -1, subjectType: 1 })
+            .limit(120)
+            .lean(),
+          CompilationState.findOne({ roomId }).lean(),
+          LongitudinalCandidate.countDocuments({ roomId, status: "pending" }),
+          CollaborationMemory.find({ roomId, expiresAt: { $gt: new Date() } })
+            .sort({ lastValidatedAt: -1 })
+            .limit(40)
+            .lean(),
+          MemoryUse.find({ roomId })
+            .sort({ usedAt: -1 })
+            .limit(120)
+            .lean(),
+          AuthUser.find(
+            { _id: { $in: memberUserIds } },
+            { username: 1, profile: 1 },
+          ).lean(),
+        ]);
+        const memberById = new Map((Array.isArray(memberDocs) ? memberDocs : []).map((member) => [
+          sanitizeId(member?._id, ""),
+          member,
+        ]));
+        res.json({
+          ok: true,
+          roomId,
+          room: {
+            id: roomId,
+            name: sanitizeText(room?.name, "未命名小教室", 80),
+            announcement: sanitizeText(room?.announcement, "", 500),
+            announcementAttachments: (Array.isArray(room?.announcementAttachments)
+              ? room.announcementAttachments
+              : []).slice(0, 5).map((attachment) => ({
+              fileId: sanitizeId(attachment?.fileId, ""),
+              name: sanitizeText(attachment?.name || attachment?.fileName, "任务附件", 120),
+            })),
+            members: memberUserIds.map((userId) => {
+              const member = memberById.get(userId);
+              const profile = sanitizeUserProfile(member?.profile);
+              const username = sanitizeText(member?.username, "", 64);
+              return {
+                id: userId,
+                name: sanitizeText(profile?.name || username, "学生", 64),
+                username,
+                className: sanitizeText(profile?.className, "", 40),
+                studentId: sanitizeText(profile?.studentId, "", 30),
+              };
+            }),
+            createdAt: room?.createdAt || null,
+            updatedAt: room?.updatedAt || null,
+          },
+          compilation: compilation
+            ? {
+                lastBoundaryAt: compilation.lastBoundaryAt,
+                lastCompiledAt: compilation.lastCompiledAt,
+                lastCandidateCount: Number(compilation.lastCandidateCount || 0),
+                pendingCandidateCount: Math.max(0, Number(pendingCandidateCount || 0)),
+                lastError: sanitizeText(compilation.lastError, "", 500),
+              }
+            : {
+                lastBoundaryAt: null,
+                lastCompiledAt: null,
+                lastCandidateCount: 0,
+                pendingCandidateCount: Math.max(0, Number(pendingCandidateCount || 0)),
+                lastError: "",
+              },
+          memories: (Array.isArray(memories) ? memories : []).map((memory) => ({
+            id: sanitizeId(memory?._id, ""),
+            courseId: sanitizeText(memory?.courseId, "", 200),
+            lessonId: sanitizeText(memory?.lessonId, "", 100),
+            projectId: sanitizeText(memory?.projectId, "", 200),
+            subjectType: sanitizeText(memory?.subjectType, "", 30),
+            subjectId: sanitizeText(memory?.subjectId, "", 100),
+            memoryType: sanitizeText(memory?.memoryType, "", 60),
+            conceptKey: sanitizeText(memory?.conceptKey, "", 80),
+            summary: sanitizeText(memory?.summary, "", 1_200),
+            payload: memory?.payload && typeof memory.payload === "object"
+              ? memory.payload
+              : {},
+            confidence: Math.max(0, Math.min(1, Number(memory?.confidence || 0))),
+            validationStatus: sanitizeText(
+              memory?.validationStatus,
+              "system_observed",
+              30,
+            ),
+            validationNote: sanitizeText(memory?.validationNote, "", 500),
+            validatedAt: memory?.validatedAt || null,
+            teacherEditedAt: memory?.teacherEditedAt || null,
+            retrievalEnabled: memory?.retrievalEnabled !== false,
+            allowedUseTypes: (Array.isArray(memory?.allowedUseTypes)
+              ? memory.allowedUseTypes
+              : ["student_reply"])
+              .map((item) => sanitizeText(item, "", 40))
+              .filter(Boolean),
+            publicDisclosure: sanitizeText(memory?.publicDisclosure, "action_only", 30),
+            evidenceCount: Math.max(0, Number(memory?.evidenceCount || 0)),
+            lastBoundaryAt: memory?.lastBoundaryAt || null,
+            consolidatedAt: memory?.consolidatedAt || null,
+            useCount: Math.max(0, Number(memory?.useCount || 0)),
+            lastUsedAt: memory?.lastUsedAt || null,
+            history: (Array.isArray(memory?.history) ? memory.history : [])
+              .slice(-5)
+              .map((item) => ({
+                summary: sanitizeText(item?.summary, "", 1_200),
+                confidence: Math.max(0, Math.min(1, Number(item?.confidence || 0))),
+                boundaryAt: item?.boundaryAt || null,
+              })),
+          })),
+          strategyMemories: (Array.isArray(strategyMemories) ? strategyMemories : []).map((memory) => ({
+            id: sanitizeId(memory?._id, ""),
+            memoryType: "intervention_feedback",
+            supportNeed: sanitizeText(memory?.supportNeed, "", 60),
+            strategyKey: sanitizeText(memory?.strategyKey, "", 80),
+            verdict: sanitizeText(memory?.verdict, "partial", 20),
+            correctCount: Math.max(0, Number(memory?.correctCount || 0)),
+            partialCount: Math.max(0, Number(memory?.partialCount || 0)),
+            incorrectCount: Math.max(0, Number(memory?.incorrectCount || 0)),
+            useCount: Math.max(0, Number(memory?.useCount || 0)),
+            lastUsedAt: memory?.lastUsedAt || null,
+            lastValidatedAt: memory?.lastValidatedAt || null,
+          })),
+          uses: (Array.isArray(uses) ? uses : [])
+            .map(normalizeMemoryUseForAdmin)
+            .filter(Boolean),
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "读取结对编程记忆档案失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/auth/admin/collaboration-classrooms/:roomId/memories/:memoryId",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "当前账号无权校正结对编程记忆。" });
+        return;
+      }
+      const roomId = sanitizeId(req.params?.roomId, "");
+      const memoryId = sanitizeId(req.params?.memoryId, "");
+      const validationStatus = sanitizeText(req.body?.validationStatus, "", 30);
+      if (!roomId || !memoryId || !isMongoObjectIdLike(roomId) || !isMongoObjectIdLike(memoryId)) {
+        res.status(400).json({ error: "无效的协作小教室或记忆 ID。" });
+        return;
+      }
+      if (validationStatus && !new Set(["system_observed", "human_confirmed", "human_rejected"]).has(validationStatus)) {
+        res.status(400).json({ error: "请提供有效的记忆校正状态。" });
+        return;
+      }
+      try {
+        const LongitudinalMemory = getPartyLongitudinalMemoryModel(mongoose);
+        const existing = await LongitudinalMemory.findOne({ _id: memoryId, roomId }).lean();
+        if (!existing) {
+          res.status(404).json({ error: "未找到这条课程记忆。" });
+          return;
+        }
+        const allowedUseTypes = Array.from(new Set(
+          (Array.isArray(req.body?.allowedUseTypes) ? req.body.allowedUseTypes : [])
+            .map((item) => sanitizeText(item, "", 40))
+            .filter((item) => new Set(["student_reply", "group_intervention"]).has(item)),
+        ));
+        const hasAllowedUseTypes = Array.isArray(req.body?.allowedUseTypes);
+        const publicDisclosure = sanitizeText(req.body?.publicDisclosure, "", 30);
+        if (publicDisclosure && !new Set(["action_only", "summary_allowed"]).has(publicDisclosure)) {
+          res.status(400).json({ error: "请提供有效的公开表达方式。" });
+          return;
+        }
+        const requestedSummary = Object.hasOwn(req.body || {}, "summary")
+          ? sanitizeText(req.body?.summary, "", 1_200)
+          : "";
+        if (Object.hasOwn(req.body || {}, "summary") && !requestedSummary) {
+          res.status(400).json({ error: "记忆判断内容不能为空。" });
+          return;
+        }
+        const now = new Date();
+        const update = {
+          $set: {
+            ...(validationStatus ? { validationStatus } : {}),
+            ...(Object.hasOwn(req.body || {}, "validationNote")
+              ? { validationNote: sanitizeText(req.body?.validationNote, "", 500) }
+              : {}),
+            ...(typeof req.body?.retrievalEnabled === "boolean"
+              ? { retrievalEnabled: req.body.retrievalEnabled }
+              : {}),
+            ...(hasAllowedUseTypes ? { allowedUseTypes } : {}),
+            ...(publicDisclosure ? { publicDisclosure } : {}),
+            ...(requestedSummary ? { summary: requestedSummary } : {}),
+            ...(requestedSummary && requestedSummary !== sanitizeText(existing?.summary, "", 1_200)
+              ? {
+                  teacherEditedAt: now,
+                  teacherEditedByAdminId: sanitizeId(admin?._id, ""),
+                }
+              : {}),
+            validatedAt: now,
+            validatedByAdminId: sanitizeId(admin?._id, ""),
+          },
+        };
+        if (requestedSummary && requestedSummary !== sanitizeText(existing?.summary, "", 1_200)) {
+          update.$push = {
+            history: {
+              $each: [{
+                candidateId: `teacher-correction-${Date.now()}`,
+                summary: requestedSummary,
+                payload: existing?.payload || {},
+                confidence: Math.max(0, Math.min(1, Number(existing?.confidence || 0))),
+                boundaryAt: now,
+              }],
+              $slice: -12,
+            },
+          };
+        }
+        const updated = await LongitudinalMemory.findOneAndUpdate(
+          { _id: memoryId, roomId },
+          update,
+          { new: true },
+        ).lean();
+        if (!updated) {
+          res.status(404).json({ error: "未找到这条课程记忆。" });
+          return;
+        }
+        res.json({
+          ok: true,
+          memory: {
+            id: sanitizeId(updated?._id, ""),
+            summary: sanitizeText(updated?.summary, "", 1_200),
+            validationStatus: sanitizeText(updated?.validationStatus, "system_observed", 30),
+            validationNote: sanitizeText(updated?.validationNote, "", 500),
+            validatedAt: updated?.validatedAt || null,
+            teacherEditedAt: updated?.teacherEditedAt || null,
+            retrievalEnabled: updated?.retrievalEnabled !== false,
+            allowedUseTypes: (Array.isArray(updated?.allowedUseTypes)
+              ? updated.allowedUseTypes
+              : ["student_reply"])
+              .map((item) => sanitizeText(item, "", 40))
+              .filter(Boolean),
+            publicDisclosure: sanitizeText(updated?.publicDisclosure, "action_only", 30),
+          },
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "校正结对编程记忆失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
+  app.get(
+    "/api/auth/admin/collaboration-classrooms/:roomId/memories/:memoryId/evidence",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "当前账号无权查看结对编程记忆证据。" });
+        return;
+      }
+      const roomId = sanitizeId(req.params?.roomId, "");
+      const memoryId = sanitizeId(req.params?.memoryId, "");
+      if (!roomId || !memoryId || !isMongoObjectIdLike(roomId) || !isMongoObjectIdLike(memoryId)) {
+        res.status(400).json({ error: "无效的协作小教室或记忆 ID。" });
+        return;
+      }
+      try {
+        const LongitudinalMemory = getPartyLongitudinalMemoryModel(mongoose);
+        const Candidate = getPartyLongitudinalMemoryCandidateModel(mongoose);
+        const LearningEvent = getPartyLearningEventModel(mongoose);
+        const Workspace = getPartyWebWorkspaceModel(mongoose);
+        const MemoryUse = getPartyMemoryUseModel(mongoose);
+        const memory = await LongitudinalMemory.findOne({ _id: memoryId, roomId }).lean();
+        if (!memory) {
+          res.status(404).json({ error: "未找到这条课程记忆。" });
+          return;
+        }
+        const sourceCandidateIds = (Array.isArray(memory?.sourceCandidateIds)
+          ? memory.sourceCandidateIds
+          : [])
+          .map((item) => sanitizeId(item, ""))
+          .filter((item) => isMongoObjectIdLike(item))
+          .slice(-100);
+        const candidates = sourceCandidateIds.length
+          ? await Candidate.find({ _id: { $in: sourceCandidateIds }, roomId })
+              .sort({ boundaryAt: -1 })
+              .limit(100)
+              .lean()
+          : [];
+        const sourceEventIds = Array.from(new Set(
+          candidates.flatMap((candidate) => Array.isArray(candidate?.sourceEventIds)
+            ? candidate.sourceEventIds
+            : [])
+            .map((item) => sanitizeId(item, ""))
+            .filter((item) => isMongoObjectIdLike(item)),
+        )).slice(-500);
+        const [events, workspace, uses] = await Promise.all([
+          sourceEventIds.length
+            ? LearningEvent.find({ _id: { $in: sourceEventIds }, roomId })
+                .sort({ occurredAt: -1 })
+                .limit(200)
+                .lean()
+            : Promise.resolve([]),
+          Workspace.findOne({ roomId }, { versions: { $slice: -20 } }).lean(),
+          MemoryUse.find({ roomId, memoryId })
+            .sort({ usedAt: -1 })
+            .limit(50)
+            .lean(),
+        ]);
+        const sourceRevisions = new Set((Array.isArray(events) ? events : [])
+          .map((event) => Number(event?.metadata?.revision))
+          .filter((revision) => Number.isFinite(revision) && revision > 0));
+        const snapshots = (Array.isArray(workspace?.versions) ? workspace.versions : [])
+          .filter((version) => sourceRevisions.size === 0 || sourceRevisions.has(Number(version?.revision)))
+          .slice(-8)
+          .map((version) => ({
+            revision: Math.max(1, Number(version?.revision || 1)),
+            html: sanitizeText(version?.html, "", 60_000),
+            css: sanitizeText(version?.css, "", 60_000),
+            savedByUserId: sanitizeId(version?.savedByUserId, ""),
+            savedByName: sanitizeText(version?.savedByName, "成员", 60),
+            createdAt: version?.createdAt || null,
+          }));
+        res.json({
+          ok: true,
+          roomId,
+          memoryId,
+          candidates: candidates.map((candidate) => ({
+            id: sanitizeId(candidate?._id, ""),
+            projectId: sanitizeText(candidate?.projectId, "", 200),
+            conceptKey: sanitizeText(candidate?.conceptKey, "", 80),
+            summary: sanitizeText(candidate?.summary, "", 1_200),
+            confidence: Math.max(0, Math.min(1, Number(candidate?.confidence || 0))),
+            boundaryAt: candidate?.boundaryAt || null,
+            sourceEventCount: Array.isArray(candidate?.sourceEventIds)
+              ? candidate.sourceEventIds.length
+              : 0,
+          })),
+          events: (Array.isArray(events) ? events : []).map((event) => ({
+            id: sanitizeId(event?._id, ""),
+            taskId: sanitizeText(event?.taskId, "", 200),
+            taskStage: sanitizeText(event?.taskStage, "", 30),
+            userId: sanitizeId(event?.userId, ""),
+            userName: sanitizeText(event?.userName, "成员", 60),
+            role: sanitizeText(event?.role, "observer", 30),
+            eventType: sanitizeText(event?.eventType, "", 60),
+            occurredAt: event?.occurredAt || null,
+            metadata: {
+              content: sanitizeText(event?.metadata?.content, "", 1_200),
+              taskText: sanitizeText(event?.metadata?.taskText, "", 500),
+              revision: Math.max(0, Number(event?.metadata?.revision || 0)),
+              taskRevision: Math.max(0, Number(event?.metadata?.taskRevision || 0)),
+              changedCharacters: Math.max(0, Number(event?.metadata?.changedCharacters || 0)),
+              documents: (Array.isArray(event?.metadata?.documents)
+                ? event.metadata.documents
+                : []).map((item) => sanitizeText(item, "", 20)).filter(Boolean),
+              diagnostics: (Array.isArray(event?.metadata?.diagnostics)
+                ? event.metadata.diagnostics
+                : []).map((item) => sanitizeText(item, "", 300)).filter(Boolean).slice(0, 20),
+              feedback: sanitizeText(event?.metadata?.feedback, "", 20),
+              note: sanitizeText(event?.metadata?.note, "", 500),
+              interventionId: sanitizeId(event?.metadata?.interventionId, ""),
+              evidenceSummary: sanitizeText(event?.metadata?.evidenceSummary, "", 800),
+            },
+          })),
+          snapshots,
+          uses: (Array.isArray(uses) ? uses : [])
+            .map(normalizeMemoryUseForAdmin)
+            .filter(Boolean),
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "读取记忆判断依据失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/auth/admin/collaboration-classrooms/:roomId/memories/:memoryId",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "当前账号无权删除结对编程记忆。" });
+        return;
+      }
+      const roomId = sanitizeId(req.params?.roomId, "");
+      const memoryId = sanitizeId(req.params?.memoryId, "");
+      if (!roomId || !memoryId || !isMongoObjectIdLike(roomId) || !isMongoObjectIdLike(memoryId)) {
+        res.status(400).json({ error: "无效的协作小教室或记忆 ID。" });
+        return;
+      }
+      try {
+        const LongitudinalMemory = getPartyLongitudinalMemoryModel(mongoose);
+        const result = await LongitudinalMemory.deleteOne({ _id: memoryId, roomId });
+        if (Number(result?.deletedCount || 0) !== 1) {
+          res.status(404).json({ error: "未找到这条课程记忆。" });
+          return;
+        }
+        res.json({ ok: true, memoryId, deleted: true });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "删除结对编程记忆失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
+  app.put(
+    "/api/auth/admin/collaboration-classrooms/announcement",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "当前账号无权发布课程公告。" });
+        return;
+      }
+
+      const announcement = sanitizeText(req.body?.announcement, "", 500);
+      const lessonId = sanitizeId(req.body?.lessonId, "");
+      if (!lessonId) {
+        res.status(400).json({ error: "请先选择要发布公告的课时。" });
+        return;
+      }
+      const now = new Date();
+      try {
+        const updatedConfig = await AdminConfig.findOneAndUpdate(
+          {
+            key: ADMIN_CONFIG_KEY,
+            "teacherCoursePlans.id": lessonId,
+          },
+          {
+            $set: {
+              "teacherCoursePlans.$.announcement": announcement,
+              "teacherCoursePlans.$.announcementUpdatedAt": now.toISOString(),
+              updatedAt: now,
+            },
+          },
+          { new: true },
+        ).lean();
+        if (!updatedConfig) {
+          res.status(404).json({ error: "未找到要发布公告的课时，请刷新后重试。" });
+          return;
+        }
+        await GroupChatRoom.updateMany(
+          { teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY },
+          { $set: { announcement } },
+        );
+
+        const updatedRooms = await GroupChatRoom.find({
+          teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY,
+        }).lean();
+        updatedRooms.forEach((roomDoc) => {
+          const room = normalizeGroupChatRoomDoc(roomDoc);
+          const roomId = sanitizeId(room?.id, "");
+          if (!roomId || !room) return;
+          broadcastGroupChatRoomUpdated(roomId, room);
+        });
+
+        res.json({
+          ok: true,
+          announcement: {
+            lessonId,
+            text: announcement,
+            updatedAt: now.toISOString(),
+            classroomCount: updatedRooms.length,
+          },
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "发布课程公告失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
+  app.patch(
+    "/api/auth/admin/collaboration-classrooms/monitoring",
+    async (req, res) => {
+      const admin = await authenticateAdminRequest(req, res);
+      if (!admin) return;
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "当前账号无权控制 AI 参与度主动感知。" });
+        return;
+      }
+      if (typeof req.body?.enabled !== "boolean") {
+        res.status(400).json({ error: "请提供明确的参与度感知总开关状态。" });
+        return;
+      }
+
+      try {
+        const enabled = req.body.enabled === true;
+        const now = new Date();
+        const adminId = sanitizeId(admin?._id, "");
+        await Promise.all([
+          AdminConfig.findOneAndUpdate(
+            { key: ADMIN_CONFIG_KEY },
+            {
+              $set: {
+                key: ADMIN_CONFIG_KEY,
+                paiaParticipationMonitoringEnabled: enabled,
+                paiaParticipationMonitoringUpdatedAt: now,
+              },
+            },
+            { upsert: true, new: true, setDefaultsOnInsert: true },
+          ),
+          GroupChatRoom.updateMany(
+            { teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY },
+            {
+              $set: buildPairClassroomMonitoringFields(enabled, {
+                now,
+                adminId,
+              }),
+            },
+          ),
+        ]);
+
+        const updatedRooms = await GroupChatRoom.find({
+          teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY,
+        }).lean();
+        updatedRooms.forEach((roomDoc) => {
+          const room = normalizeGroupChatRoomDoc(roomDoc);
+          const roomId = sanitizeId(room?.id, "");
+          if (!roomId || !room) return;
+          broadcastGroupChatRoomUpdated(roomId, room);
+          if (!enabled) {
+            deps.broadcastGroupChatWsPayload?.(roomId, {
+              type: "coding_collab_intervention",
+              roomId,
+              intervention: null,
+            });
+          }
+        });
+
+        res.json({
+          ok: true,
+          monitoring: {
+            enabled,
+            updatedAt: now.toISOString(),
+            classroomCount: updatedRooms.length,
+          },
+        });
+      } catch (error) {
+        res.status(500).json({
+          error: error?.message || "更新 AI 参与度感知总开关失败，请稍后重试。",
+        });
+      }
+    },
+  );
+
   app.patch(
     "/api/auth/admin/collaboration-classrooms/:roomId/linlin-monitoring",
     async (req, res) => {
       const admin = await authenticateAdminRequest(req, res);
       if (!admin) return;
-      if (toUsernameKey(admin?.username) !== SHI_GAOJUN_ADMIN_USERNAME_KEY) {
-        res.status(403).json({ error: "仅施高俊可控制琳琳状态检测。" });
+      if (!canManageCollaborationClassrooms(admin)) {
+        res.status(403).json({ error: "当前账号无权控制 AI 参与度主动感知。" });
         return;
       }
 
@@ -1565,22 +2483,32 @@ export function registerAdminRoutes(app, deps) {
         return;
       }
       if (typeof req.body?.enabled !== "boolean") {
-        res.status(400).json({ error: "请提供明确的检测启停状态。" });
+        res.status(400).json({ error: "请提供明确的参与度感知启停状态。" });
         return;
       }
 
       try {
         const enabled = req.body.enabled === true;
+        if (!enabled) {
+          const globalMonitoring = await AdminConfig.findOne(
+            { key: ADMIN_CONFIG_KEY },
+            { paiaParticipationMonitoringEnabled: 1 },
+          ).lean();
+          if (globalMonitoring?.paiaParticipationMonitoringEnabled === true) {
+            res.status(409).json({
+              error: "AI 参与度感知总开关已开启，请先关闭总开关。",
+            });
+            return;
+          }
+        }
         const now = new Date();
         const roomDoc = await GroupChatRoom.findOneAndUpdate(
           { _id: roomId, teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY },
           {
-            $set: {
-              paiaMonitoringEnabled: enabled,
-              paiaMonitoringStartedAt: enabled ? now : null,
-              paiaMonitoringUpdatedAt: now,
-              paiaMonitoringUpdatedByAdminId: sanitizeId(admin?._id, ""),
-            },
+            $set: buildPairClassroomMonitoringFields(enabled, {
+              now,
+              adminId: sanitizeId(admin?._id, ""),
+            }),
           },
           { new: true },
         ).lean();
@@ -1609,53 +2537,42 @@ export function registerAdminRoutes(app, deps) {
         });
       } catch (error) {
         res.status(500).json({
-          error: error?.message || "更新琳琳状态检测失败，请稍后重试。",
+          error: error?.message || "更新 AI 参与度主动感知失败，请稍后重试。",
         });
       }
     },
   );
 
-  app.post("/api/auth/admin/group-chat/rooms", async (req, res) => {
+  app.post("/api/auth/admin/collaboration-classrooms", async (req, res) => {
     const admin = await authenticateAdminRequest(req, res);
     if (!admin) return;
+    if (!canManageCollaborationClassrooms(admin)) {
+      res.status(403).json({ error: "当前账号无权创建结对编程小教室。" });
+      return;
+    }
 
     const roomName = sanitizeGroupChatRoomName(req.body?.name);
-    const ownerUserId = sanitizeId(req.body?.ownerUserId, "");
-    const inputMemberUserIds = Array.isArray(req.body?.memberUserIds)
-      ? req.body.memberUserIds
-      : [];
-    const rawMemberUserIds = Array.from(
-      new Set(
-        inputMemberUserIds.map((item) => sanitizeId(item, "")).filter(Boolean),
-      ),
+    const studentSelection = validatePairClassroomStudentUserIds(
+      req.body?.studentUserIds,
+      {
+        sanitizeId,
+        isValidUserId: isMongoObjectIdLike,
+      },
     );
+    const studentUserIds = studentSelection.userIds;
 
     if (!roomName) {
-      res.status(400).json({ error: "请输入群名称。" });
+      res.status(400).json({ error: "请输入小教室名称。" });
       return;
     }
-    if (!ownerUserId || !isMongoObjectIdLike(ownerUserId)) {
-      res.status(400).json({ error: "请选择有效的群主账号。" });
-      return;
-    }
-
-    const memberUserIdSet = new Set(rawMemberUserIds);
-    memberUserIdSet.add(ownerUserId);
-    const finalMemberUserIds = Array.from(memberUserIdSet);
-    if (finalMemberUserIds.length > GROUP_CHAT_MAX_MEMBERS_PER_ROOM) {
-      res.status(400).json({
-        error: `成员数量不能超过 ${GROUP_CHAT_MAX_MEMBERS_PER_ROOM} 人。`,
-      });
-      return;
-    }
-    if (finalMemberUserIds.length === 0) {
-      res.status(400).json({ error: "请至少选择 1 位成员。" });
+    if (!studentSelection.valid) {
+      res.status(400).json({ error: studentSelection.error });
       return;
     }
 
     try {
       const selectedUsers = await AuthUser.find(
-        { _id: { $in: finalMemberUserIds } },
+        { _id: { $in: studentUserIds } },
         { username: 1, profile: 1, role: 1 },
       ).lean();
       const usersById = new Map(
@@ -1664,52 +2581,93 @@ export function registerAdminRoutes(app, deps) {
           user,
         ]),
       );
-      if (usersById.size !== finalMemberUserIds.length) {
-        res
-          .status(400)
-          .json({ error: "群成员中存在已失效账号，请刷新列表后重试。" });
+      const selectedStudents = studentUserIds
+        .map((userId) => usersById.get(userId))
+        .filter(Boolean);
+      if (selectedStudents.length !== 2) {
+        res.status(400).json({ error: "所选学生中存在已失效账号，请刷新后重试。" });
         return;
       }
-      const ownerUser = usersById.get(ownerUserId);
-      if (!ownerUser) {
-        res.status(400).json({ error: "群主账号不存在，请刷新后重试。" });
+      if (
+        selectedStudents.some(
+          (user) => sanitizeText(user?.role, "user", 20).toLowerCase() !== "user",
+        )
+      ) {
+        res.status(400).json({ error: "结对成员只能选择学生账号。" });
         return;
       }
 
+      const existingClassroom = await GroupChatRoom.findOne(
+        {
+          teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY,
+          memberUserIds: { $in: studentUserIds },
+        },
+        { _id: 1 },
+      ).lean();
+      if (existingClassroom?._id) {
+        res.status(409).json({
+          error: "所选学生中有人已在其他结对小教室，请先调整原小教室。",
+        });
+        return;
+      }
+
+      const participationMonitoringConfig = await AdminConfig.findOne(
+        { key: ADMIN_CONFIG_KEY },
+        {
+          paiaParticipationMonitoringEnabled: 1,
+          teacherCoursePlans: 1,
+        },
+      ).lean();
+      const participationMonitoringEnabled =
+        participationMonitoringConfig?.paiaParticipationMonitoringEnabled ===
+        true;
+      const monitoringUpdatedAt = new Date();
+      const latestLessonAnnouncement = (
+        Array.isArray(participationMonitoringConfig?.teacherCoursePlans)
+          ? participationMonitoringConfig.teacherCoursePlans
+          : []
+      )
+        .filter((lesson) => sanitizeText(lesson?.announcement, "", 500))
+        .sort(
+          (a, b) =>
+            (Date.parse(String(b?.announcementUpdatedAt || "")) || 0) -
+            (Date.parse(String(a?.announcementUpdatedAt || "")) || 0),
+        )[0];
+      const finalStudentUserIds = sanitizeGroupChatMemberUserIds(studentUserIds);
       const roomCode = await generateUniqueGroupChatRoomCode();
       const roomDoc = await GroupChatRoom.create({
         roomCode,
         name: roomName,
-        ownerUserId,
-        memberUserIds: sanitizeGroupChatMemberUserIds(finalMemberUserIds),
-        memberCount: finalMemberUserIds.length,
+        teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY,
+        ownerUserId: finalStudentUserIds[0],
+        memberUserIds: finalStudentUserIds,
+        memberCount: finalStudentUserIds.length,
+        announcement: sanitizeText(
+          latestLessonAnnouncement?.announcement,
+          "",
+          500,
+        ),
+        ...buildPairClassroomMonitoringFields(participationMonitoringEnabled, {
+          now: monitoringUpdatedAt,
+          adminId: sanitizeId(admin?._id, ""),
+        }),
       });
       const roomId = sanitizeId(roomDoc?._id, "");
-
-      const adminName = sanitizeText(
-        buildGroupChatDisplayName(admin) || admin?.username,
-        sanitizeText(admin?.username, "管理员", 64) || "管理员",
-        64,
-      );
-      const ownerProfile = sanitizeUserProfile(ownerUser?.profile);
-      const ownerDisplayName = sanitizeText(
-        ownerProfile.name || ownerUser?.username,
-        ownerUser?.username || "派主",
-        64,
-      );
-
+      const studentNames = selectedStudents.map((user) => {
+        const profile = sanitizeUserProfile(user?.profile);
+        return sanitizeText(
+          profile.name || user?.username,
+          user?.username || "学生",
+          64,
+        );
+      });
       const systemMessageDoc = roomId
         ? await createGroupChatSystemMessage({
             roomId,
-            content: `${adminName} 在后台创建了派，派主：${ownerDisplayName}`,
+            content: `教师已在后台分配结对编程小教室：${studentNames.join("、")}`,
           })
         : null;
       if (roomId && systemMessageDoc?._id) {
-        await markGroupChatRoomReadByMessageId({
-          roomId,
-          userId: ownerUserId,
-          messageId: sanitizeId(systemMessageDoc?._id, ""),
-        });
         broadcastGroupChatMessageCreated(roomId, systemMessageDoc);
       }
 
@@ -1717,7 +2675,6 @@ export function registerAdminRoutes(app, deps) {
       if (roomId && normalizedRoom) {
         broadcastGroupChatRoomUpdated(roomId, normalizedRoom);
       }
-
       res.status(201).json({
         ok: true,
         roomId,
@@ -1726,59 +2683,7 @@ export function registerAdminRoutes(app, deps) {
       });
     } catch (error) {
       res.status(500).json({
-        error: error?.message || "创建群聊失败，请稍后重试。",
-      });
-    }
-  });
-
-  app.delete("/api/auth/admin/group-chat/rooms/:roomId", async (req, res) => {
-    const admin = await authenticateAdminRequest(req, res);
-    if (!admin) return;
-
-    const roomId = sanitizeId(req.params?.roomId, "");
-    if (!roomId) {
-      res.status(400).json({ error: "无效参数。" });
-      return;
-    }
-    if (!isMongoObjectIdLike(roomId)) {
-      res.status(400).json({ error: "无效群聊 ID。" });
-      return;
-    }
-
-    try {
-      const room = await GroupChatRoom.findById(roomId).lean();
-      const normalizedRoom = normalizeGroupChatRoomDoc(room);
-      if (!normalizedRoom) {
-        res.status(404).json({ error: "群聊不存在或已失效。" });
-        return;
-      }
-
-      const storedFileDocs = await GroupChatStoredFile.find(
-        { roomId },
-        { _id: 1, ossKey: 1 },
-      ).lean();
-      await Promise.all([
-        deleteGroupChatStoredFileObjects(storedFileDocs),
-        GroupChatRoom.deleteOne({ _id: roomId }),
-        GroupChatMessage.deleteMany({ roomId }),
-        GroupChatStoredFile.deleteMany({ roomId }),
-      ]);
-
-      const adminId = sanitizeId(admin?._id, "");
-      const adminName = sanitizeText(admin?.username, "管理员", 64) || "管理员";
-      broadcastGroupChatRoomDissolved(roomId, {
-        id: adminId || "admin",
-        name: adminName,
-      });
-      clearGroupChatRoomSockets(roomId);
-
-      res.json({
-        ok: true,
-        roomId,
-      });
-    } catch (error) {
-      res.status(500).json({
-        error: error?.message || "解散群聊失败，请稍后重试。",
+        error: error?.message || "创建结对编程小教室失败，请稍后重试。",
       });
     }
   });

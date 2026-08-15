@@ -1,16 +1,13 @@
 import {
-  Music,
   CheckSquare,
   ChevronDown,
   ChevronRight,
   Folder,
   FolderPlus,
   FolderOpen,
-  ImagePlus,
   MessageSquarePlus,
   MessagesSquare,
   MoreHorizontal,
-  NotebookPen,
   PanelLeftClose,
   Pencil,
   Pin,
@@ -34,9 +31,6 @@ export default function Sidebar({
   primaryActionLabel = "新聊天",
   primaryActionIcon = MessageSquarePlus,
   activeWorkbench = "",
-  onOpenNotes,
-  onOpenImageGeneration,
-  onOpenMusicGeneration,
   onOpenGroupChat,
   onDeleteSession,
   onBatchDeleteSessions,
@@ -774,30 +768,6 @@ export default function Sidebar({
           <div className="sidebar-workbench">
             <div className="sidebar-section-label">工作台</div>
             <div className="sidebar-actions">
-              <button
-                className={`sidebar-notes-entry${activeWorkbench === "notes" ? " active" : ""}`}
-                onClick={() => onOpenNotes?.()}
-                type="button"
-              >
-                <NotebookPen size={17} />
-                <span>笔记</span>
-              </button>
-              <button
-                className={`sidebar-image-entry${activeWorkbench === "image" ? " active" : ""}`}
-                onClick={() => onOpenImageGeneration?.()}
-                type="button"
-              >
-                <ImagePlus size={17} />
-                <span>图片生成</span>
-              </button>
-              <button
-                className={`sidebar-music-entry${activeWorkbench === "music" ? " active" : ""}`}
-                onClick={() => onOpenMusicGeneration?.()}
-                type="button"
-              >
-                <Music size={17} />
-                <span>音乐生成</span>
-              </button>
               <button
                 className={`sidebar-party-entry${activeWorkbench === "party" ? " active" : ""}`}
                 onClick={() => onOpenGroupChat?.()}

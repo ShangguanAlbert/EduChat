@@ -1,14 +1,5 @@
-import { createFilteredRouteApp } from "../../platform/route-filter-app.js";
-import { registerChatAndImageRoutes } from "../../routes/chat-and-images.js";
-
-function isChatRoutePath(routePath) {
-  if (typeof routePath !== "string") {
-    return true;
-  }
-  return routePath.startsWith("/api/chat/") || routePath.startsWith("/api/auth/admin/");
-}
+import { registerLegacyChatRoutes } from "../../routes/chat.js";
 
 export function registerChatRoutes(app, deps) {
-  const filteredApp = createFilteredRouteApp(app, isChatRoutePath);
-  registerChatAndImageRoutes(filteredApp, deps.legacyRegistrarDeps);
+  registerLegacyChatRoutes(app, deps.legacyRegistrarDeps);
 }

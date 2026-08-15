@@ -10,6 +10,16 @@ export const TEACHER_SCOPE_OPTIONS = Object.freeze([
   { key: DEFAULT_TEACHER_SCOPE_KEY, label: "默认" },
 ]);
 
+export const STUDENT_TEACHER_SCOPE_OPTIONS = Object.freeze(
+  TEACHER_SCOPE_OPTIONS.filter(
+    (item) => item.key !== SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
+  ),
+);
+
+const STUDENT_TEACHER_SCOPE_KEY_SET = new Set(
+  STUDENT_TEACHER_SCOPE_OPTIONS.map((item) => item.key),
+);
+
 const TEACHER_SCOPE_LABEL_MAP = new Map(
   TEACHER_SCOPE_OPTIONS.map((item) => [item.key, item.label]),
 );
@@ -24,6 +34,10 @@ export function sanitizeTeacherScopeKey(value) {
 
 export function isDefaultTeacherScopeKey(value) {
   return sanitizeTeacherScopeKey(value) === DEFAULT_TEACHER_SCOPE_KEY;
+}
+
+export function isStudentTeacherScopeSelectable(value) {
+  return STUDENT_TEACHER_SCOPE_KEY_SET.has(sanitizeTeacherScopeKey(value));
 }
 
 export function getTeacherScopeLabel(value) {

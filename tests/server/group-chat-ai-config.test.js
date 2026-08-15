@@ -9,7 +9,7 @@ import {
 
 test("group-chat AI config defaults to Aliyun and rejects non-Aliyun providers", () => {
   const config = sanitizeGroupChatAiConfig({
-    provider: "packycode",
+    provider: "volcengine",
     model: "",
     protocol: "invalid",
   });

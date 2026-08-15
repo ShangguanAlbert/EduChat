@@ -3,7 +3,7 @@
 ## Summary
 
 - 目标：在现有群聊 `@AI` 基础上，为每个群维护后台 `notes`，并让 AI 在**确定性的"补位"场景**下主动开口。
-- 群聊 AI 全局固定为 `packycode / gpt-5.4`，学生不可选择模型。
+- 群聊 AI 全局固定为 `aliyun / qwen3.7-plus`，学生不可选择模型。
 - 第一版不落真实 Markdown 文件，不给前台展示笔记；`notes` 仅作为后台长期上下文。
 - 主动参与 v1 **只做一种触发**：**悬空问题应答**(orphan-question answer)
   - 群内出现疑问/求助语气
@@ -98,7 +98,7 @@
 
 - 四类任务统一固定为：
   - `agentId = "A"`
-  - `provider = "packycode"`
+  - `provider = "aliyun"`
   - `model = "gpt-5.4"`
   - `protocol = "chat"`
 - 理由：
@@ -472,7 +472,7 @@ v2 是否启用，应基于 v1 真实数据：
 
 ## Assumptions
 
-- 第一版群聊 AI 仍固定为 `Agent A = packycode / gpt-5.4`。
+- 第一版群聊 AI 固定使用 `aliyun / qwen3.7-plus`。
 - 第一版不做真实 Markdown 文件，不做前台群笔记展示。
 - 第一版全局默认开启主动参与，但仅通过服务端配置控制。
 - 第一版主动消息**只补位、不引导**：仅在用户已经明确表达需要帮助、且无人响应时介入。

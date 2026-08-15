@@ -9,6 +9,7 @@ export function subscribeGroupChatAiEvents({
   env = process.env,
   onMessageCreated,
   onMessageUpdated,
+  onRealtimePayload,
   logger = console,
 } = {}) {
   if (!isGroupChatAiRedisEnabled(env)) {
@@ -41,6 +42,8 @@ export function subscribeGroupChatAiEvents({
           ).trim()} messageId=${String(payload?.message?.id || "").trim()}`,
         );
         onMessageUpdated?.(payload);
+      } else if (type === "realtime_payload") {
+        onRealtimePayload?.(payload);
       }
     } catch (error) {
       logger.warn?.("[group-chat-ai-events] failed to parse event payload:", error);

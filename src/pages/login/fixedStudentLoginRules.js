@@ -2,6 +2,7 @@ import {
   FIXED_STUDENT_ACCOUNTS,
   FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
 } from "../../../shared/fixedStudentAccounts.js";
+import { isStudentTeacherScopeSelectable } from "../../../shared/teacherScopes.js";
 
 export const FIXED_STUDENT_LOGIN_REQUIRED_TEACHER_SCOPE_KEY =
   FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY;
@@ -28,5 +29,9 @@ export function findFixedStudentLoginRuleByUsername(username) {
 }
 
 export function resolveFixedStudentTeacherScopeKeyByUsername(username) {
-  return findFixedStudentLoginRuleByUsername(username)?.requiredTeacherScopeKey || "";
+  const teacherScopeKey =
+    findFixedStudentLoginRuleByUsername(username)?.requiredTeacherScopeKey || "";
+  return isStudentTeacherScopeSelectable(teacherScopeKey)
+    ? teacherScopeKey
+    : "";
 }

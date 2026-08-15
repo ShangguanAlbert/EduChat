@@ -2,14 +2,20 @@ import mongoose from "mongoose";
 
 const groupChatAiTaskSchema = new mongoose.Schema(
   {
+    taskKind: {
+      type: String,
+      enum: ["student_reply", "participation_analysis"],
+      default: "student_reply",
+      index: true,
+    },
     roomId: { type: String, required: true, index: true },
     triggerMessageId: { type: String, required: true, unique: true, index: true },
-    placeholderMessageId: { type: String, required: true, index: true },
+    placeholderMessageId: { type: String, default: "", index: true },
     requestedByUserId: { type: String, required: true, index: true },
     requestedByUserName: { type: String, default: "" },
     agentId: { type: String, default: "A" },
-    provider: { type: String, default: "packycode" },
-    model: { type: String, default: "gpt-5.4" },
+    provider: { type: String, default: "aliyun" },
+    model: { type: String, default: "qwen3.7-plus" },
     status: {
       type: String,
       enum: ["pending", "running", "done", "failed"],
@@ -19,6 +25,10 @@ const groupChatAiTaskSchema = new mongoose.Schema(
     contextSnapshot: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({}),
+    },
+    result: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
     },
     attachmentRefs: {
       type: [mongoose.Schema.Types.Mixed],

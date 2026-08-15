@@ -33,4 +33,4 @@
   - 预览暂存附件
   - 第三方 file refs
 - 历史代码仍有一部分依赖 `src/pages/chat/` 中的工具；若重构，优先渐进迁移，不做一次性大搬家
-- 当前普通单聊 Agent A 使用 PackyCode，Agent B 为预留占位，Agent C 使用火山引擎；群聊 `@AI` 使用独立的 DashScope 配置与 worker，不要把两条运行链路混合
+- 当前普通单聊 Agent A/C 使用火山引擎，Agent B 为预留占位；群聊 `@AI` 使用独立的 DashScope 配置与 worker，不要把两条运行链路混合

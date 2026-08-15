@@ -3,18 +3,12 @@ import { adminRoutes } from "../../features/admin/routes.js";
 import { authRoutes } from "../../features/auth/routes.js";
 import { chatRoutes } from "../../features/chat/routes.js";
 import { classroomRoutes } from "../../features/classroom/routes.js";
-import { imageGenerationRoutes } from "../../features/image-generation/routes.js";
-import { musicGenerationRoutes } from "../../features/music-generation/routes.js";
-import { notesRoutes } from "../../features/notes/routes.js";
 import { partyRoutes } from "../../features/party/routes.js";
 
 export const appRoutes = [
   ...authRoutes,
   ...classroomRoutes,
   ...chatRoutes,
-  ...notesRoutes,
-  ...imageGenerationRoutes,
-  ...musicGenerationRoutes,
   ...partyRoutes,
   ...adminRoutes,
   {

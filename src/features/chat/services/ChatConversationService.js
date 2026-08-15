@@ -122,7 +122,7 @@ export function sanitizeContextSummaryMessage(raw) {
   const internalType = String(raw.internalType || "").trim().toLowerCase();
   if (internalType !== "context_summary") return null;
   return {
-    id: String(raw.id || `packy-summary-${Date.now()}`).trim(),
+    id: String(raw.id || `context-summary-${Date.now()}`).trim(),
     role: "system",
     content,
     hidden: true,
@@ -132,53 +132,9 @@ export function sanitizeContextSummaryMessage(raw) {
   };
 }
 
-export function findLatestPackyContextSummaryMessage(list) {
-  const safeList = Array.isArray(list) ? list : [];
-  for (let index = safeList.length - 1; index >= 0; index -= 1) {
-    const message = safeList[index];
-    if (
-      message?.hidden &&
-      message?.role === "system" &&
-      String(message?.internalType || "").trim().toLowerCase() === "context_summary" &&
-      String(message?.content || "").trim()
-    ) {
-      return message;
-    }
-  }
-  return null;
-}
-
-export function buildApiSourceMessages(list, { usePackyContextSummary = false } = {}) {
+export function buildApiSourceMessages(list) {
   const safeList = Array.isArray(list) ? list.filter(Boolean) : [];
-  if (!usePackyContextSummary) {
-    return safeList.filter((message) => !message?.hidden);
-  }
-
-  const summaryMessage = findLatestPackyContextSummaryMessage(safeList);
-  if (!summaryMessage) {
-    return safeList.filter((message) => !message?.hidden);
-  }
-
-  const cutoffId = String(summaryMessage.summaryUpToMessageId || "").trim();
-  let skipping = !!cutoffId;
-  let foundCutoff = !cutoffId;
-  const next = [summaryMessage];
-
-  safeList.forEach((message) => {
-    if (message?.id === summaryMessage.id) return;
-    if (message?.hidden) return;
-    if (!skipping) {
-      next.push(message);
-      return;
-    }
-    if (String(message?.id || "").trim() === cutoffId) {
-      foundCutoff = true;
-      skipping = false;
-    }
-  });
-
-  if (foundCutoff) return next;
-  return [summaryMessage, ...safeList.filter((message) => !message?.hidden)];
+  return safeList.filter((message) => !message?.hidden);
 }
 
 export function buildApiMessageContentFromMessage(message, useVolcengineResponsesFileRefs) {
@@ -216,9 +172,9 @@ export function buildApiMessageContentFromMessage(message, useVolcengineResponse
 
 export function buildApiMessages(
   list,
-  { useVolcengineResponsesFileRefs = false, usePackyContextSummary = false } = {},
+  { useVolcengineResponsesFileRefs = false } = {},
 ) {
-  return buildApiSourceMessages(list, { usePackyContextSummary })
+  return buildApiSourceMessages(list)
     .map((message) => {
       const nextMessage = {
         id: String(message?.id || ""),

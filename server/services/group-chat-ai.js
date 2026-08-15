@@ -8,6 +8,8 @@ export const GROUP_CHAT_AI_RUNTIME = Object.freeze({
 });
 
 export const GROUP_CHAT_AI_LIMITS = Object.freeze({
+  globalRunning: 32,
+  participationRunning: 8,
   roomRunning: 4,
   userRunning: 2,
   userPending: 3,
@@ -69,11 +71,19 @@ export function checkGroupChatAiEnqueuePolicy(
 
 export function checkGroupChatAiStartPolicy(
   {
+    globalRunningCount = 0,
     roomRunningCount = 0,
     userRunningCount = 0,
   } = {},
   limits = GROUP_CHAT_AI_LIMITS,
 ) {
+  if (Number(globalRunningCount) >= Number(limits.globalRunning || 0)) {
+    return {
+      accepted: false,
+      code: "global_running_limit",
+      message: "当前 AI 请求较多，已进入排队，请稍后。",
+    };
+  }
   if (Number(roomRunningCount) >= Number(limits.roomRunning || 0)) {
     return {
       accepted: false,

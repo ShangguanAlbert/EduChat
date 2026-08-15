@@ -20,7 +20,6 @@ import mongoose from "mongoose";
 import OSS from "ali-oss";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { WebSocketServer } from "ws";
-import { countTokens, encodeChat } from "gpt-tokenizer";
 import {
   resolveBasePathAwareWebSocketPaths,
   resolveConfiguredBasePath,
@@ -46,9 +45,14 @@ import {
   shouldUseAliyunDashScopeMultimodalEndpoint,
 } from "../providers/aliyun/index.js";
 import {
-  buildMiniMaxProviderConfig,
-  formatMiniMaxUpstreamError,
-} from "../providers/minimax/index.js";
+  DEFAULT_PAIR_PROGRAMMING_INVITE_CODE,
+  canAccessTeacherScopedRoom,
+  hasPairProgrammingTokenAccess,
+  isCollaborationObserverForRoom,
+  isPairProgrammingInviteCodeValid,
+  isPairProgrammingTeacherScope,
+  readCollaborationObserverRoomId,
+} from "../modules/party-coding/access-control.js";
 import {
   ALIYUN_SEARCH_CITATION_FORMATS,
   ALIYUN_SEARCH_FRESHNESS_OPTIONS,
@@ -57,10 +61,12 @@ import {
 import {
   DEFAULT_TEACHER_SCOPE_KEY,
   SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
+  SHI_GAOJUN_TEACHER_SCOPE_KEY,
   YANG_JUNFENG_TEACHER_SCOPE_KEY,
   buildTeacherScopedStorageUserId,
   getTeacherScopeLabel,
   isDefaultTeacherScopeKey,
+  isStudentTeacherScopeSelectable,
   sanitizeTeacherScopeKey,
 } from "../../shared/teacherScopes.js";
 import {
@@ -70,7 +76,6 @@ import {
 } from "../../shared/fixedStudentAccounts.js";
 import {
   createReasoningTagStreamResolver,
-  resolveReasoningTaggedText,
 } from "../../shared/reasoningTags.js";
 import {
   EXCEL_EXTENSIONS,
@@ -118,15 +123,33 @@ let groupChatExpiredFileCleanupTimer = null;
 let generatedImageExpiredCleanupTimer = null;
 const port = process.env.PORT || 8787;
 const mongoUri = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/educhat";
-const authSecret = String(
-  process.env.AUTH_SECRET || "educhat-dev-secret-change-this-secret",
+const configuredAuthSecret = String(process.env.AUTH_SECRET || "").trim();
+if (!configuredAuthSecret && process.env.NODE_ENV === "production") {
+  throw new Error("生产环境必须配置 AUTH_SECRET，服务已拒绝使用默认签名密钥启动。");
+}
+const authSecret =
+  configuredAuthSecret || crypto.randomBytes(32).toString("hex");
+if (!configuredAuthSecret) {
+  console.warn(
+    "[auth] 当前为开发环境，AUTH_SECRET 未配置；本次进程已生成临时签名密钥，重启后现有会话将失效。",
+  );
+}
+const PAIR_PROGRAMMING_INVITE_CODE = String(
+  process.env.PAIR_PROGRAMMING_INVITE_CODE ||
+    DEFAULT_PAIR_PROGRAMMING_INVITE_CODE,
 ).trim();
+const TEACHER_REGISTRATION_INVITE_CODE = String(
+  process.env.TEACHER_REGISTRATION_INVITE_CODE || "",
+).trim();
+const SELF_REGISTERED_TEACHER_ACCOUNT_TAG = "teacher_invite_registration";
+const ACCOUNT_STATUS_ACTIVE = "active";
+const ACCOUNT_STATUS_PENDING_BINDING = "pending_binding";
+const ACCOUNT_STATUS_DISABLED = "disabled";
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024 - 1; // strictly < 10MB
 const MAX_FILES = 8;
 const CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS = 45 * 60 * 1000;
 const CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS = 320;
 const CHAT_PREPARED_ATTACHMENT_MAX_REFS = MAX_FILES;
-const MAX_IMAGE_GENERATION_INPUT_FILES = 14;
 const ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS = 48000;
 const PASSWORD_MIN_LENGTH = 6;
 const AUTH_TOKEN_TTL_SECONDS = 12 * 60 * 60;
@@ -140,11 +163,6 @@ const ADMIN_CONFIG_KEY = "global";
 const TEACHER_SCOPE_LOCKED_AGENT_MAP = Object.freeze({});
 const CLASS_NAME_JIAOJI_231 = "教技231";
 const CLASS_NAME_810 = "810班";
-const CLASS_NAME_811 = "811班";
-const ADMIN_CLASSROOM_SUPPORTED_CLASS_NAMES = Object.freeze([
-  CLASS_NAME_810,
-  CLASS_NAME_811,
-]);
 const ADMIN_CLASSROOM_DEFAULT_CLASS_NAME = CLASS_NAME_810;
 const CLASSROOM_FIRST_LESSON_DATE = "2026-03-11";
 const CLASSROOM_QUESTIONNAIRE_URL = "https://v.wjx.cn/vm/PQfZjgr.aspx#";
@@ -179,23 +197,6 @@ const RUNTIME_MAX_REASONING_TOKENS = 128000;
 const VOLCENGINE_FIXED_SAMPLING_MODEL_ID = "doubao-seed-2-0-pro-260215";
 const VOLCENGINE_FIXED_TEMPERATURE = 1;
 const VOLCENGINE_FIXED_TOP_P = 0.95;
-const PACKYCODE_DEFAULT_MODEL = "gpt-5.4";
-const PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS = 1000000;
-const PACKYCODE_GPT54_MAX_INPUT_TOKENS = 1000000;
-const PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS = 256000;
-const PACKYCODE_GPT54_COMPRESSION_TRIGGER_TOKENS = 800000;
-const PACKYCODE_GPT54_COMPRESSION_TARGET_TOKENS = 700000;
-const PACKYCODE_GPT54_DEFAULT_KEEP_USER_ROUNDS = 6;
-const PACKYCODE_GPT54_MIN_KEEP_USER_ROUNDS = 2;
-const PACKYCODE_GPT54_HIDDEN_USER_PROMPT = "不要使用无序列表输出。";
-const SESSION_NOTES_MAX_ESTIMATED_TOKENS = 4000;
-const SESSION_NOTES_MAX_LIST_ITEMS = 24;
-const SESSION_NOTES_MAX_FILE_SUMMARIES = 12;
-const SESSION_NOTES_RECENT_USER_ROUNDS = 8;
-const SESSION_NOTES_CONTEXT_SAFETY_MARGIN_TOKENS = 12000;
-const SESSION_NOTES_COMPRESSION_LOCK_MS = 30 * 1000;
-const PACKYCODE_REQUEST_RECONNECT_RETRIES = 5;
-const PACKYCODE_REQUEST_RECONNECT_DELAY_MS = 15 * 1000;
 const UPLOADED_FILE_CONTEXT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const GENERATED_IMAGE_HISTORY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const GENERATED_IMAGE_HISTORY_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -247,8 +248,6 @@ const RESERVED_ADMIN_USERNAME_KEYS = new Set([
   ...FIXED_ADMIN_USERNAME_KEYS,
 ]);
 const CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE = "chat-prepared-pdf-images";
-const IMAGE_GENERATION_INPUT_OSS_SCOPE = "image-generation-inputs";
-const IMAGE_GENERATION_OUTPUT_OSS_SCOPE = "image-generation-outputs";
 const ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES = 50;
 const ALIYUN_DASHSCOPE_PDF_RENDER_DPI = 300;
 const ALIYUN_DASHSCOPE_PDF_RENDER_TIMEOUT_MS = 180 * 1000;
@@ -308,9 +307,9 @@ const AGENT_D_FIXED_MAX_OUTPUT_TOKENS = 65536;
 const AGENT_B_FIXED_PROVIDER = "reserved";
 const AGENT_B_FIXED_MODEL = "reserved";
 const AGENT_B_FIXED_PROTOCOL = "reserved";
-const AGENT_A_FIXED_PROVIDER = "packycode";
-const AGENT_A_FIXED_MODEL = "gpt-5.4";
-const AGENT_A_FIXED_PROTOCOL = "chat";
+const AGENT_A_FIXED_PROVIDER = "volcengine";
+const AGENT_A_FIXED_MODEL = "doubao-seed-2-0-pro-260215";
+const AGENT_A_FIXED_PROTOCOL = "responses";
 const AGENT_C_FIXED_PROVIDER = "volcengine";
 const AGENT_C_FIXED_MODEL = "doubao-seed-2-0-pro-260215";
 const AGENT_C_FIXED_PROTOCOL = "responses";
@@ -406,10 +405,11 @@ const AGENT_RUNTIME_DEFAULT_OVERRIDES = Object.freeze({
     provider: AGENT_A_FIXED_PROVIDER,
     model: AGENT_A_FIXED_MODEL,
     protocol: AGENT_A_FIXED_PROTOCOL,
-    contextWindowTokens: PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
-    maxInputTokens: PACKYCODE_GPT54_MAX_INPUT_TOKENS,
-    maxOutputTokens: PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
-    maxReasoningTokens: RUNTIME_MAX_REASONING_TOKENS,
+    contextWindowTokens: 256000,
+    maxInputTokens: 256000,
+    maxOutputTokens: AGENT_C_FIXED_MAX_OUTPUT_TOKENS,
+    maxReasoningTokens: 131072,
+    thinkingEffort: AGENT_C_FIXED_THINKING_EFFORT,
     enableWebSearch: false,
   }),
   B: Object.freeze({
@@ -462,14 +462,6 @@ const AGENT_RUNTIME_DEFAULTS = Object.freeze({
   }),
 });
 const RESPONSE_MODEL_TOKEN_PROFILES = Object.freeze([
-  {
-    id: "gpt-5.4",
-    aliases: ["gpt-5.4"],
-    contextWindowTokens: PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
-    maxInputTokens: PACKYCODE_GPT54_MAX_INPUT_TOKENS,
-    maxOutputTokens: PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
-    maxReasoningTokens: RUNTIME_MAX_REASONING_TOKENS,
-  },
   {
     id: "doubao-seed-2-0-pro-260215",
     aliases: [
@@ -913,13 +905,6 @@ const teacherClassroomFileUpload = multer({
     fileSize: TEACHER_CLASSROOM_FILE_MAX_FILE_SIZE_BYTES,
   },
 });
-const imageGenerationUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    files: MAX_IMAGE_GENERATION_INPUT_FILES,
-    fileSize: MAX_FILE_SIZE_BYTES,
-  },
-});
 const groupChatImageUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -941,9 +926,16 @@ const authUserSchema = new mongoose.Schema(
     usernameKey: { type: String, required: true, unique: true, index: true },
     role: { type: String, enum: ["admin", "user"], default: "user" },
     passwordHash: { type: String, required: true },
-    // NOTE: 仅用于本地教学演示的账号导出功能，不建议在生产场景保存明文密码。
-    passwordPlain: { type: String, required: true },
     accountTag: { type: String, default: "" },
+    accountStatus: {
+      type: String,
+      enum: [
+        ACCOUNT_STATUS_ACTIVE,
+        ACCOUNT_STATUS_PENDING_BINDING,
+        ACCOUNT_STATUS_DISABLED,
+      ],
+      default: ACCOUNT_STATUS_ACTIVE,
+    },
     lockedTeacherScopeKey: { type: String, default: "" },
     profile: {
       name: { type: String, default: "" },
@@ -1104,82 +1096,6 @@ const UploadedFileContext =
   mongoose.models.UploadedFileContext ||
   mongoose.model("UploadedFileContext", uploadedFileContextSchema);
 
-const sessionNotesSchema = new mongoose.Schema(
-  {
-    userId: { type: String, required: true, index: true },
-    sessionId: { type: String, required: true, index: true },
-    tokenEstimate: { type: Number, default: 0 },
-    notes: {
-      type: new mongoose.Schema(
-        {
-          goal: { type: String, default: "" },
-          facts: { type: [String], default: () => [] },
-          preferences: { type: [String], default: () => [] },
-          completed: { type: [String], default: () => [] },
-          pending: { type: [String], default: () => [] },
-          openQuestions: { type: [String], default: () => [] },
-          fileSummaries: {
-            type: [
-              new mongoose.Schema(
-                {
-                  filename: { type: String, default: "" },
-                  summary: { type: String, default: "" },
-                  keyPoints: { type: [String], default: () => [] },
-                },
-                { _id: false },
-              ),
-            ],
-            default: () => [],
-          },
-          doNotRepeat: { type: [String], default: () => [] },
-        },
-        { _id: false },
-      ),
-      default: () => ({
-        goal: "",
-        facts: [],
-        preferences: [],
-        completed: [],
-        pending: [],
-        openQuestions: [],
-        fileSummaries: [],
-        doNotRepeat: [],
-      }),
-    },
-    recentTurns: {
-      type: [
-        new mongoose.Schema(
-          {
-            role: { type: String, default: "user" },
-            content: { type: String, default: "" },
-          },
-          { _id: false },
-        ),
-      ],
-      default: () => [],
-    },
-    summaryUpToMessageId: { type: String, default: "" },
-    compressionLockUntil: { type: Date, default: null },
-  },
-  {
-    timestamps: true,
-    collection: "session_notes",
-    autoIndex: false,
-  },
-);
-sessionNotesSchema.index(
-  { userId: 1, sessionId: 1 },
-  { unique: true, name: "ux_session_notes_user_session" },
-);
-sessionNotesSchema.index(
-  { compressionLockUntil: 1 },
-  { name: "ix_session_notes_compression_lock_until" },
-);
-
-const SessionNotes =
-  mongoose.models.SessionNotes ||
-  mongoose.model("SessionNotes", sessionNotesSchema);
-
 const generatedImageHistorySchema = new mongoose.Schema(
   {
     userId: { type: String, required: true, index: true },
@@ -1218,76 +1134,6 @@ generatedImageHistorySchema.index(
 const GeneratedImageHistory =
   mongoose.models.GeneratedImageHistory ||
   mongoose.model("GeneratedImageHistory", generatedImageHistorySchema);
-
-const generatedMusicHistorySchema = new mongoose.Schema(
-  {
-    userId: { type: String, required: true, index: true },
-    title: { type: String, default: "" },
-    prompt: { type: String, default: "" },
-    lyrics: { type: String, default: "" },
-    generationType: { type: String, default: "compose" },
-    isInstrumental: { type: Boolean, default: false },
-    lyricsOptimizer: { type: Boolean, default: false },
-    model: { type: String, default: "" },
-    format: { type: String, default: "mp3" },
-    sampleRate: { type: Number, default: 0 },
-    bitrate: { type: Number, default: 0 },
-    durationMs: { type: Number, default: 0 },
-    audioStorageType: { type: String, default: "mongo" },
-    audioUrl: { type: String, default: "" },
-    ossKey: { type: String, default: "" },
-    ossBucket: { type: String, default: "" },
-    ossRegion: { type: String, default: "" },
-    audioMimeType: { type: String, default: "audio/mpeg" },
-    audioSize: { type: Number, default: 0 },
-    audioData: { type: Buffer, default: Buffer.alloc(0) },
-    referenceAudioStorageType: { type: String, default: "" },
-    referenceAudioUrl: { type: String, default: "" },
-    referenceAudioOssKey: { type: String, default: "" },
-    referenceAudioOssBucket: { type: String, default: "" },
-    referenceAudioOssRegion: { type: String, default: "" },
-    referenceAudioMimeType: { type: String, default: "" },
-    referenceAudioSize: { type: Number, default: 0 },
-    referenceAudioFileName: { type: String, default: "" },
-  },
-  {
-    timestamps: true,
-    collection: "generated_music_histories",
-  },
-);
-generatedMusicHistorySchema.index(
-  { userId: 1, createdAt: -1 },
-  { name: "ix_generated_music_histories_user_created_at_desc" },
-);
-
-const GeneratedMusicHistory =
-  mongoose.models.GeneratedMusicHistory ||
-  mongoose.model("GeneratedMusicHistory", generatedMusicHistorySchema);
-
-const generatedLyricsHistorySchema = new mongoose.Schema(
-  {
-    userId: { type: String, required: true, index: true },
-    title: { type: String, default: "" },
-    mode: { type: String, default: "write_full_song" },
-    prompt: { type: String, default: "" },
-    sourceLyrics: { type: String, default: "" },
-    songTitle: { type: String, default: "" },
-    styleTags: { type: String, default: "" },
-    lyrics: { type: String, default: "" },
-  },
-  {
-    timestamps: true,
-    collection: "generated_lyrics_histories",
-  },
-);
-generatedLyricsHistorySchema.index(
-  { userId: 1, createdAt: -1 },
-  { name: "ix_generated_lyrics_histories_user_created_at_desc" },
-);
-
-const GeneratedLyricsHistory =
-  mongoose.models.GeneratedLyricsHistory ||
-  mongoose.model("GeneratedLyricsHistory", generatedLyricsHistorySchema);
 
 const groupChatRoomReadStateSchema = new mongoose.Schema(
   {
@@ -1369,8 +1215,8 @@ const groupChatAiMetaSchema = new mongoose.Schema(
   {
     taskId: { type: String, default: "" },
     agentId: { type: String, default: "A" },
-    provider: { type: String, default: "packycode" },
-    model: { type: String, default: "gpt-5.4" },
+    provider: { type: String, default: "aliyun" },
+    model: { type: String, default: "qwen3.7-plus" },
     requestedByUserId: { type: String, default: "" },
     triggerMessageId: { type: String, default: "" },
     status: { type: String, default: "" },
@@ -1727,6 +1573,8 @@ const adminClassroomCoursePlanSchema = new mongoose.Schema(
     courseStartAt: { type: String, default: "" },
     courseEndAt: { type: String, default: "" },
     notes: { type: String, default: "" },
+    announcement: { type: String, default: "" },
+    announcementUpdatedAt: { type: String, default: "" },
     homeworkRequirementText: { type: String, default: "" },
     enabled: { type: Boolean, default: true },
     homeworkUploadEnabled: { type: Boolean, default: true },
@@ -1735,6 +1583,33 @@ const adminClassroomCoursePlanSchema = new mongoose.Schema(
     files: { type: [adminClassroomCourseFileSchema], default: () => [] },
     createdAt: { type: String, default: "" },
     updatedAt: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
+const paiaCourseKnowledgePointSchema = new mongoose.Schema(
+  {
+    key: { type: String, required: true },
+    label: { type: String, required: true },
+    unitTitle: { type: String, default: "" },
+    description: { type: String, default: "" },
+    prerequisiteKeys: { type: [String], default: () => [] },
+  },
+  { _id: false },
+);
+
+const paiaCourseMemoryConfigSchema = new mongoose.Schema(
+  {
+    courseId: { type: String, default: "html-css" },
+    courseName: { type: String, default: "HTML 与 CSS 网页创作" },
+    termName: { type: String, default: "" },
+    syllabusText: { type: String, default: "" },
+    knowledgePoints: {
+      type: [paiaCourseKnowledgePointSchema],
+      default: () => [],
+    },
+    updatedAt: { type: Date, default: null },
+    updatedByAdminId: { type: String, default: "" },
   },
   { _id: false },
 );
@@ -1804,6 +1679,18 @@ const adminConfigSchema = new mongoose.Schema(
     shangguanClassTaskProductImprovementEnabled: {
       type: Boolean,
       default: false,
+    },
+    paiaParticipationMonitoringEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    paiaParticipationMonitoringUpdatedAt: {
+      type: Date,
+      default: null,
+    },
+    paiaCourseMemoryConfig: {
+      type: paiaCourseMemoryConfigSchema,
+      default: () => ({}),
     },
     teacherCoursePlans: {
       type: [adminClassroomCoursePlanSchema],
@@ -2492,447 +2379,6 @@ async function materializeStagedAttachmentEntriesAsMultipartFiles(entries = []) 
   return { files, ossFiles, missing };
 }
 
-function createDefaultSessionNotes() {
-  return {
-    goal: "",
-    facts: [],
-    preferences: [],
-    completed: [],
-    pending: [],
-    openQuestions: [],
-    fileSummaries: [],
-    doNotRepeat: [],
-  };
-}
-
-function sanitizeSessionNotesList(input, maxItems = SESSION_NOTES_MAX_LIST_ITEMS) {
-  const safeList = Array.isArray(input) ? input : [];
-  const dedup = new Set();
-  const normalized = [];
-  safeList.forEach((item) => {
-    const text = sanitizeText(item, "", 600);
-    if (!text) return;
-    const key = text.trim().toLowerCase();
-    if (!key || dedup.has(key)) return;
-    dedup.add(key);
-    normalized.push(text);
-  });
-  return normalized.slice(0, maxItems);
-}
-
-function sanitizeSessionNotesFileSummaries(input) {
-  const safeList = Array.isArray(input) ? input : [];
-  const dedup = new Set();
-  const normalized = [];
-  safeList.forEach((item) => {
-    const filename = sanitizeText(item?.filename, "", 180);
-    const summary = sanitizeText(item?.summary, "", 1200);
-    const keyPoints = sanitizeSessionNotesList(item?.keyPoints, 6);
-    const key = `${filename.toLowerCase()}::${summary.slice(0, 120).toLowerCase()}`;
-    if ((!filename && !summary) || dedup.has(key)) return;
-    dedup.add(key);
-    normalized.push({ filename, summary, keyPoints });
-  });
-  return normalized.slice(0, SESSION_NOTES_MAX_FILE_SUMMARIES);
-}
-
-function sanitizeSessionNotesPayload(raw) {
-  const source = raw && typeof raw === "object" ? raw : {};
-  return {
-    goal: sanitizeText(source.goal, "", 1200),
-    facts: sanitizeSessionNotesList(source.facts),
-    preferences: sanitizeSessionNotesList(source.preferences),
-    completed: sanitizeSessionNotesList(source.completed),
-    pending: sanitizeSessionNotesList(source.pending),
-    openQuestions: sanitizeSessionNotesList(source.openQuestions),
-    fileSummaries: sanitizeSessionNotesFileSummaries(source.fileSummaries),
-    doNotRepeat: sanitizeSessionNotesList(source.doNotRepeat),
-  };
-}
-
-function trimSessionNotesGoal(goal, maxChars = 900) {
-  return sanitizeText(goal, "", maxChars);
-}
-
-function trimSessionNotesListItems(list, maxChars = 240, maxItems = SESSION_NOTES_MAX_LIST_ITEMS) {
-  const safeList = Array.isArray(list) ? list : [];
-  return sanitizeSessionNotesList(
-    safeList.map((item) => sanitizeText(item, "", maxChars)),
-    maxItems,
-  );
-}
-
-function trimSessionNotesFileSummariesToBudget(input, { maxSummaryChars = 360, maxKeyPoints = 4 } = {}) {
-  return sanitizeSessionNotesFileSummaries(input).map((item) => ({
-    filename: sanitizeText(item?.filename, "", 180),
-    summary: sanitizeText(item?.summary, "", maxSummaryChars),
-    keyPoints: trimSessionNotesListItems(item?.keyPoints, 180, maxKeyPoints),
-  }));
-}
-
-function fitSessionNotesToTokenBudget(rawNotes) {
-  let next = sanitizeSessionNotesPayload(rawNotes);
-  if (
-    estimateSessionNotesTokens(next) <= SESSION_NOTES_MAX_ESTIMATED_TOKENS
-  ) {
-    return next;
-  }
-
-  next = {
-    ...next,
-    goal: trimSessionNotesGoal(next.goal, 800),
-    facts: trimSessionNotesListItems(next.facts, 240, 18),
-    preferences: trimSessionNotesListItems(next.preferences, 200, 12),
-    completed: trimSessionNotesListItems(next.completed, 220, 14),
-    pending: trimSessionNotesListItems(next.pending, 220, 14),
-    openQuestions: trimSessionNotesListItems(next.openQuestions, 220, 14),
-    fileSummaries: trimSessionNotesFileSummariesToBudget(next.fileSummaries, {
-      maxSummaryChars: 320,
-      maxKeyPoints: 4,
-    }).slice(-8),
-    doNotRepeat: trimSessionNotesListItems(next.doNotRepeat, 220, 12),
-  };
-  if (
-    estimateSessionNotesTokens(next) <= SESSION_NOTES_MAX_ESTIMATED_TOKENS
-  ) {
-    return next;
-  }
-
-  const removableFields = [
-    "facts",
-    "completed",
-    "pending",
-    "openQuestions",
-    "preferences",
-    "doNotRepeat",
-    "fileSummaries",
-  ];
-  let safetyCounter = 0;
-  while (
-    estimateSessionNotesTokens(next) > SESSION_NOTES_MAX_ESTIMATED_TOKENS &&
-    safetyCounter < 64
-  ) {
-    safetyCounter += 1;
-    let shrunk = false;
-
-    for (const field of removableFields) {
-      const value = Array.isArray(next[field]) ? next[field] : [];
-      if (value.length > 1) {
-        next = { ...next, [field]: value.slice(1) };
-        shrunk = true;
-        break;
-      }
-    }
-
-    if (shrunk) continue;
-
-    if (next.goal && next.goal.length > 240) {
-      next = { ...next, goal: trimSessionNotesGoal(next.goal, Math.ceil(next.goal.length * 0.75)) };
-      continue;
-    }
-
-    const fileSummaries = trimSessionNotesFileSummariesToBudget(
-      next.fileSummaries,
-      {
-        maxSummaryChars: 200,
-        maxKeyPoints: 3,
-      },
-    );
-    if (JSON.stringify(fileSummaries) !== JSON.stringify(next.fileSummaries)) {
-      next = { ...next, fileSummaries };
-      continue;
-    }
-
-    const compacted = {
-      ...next,
-      facts: trimSessionNotesListItems(next.facts, 160, 8),
-      preferences: trimSessionNotesListItems(next.preferences, 140, 8),
-      completed: trimSessionNotesListItems(next.completed, 160, 8),
-      pending: trimSessionNotesListItems(next.pending, 160, 8),
-      openQuestions: trimSessionNotesListItems(next.openQuestions, 160, 8),
-      doNotRepeat: trimSessionNotesListItems(next.doNotRepeat, 160, 8),
-      fileSummaries: fileSummaries.slice(-4),
-      goal: trimSessionNotesGoal(next.goal, 320),
-    };
-    if (JSON.stringify(compacted) !== JSON.stringify(next)) {
-      next = compacted;
-      continue;
-    }
-
-    next = {
-      ...next,
-      facts: [],
-      preferences: [],
-      completed: [],
-      pending: [],
-      openQuestions: [],
-      doNotRepeat: [],
-      fileSummaries: fileSummaries.slice(-2),
-      goal: trimSessionNotesGoal(next.goal, 220),
-    };
-  }
-
-  return sanitizeSessionNotesPayload(next);
-}
-
-function sanitizeSessionNotesTurn(item, index = 0) {
-  const role = item?.role === "assistant" ? "assistant" : "user";
-  const content = sanitizeText(item?.content, "", 4000);
-  return {
-    role,
-    content: content || `（空白消息 ${index + 1}）`,
-  };
-}
-
-function sanitizeSessionRecentTurns(input) {
-  const safeList = Array.isArray(input) ? input : [];
-  return safeList
-    .slice(-SESSION_NOTES_RECENT_USER_ROUNDS * 2)
-    .map((item, index) => sanitizeSessionNotesTurn(item, index))
-    .filter((item) => !!item.content);
-}
-
-function estimateSessionNotesTokens(value) {
-  const text =
-    typeof value === "string"
-      ? value
-      : JSON.stringify(value && typeof value === "object" ? value : {});
-  const length = String(text || "").trim().length;
-  if (!length) return 0;
-  return Math.ceil((length / 4) * 1.2);
-}
-
-function buildSessionNotesPrompt(notes) {
-  const safeNotes = sanitizeSessionNotesPayload(notes);
-  const sections = [];
-
-  if (safeNotes.goal) sections.push(`当前目标：\n${safeNotes.goal}`);
-  if (safeNotes.facts.length > 0) {
-    sections.push(
-      `已确认事实：\n${safeNotes.facts.map((item) => `- ${item}`).join("\n")}`,
-    );
-  }
-  if (safeNotes.preferences.length > 0) {
-    sections.push(
-      `用户偏好：\n${safeNotes.preferences.map((item) => `- ${item}`).join("\n")}`,
-    );
-  }
-  if (safeNotes.completed.length > 0) {
-    sections.push(
-      `已完成事项：\n${safeNotes.completed.map((item) => `- ${item}`).join("\n")}`,
-    );
-  }
-  if (safeNotes.pending.length > 0) {
-    sections.push(
-      `待办事项：\n${safeNotes.pending.map((item) => `- ${item}`).join("\n")}`,
-    );
-  }
-  if (safeNotes.openQuestions.length > 0) {
-    sections.push(
-      `未决问题：\n${safeNotes.openQuestions.map((item) => `- ${item}`).join("\n")}`,
-    );
-  }
-  if (safeNotes.fileSummaries.length > 0) {
-    sections.push(
-      `文件摘要：\n${safeNotes.fileSummaries
-        .map((item) => {
-          const keyPoints = item.keyPoints
-            .map((point) => `  - ${point}`)
-            .join("\n");
-          return [
-            `- ${item.filename || "未命名文件"}：${item.summary || "无摘要"}`,
-            keyPoints,
-          ]
-            .filter(Boolean)
-            .join("\n");
-        })
-        .join("\n")}`,
-    );
-  }
-  if (safeNotes.doNotRepeat.length > 0) {
-    sections.push(
-      `避免重复：\n${safeNotes.doNotRepeat.map((item) => `- ${item}`).join("\n")}`,
-    );
-  }
-
-  if (sections.length === 0) return "";
-  return [
-    "以下是当前会话的结构化笔记（session notes）。这些笔记是长期记忆，请优先参考它，而不是假设更早的原始对话仍会完整出现在上下文中。",
-    sections.join("\n\n"),
-  ].join("\n\n");
-}
-
-function buildSessionNotesMessageContent(content) {
-  const text = buildPackyEstimatorTextContent(content);
-  return sanitizeText(text, "", 4000);
-}
-
-function buildSessionRecentTurnsFromMessages(messages) {
-  const visibleMessages = (Array.isArray(messages) ? messages : []).filter(
-    (message) => !message?.hidden,
-  );
-  const recentMessages = pickRecentUserRounds(
-    visibleMessages,
-    SESSION_NOTES_RECENT_USER_ROUNDS,
-  );
-  return recentMessages
-    .map((message, index) => ({
-      role: message?.role === "assistant" ? "assistant" : "user",
-      content: buildSessionNotesMessageContent(message?.content) || `（空白消息 ${index + 1}）`,
-    }))
-    .filter((item) => !!item.content);
-}
-
-function buildMessagesBeforeRecentTurns(messages, recentTurns) {
-  const safeMessages = Array.isArray(messages) ? messages : [];
-  const safeRecent = Array.isArray(recentTurns) ? recentTurns : [];
-  if (safeMessages.length === 0 || safeRecent.length === 0) return [];
-  const firstRecentId = sanitizeId(safeRecent[0]?.id, "");
-  if (!firstRecentId) return [];
-  const index = safeMessages.findIndex(
-    (message) => sanitizeId(message?.id, "") === firstRecentId,
-  );
-  if (index <= 0) return [];
-  return safeMessages.slice(0, index);
-}
-
-function buildSessionNotesTranscript(messages) {
-  return renderPackySummarySourceMessages(
-    (Array.isArray(messages) ? messages : []).filter(
-      (message) => !message?.hidden,
-    ),
-  );
-}
-
-async function readSessionNotes({ userId, sessionId }) {
-  const safeUserId = sanitizeId(userId, "");
-  const safeSessionId = sanitizeId(sessionId, "");
-  if (!safeUserId || !safeSessionId) return null;
-
-  const doc = await SessionNotes.findOne(
-    { userId: safeUserId, sessionId: safeSessionId },
-    {
-      userId: 1,
-      sessionId: 1,
-      tokenEstimate: 1,
-      notes: 1,
-      recentTurns: 1,
-      summaryUpToMessageId: 1,
-      compressionLockUntil: 1,
-      updatedAt: 1,
-    },
-  )
-    .lean()
-    .catch(() => null);
-
-  if (!doc) return null;
-  return {
-    userId: safeUserId,
-    sessionId: safeSessionId,
-    tokenEstimate: sanitizeRuntimeInteger(
-      doc?.tokenEstimate,
-      0,
-      0,
-      SESSION_NOTES_MAX_ESTIMATED_TOKENS * 4,
-    ),
-    notes: sanitizeSessionNotesPayload(doc?.notes),
-    recentTurns: sanitizeSessionRecentTurns(doc?.recentTurns),
-    summaryUpToMessageId: sanitizeId(doc?.summaryUpToMessageId, ""),
-    compressionLockUntil: doc?.compressionLockUntil || null,
-    updatedAt: doc?.updatedAt || null,
-  };
-}
-
-async function upsertSessionNotes({
-  userId,
-  sessionId,
-  notes,
-  recentTurns,
-  summaryUpToMessageId = "",
-}) {
-  const safeUserId = sanitizeId(userId, "");
-  const safeSessionId = sanitizeId(sessionId, "");
-  if (!safeUserId || !safeSessionId) return null;
-
-  const safeNotes = fitSessionNotesToTokenBudget(notes);
-  const safeRecentTurns = sanitizeSessionRecentTurns(recentTurns);
-  const tokenEstimate = estimateSessionNotesTokens(safeNotes);
-
-  await SessionNotes.findOneAndUpdate(
-    { userId: safeUserId, sessionId: safeSessionId },
-    {
-      $set: {
-        notes: safeNotes,
-        recentTurns: safeRecentTurns,
-        tokenEstimate,
-        summaryUpToMessageId: sanitizeId(summaryUpToMessageId, ""),
-      },
-      $setOnInsert: {
-        userId: safeUserId,
-        sessionId: safeSessionId,
-      },
-    },
-    {
-      upsert: true,
-      new: true,
-    },
-  ).catch(() => null);
-
-  return {
-    userId: safeUserId,
-    sessionId: safeSessionId,
-    notes: safeNotes,
-    recentTurns: safeRecentTurns,
-    tokenEstimate,
-    summaryUpToMessageId: sanitizeId(summaryUpToMessageId, ""),
-  };
-}
-
-async function acquireSessionNotesCompressionLock({ userId, sessionId }) {
-  const safeUserId = sanitizeId(userId, "");
-  const safeSessionId = sanitizeId(sessionId, "");
-  if (!safeUserId || !safeSessionId) return false;
-
-  const now = new Date();
-  const lockUntil = new Date(now.getTime() + SESSION_NOTES_COMPRESSION_LOCK_MS);
-  const doc = await SessionNotes.findOneAndUpdate(
-    {
-      userId: safeUserId,
-      sessionId: safeSessionId,
-      $or: [
-        { compressionLockUntil: { $exists: false } },
-        { compressionLockUntil: null },
-        { compressionLockUntil: { $lte: now } },
-      ],
-    },
-    {
-      $set: { compressionLockUntil: lockUntil },
-      $setOnInsert: {
-        userId: safeUserId,
-        sessionId: safeSessionId,
-        notes: createDefaultSessionNotes(),
-        recentTurns: [],
-        tokenEstimate: 0,
-      },
-    },
-    { upsert: true, new: true },
-  )
-    .lean()
-    .catch(() => null);
-
-  return !!doc;
-}
-
-async function releaseSessionNotesCompressionLock({ userId, sessionId }) {
-  const safeUserId = sanitizeId(userId, "");
-  const safeSessionId = sanitizeId(sessionId, "");
-  if (!safeUserId || !safeSessionId) return;
-  await SessionNotes.updateOne(
-    { userId: safeUserId, sessionId: safeSessionId },
-    { $set: { compressionLockUntil: null } },
-  ).catch(() => {});
-}
-
 async function saveUploadedFileContext({
   userId,
   sessionId,
@@ -3181,12 +2627,7 @@ async function rehydrateUploadedFileContexts(
     if (!hasUsableMessageContent(normalized)) continue;
 
     let hydrated = cloneNormalizedMessageContent(normalized);
-    if (safeProvider === "packycode" && safeProtocol === "chat") {
-      hydrated = await hydratePackyImagePartsToInlineData(
-        hydrated,
-        doc?.ossFiles,
-      );
-    } else if (shouldRefreshAliyunMediaUrls) {
+    if (shouldRefreshAliyunMediaUrls) {
       hydrated = await buildAliyunDashScopeRehydratedContent(
         normalized,
         doc?.ossFiles,
@@ -3251,154 +2692,6 @@ async function rehydrateUploadedFileContexts(
     if (!content) return;
     msg.content = content;
   });
-}
-
-function isPackyAttachmentMemoryTextPart(part) {
-  const type = String(part?.type || "")
-    .trim()
-    .toLowerCase();
-  if (type !== "text" && type !== "input_text" && type !== "output_text") {
-    return false;
-  }
-  const text = String(part?.text || "");
-  if (!text.trim()) return false;
-  const normalizedText = text.trimStart();
-  return (
-    normalizedText.startsWith("[附件:") ||
-    normalizedText.includes("\nMIME:") ||
-    normalizedText.includes("\n内容预览:\n") ||
-    normalizedText.includes("将 PDF 按页转换为图片后输入模型")
-  );
-}
-
-function extractPackyAttachmentMemoryParts(content) {
-  const normalized = normalizeMessageContent(content);
-  if (!Array.isArray(normalized) || normalized.length === 0) return [];
-
-  const picked = normalized.filter((part) => {
-    const type = String(part?.type || "")
-      .trim()
-      .toLowerCase();
-    if (type === "image_url" || type === "input_image") {
-      return isInlineDataUrl(extractInputImageUrl(part));
-    }
-    if (
-      type === "file" ||
-      type === "file_url" ||
-      type === "input_file_url" ||
-      type === "input_file"
-    ) {
-      return true;
-    }
-    return isPackyAttachmentMemoryTextPart(part);
-  });
-  if (picked.length === 0) return [];
-  return cloneNormalizedMessageContent(picked);
-}
-
-function buildPackyAttachmentMemoryPartKey(part) {
-  try {
-    return JSON.stringify(part || {});
-  } catch {
-    return "";
-  }
-}
-
-async function attachLatestSessionFileContextToLatestUserMessage(
-  messages,
-  {
-    userId,
-    sessionId,
-    provider = "",
-    protocol = "",
-  } = {},
-) {
-  if (!Array.isArray(messages) || messages.length === 0) return null;
-  const safeUserId = sanitizeId(userId, "");
-  const safeSessionId = sanitizeId(sessionId, "");
-  if (!safeUserId || !safeSessionId) return null;
-  const safeProvider = normalizeProvider(provider);
-  const safeProtocol = sanitizeRuntimeProtocol(protocol);
-  if (safeProvider !== "packycode" || safeProtocol !== "chat") return null;
-
-  const latestUserMessage = resolveLatestUserMessage(messages);
-  if (!latestUserMessage) return null;
-  const latestMessageId = sanitizeId(latestUserMessage.id, "");
-  const requestUserMessageIds = Array.from(
-    new Set(
-      messages
-        .filter((msg) => msg?.role === "user")
-        .map((msg) => sanitizeId(msg?.id, ""))
-        .filter(Boolean),
-    ),
-  );
-
-  let docs = [];
-  try {
-    docs = await UploadedFileContext.find(
-      {
-        userId: safeUserId,
-        sessionId: safeSessionId,
-        expiresAt: { $gt: new Date() },
-        ...(requestUserMessageIds.length > 0
-          ? { messageId: { $nin: requestUserMessageIds } }
-          : latestMessageId
-            ? { messageId: { $ne: latestMessageId } }
-            : {}),
-      },
-      { messageId: 1, content: 1, createdAt: 1, updatedAt: 1 },
-    )
-      .sort({ createdAt: 1, updatedAt: 1 })
-      .lean();
-  } catch (error) {
-    console.warn(
-      `Failed to read Packy file contexts (${safeUserId}/${safeSessionId}):`,
-      error?.message || error,
-    );
-    return null;
-  }
-  if (!Array.isArray(docs) || docs.length === 0) return null;
-
-  const current = normalizeMessageContent(latestUserMessage.content);
-  const currentParts = Array.isArray(current)
-    ? cloneNormalizedMessageContent(current)
-    : current
-      ? [{ type: "text", text: String(current || "") }]
-      : [];
-  const seenPartKeys = new Set(
-    currentParts
-      .map((part) => buildPackyAttachmentMemoryPartKey(part))
-      .filter(Boolean),
-  );
-  const attachmentParts = [];
-  const sourceMessageIds = [];
-
-  docs.forEach((doc) => {
-    const messageId = sanitizeId(doc?.messageId, "");
-    const docParts = extractPackyAttachmentMemoryParts(doc?.content);
-    if (!Array.isArray(docParts) || docParts.length === 0) return;
-
-    let addedForDoc = 0;
-    docParts.forEach((part) => {
-      const partKey = buildPackyAttachmentMemoryPartKey(part);
-      if (!partKey || seenPartKeys.has(partKey)) return;
-      seenPartKeys.add(partKey);
-      attachmentParts.push(part);
-      addedForDoc += 1;
-    });
-    if (addedForDoc > 0 && messageId) {
-      sourceMessageIds.push(messageId);
-    }
-  });
-  if (attachmentParts.length === 0) return null;
-
-  latestUserMessage.content = [...currentParts, ...attachmentParts];
-  return {
-    sourceMessageId: sourceMessageIds[sourceMessageIds.length - 1] || "",
-    sourceMessageIds,
-    sourceMessageCount: sourceMessageIds.length,
-    attachmentPartCount: attachmentParts.length,
-  };
 }
 
 function sanitizeVolcengineFileRefsPayload(input) {
@@ -3926,7 +3219,7 @@ async function attachFilesToLatestUserMessage(
   messages,
   files,
   {
-    provider = "packycode",
+    provider = "volcengine",
     protocol = "chat",
     ossFiles = [],
     userId = "",
@@ -3936,11 +3229,6 @@ async function attachFilesToLatestUserMessage(
 ) {
   if (!files || files.length === 0) return null;
 
-  if (provider === "packycode" && protocol === "chat") {
-    return attachFilesToLatestUserMessageForPacky(messages, files, {
-      ossFiles,
-    });
-  }
   if (provider === "aliyun" && protocol === "dashscope") {
     return attachFilesToLatestUserMessageForAliyunDashScope(messages, files, {
       ossFiles,
@@ -4011,55 +3299,6 @@ function resolveLatestUserMessage(messages) {
   return null;
 }
 
-function appendHiddenPromptToLatestUserMessage(messages, hiddenPrompt = "") {
-  const suffix = String(hiddenPrompt || "").trim();
-  if (!Array.isArray(messages) || !suffix) return messages;
-
-  const latestUserMessage = resolveLatestUserMessage(messages);
-  if (!latestUserMessage) return messages;
-
-  if (typeof latestUserMessage.content === "string") {
-    const current = String(latestUserMessage.content || "");
-    if (current.includes(suffix)) return messages;
-    latestUserMessage.content = current.trim()
-      ? `${current}\n\n${suffix}`
-      : suffix;
-    return messages;
-  }
-
-  if (!Array.isArray(latestUserMessage.content)) {
-    return messages;
-  }
-
-  const parts = latestUserMessage.content
-    .filter((part) => part && typeof part === "object")
-    .map((part) => ({ ...part }));
-  const hasPrompt = parts.some((part) =>
-    String(part?.text || "").includes(suffix),
-  );
-  if (hasPrompt) return messages;
-
-  for (let index = parts.length - 1; index >= 0; index -= 1) {
-    const part = parts[index];
-    const type = String(part?.type || "")
-      .trim()
-      .toLowerCase();
-    if (type === "text" || type === "input_text" || type === "output_text") {
-      const current = String(part.text || "");
-      parts[index] = {
-        ...part,
-        text: current.trim() ? `${current}\n\n${suffix}` : suffix,
-      };
-      latestUserMessage.content = parts;
-      return messages;
-    }
-  }
-
-  parts.push({ type: "text", text: suffix });
-  latestUserMessage.content = parts;
-  return messages;
-}
-
 function buildInitialAttachmentParts(content) {
   if (typeof content !== "string") return [];
   const text = content.trim();
@@ -4073,133 +3312,6 @@ function buildDataUrlForBuffer(buffer, mime) {
     .trim()
     .toLowerCase();
   return `data:${safeMime};base64,${buffer.toString("base64")}`;
-}
-
-function isInlineDataUrl(value) {
-  return /^data:/i.test(String(value || "").trim());
-}
-
-async function hydratePackyImagePartsToInlineData(content, ossFiles = []) {
-  const normalized = normalizeMessageContent(content);
-  if (!Array.isArray(normalized) || normalized.length === 0) {
-    return cloneNormalizedMessageContent(normalized);
-  }
-
-  const safeOssFiles = normalizeUploadedFileContextOssFiles(ossFiles);
-  let ossImageCursor = 0;
-  const next = [];
-
-  for (const part of normalized) {
-    const type = String(part?.type || "")
-      .trim()
-      .toLowerCase();
-    if (type !== "image_url" && type !== "input_image") {
-      const cloned = cloneNormalizedMessageContent([part]);
-      if (Array.isArray(cloned) && cloned[0]) {
-        next.push(cloned[0]);
-      }
-      continue;
-    }
-
-    let payload = null;
-    const existingUrl = extractInputImageUrl(part);
-    if (isInlineDataUrl(existingUrl)) {
-      const cloned = cloneNormalizedMessageContent([part]);
-      if (Array.isArray(cloned) && cloned[0]) {
-        next.push(cloned[0]);
-      }
-      continue;
-    }
-    if (existingUrl) {
-      payload = await buildGeneratedImageBinaryPayload(existingUrl);
-    }
-
-    while (
-      !payload &&
-      ossImageCursor < safeOssFiles.length &&
-      !String(safeOssFiles[ossImageCursor]?.mimeType || "")
-        .trim()
-        .toLowerCase()
-        .startsWith("image/")
-    ) {
-      ossImageCursor += 1;
-    }
-
-    if (!payload && ossImageCursor < safeOssFiles.length) {
-      const imageOssFile = safeOssFiles[ossImageCursor];
-      ossImageCursor += 1;
-      const resolvedUrl = await resolveAliyunDashScopeAttachmentUrl({
-        ossFile: imageOssFile,
-        fallbackFileName: imageOssFile?.fileName,
-      });
-      if (resolvedUrl) {
-        payload = await buildGeneratedImageBinaryPayload(resolvedUrl);
-      }
-    }
-
-    if (!payload?.data?.length) {
-      continue;
-    }
-
-    const inlineUrl = buildDataUrlForBuffer(
-      payload.data,
-      payload.mimeType || "image/png",
-    );
-    if (!inlineUrl) continue;
-    next.push({ type: "image_url", image_url: { url: inlineUrl } });
-  }
-
-  return next;
-}
-
-function resolveChatAudioFormat({ mime, ext }) {
-  const normalizedExt = String(ext || "")
-    .trim()
-    .toLowerCase();
-  if (CHAT_AUDIO_EXTENSIONS.has(normalizedExt)) {
-    return normalizedExt;
-  }
-
-  const normalizedMime = String(mime || "")
-    .trim()
-    .toLowerCase();
-  if (!normalizedMime) return "";
-  const mapped = CHAT_AUDIO_MIME_TO_FORMAT[normalizedMime];
-  if (mapped) return mapped;
-  if (!normalizedMime.startsWith("audio/")) return "";
-
-  const subtype = normalizedMime.split("/")[1]?.split(";")[0] || "";
-  if (!subtype) return "";
-  if (CHAT_AUDIO_FORMATS.has(subtype)) return subtype;
-  if (subtype === "x-wav") return "wav";
-  if (subtype === "mp4") return "m4a";
-  return "";
-}
-
-function resolveChatVideoMime({ mime, ext }) {
-  const normalizedMime = String(mime || "")
-    .trim()
-    .toLowerCase();
-  if (normalizedMime.startsWith("video/")) {
-    if (normalizedMime.includes("mp4")) return "video/mp4";
-    if (normalizedMime.includes("mpeg")) return "video/mpeg";
-    if (
-      normalizedMime.includes("quicktime") ||
-      normalizedMime.includes("mov")
-    ) {
-      return "video/mov";
-    }
-    if (normalizedMime.includes("webm")) return "video/webm";
-  }
-
-  const normalizedExt = String(ext || "")
-    .trim()
-    .toLowerCase();
-  if (normalizedExt === "mp4") return "video/mp4";
-  if (normalizedExt === "mpeg" || normalizedExt === "mpg") return "video/mpeg";
-  if (normalizedExt === "mov") return "video/mov";
-  if (normalizedExt === "webm") return "video/webm";
-  return "";
 }
 
 function resolveAliyunVideoMime({ mime, ext }) {
@@ -4619,91 +3731,6 @@ async function buildParsedFilePreviewTextPart(
   };
 }
 
-async function buildPackyFileInputPart(file, { ossFile = null } = {}) {
-  const safeBuffer = Buffer.isBuffer(file?.buffer)
-    ? file.buffer
-    : Buffer.from([]);
-  if (safeBuffer.length === 0) return null;
-
-  const mime = String(file?.mimetype || "")
-    .trim()
-    .toLowerCase();
-  const ext = getFileExtension(file?.originalname);
-  const safeName = sanitizeText(file?.originalname, "upload.bin", 180);
-
-  if (mime.startsWith("image/")) {
-    void ossFile;
-    void ext;
-    void safeName;
-    const inlineImageUrl = buildDataUrlForBuffer(
-      safeBuffer,
-      mime || "application/octet-stream",
-    );
-    if (!inlineImageUrl) return null;
-    return { type: "image_url", image_url: { url: inlineImageUrl } };
-  }
-
-  const audioFormat = resolveChatAudioFormat({ mime, ext });
-  if (audioFormat) return null;
-
-  const videoMime = resolveChatVideoMime({ mime, ext });
-  if (videoMime) return null;
-
-  const fileData = buildDataUrlForBuffer(
-    safeBuffer,
-    mime || "application/octet-stream",
-  );
-  if (fileData) {
-    return {
-      type: "file",
-      file: {
-        filename: safeName || "document.bin",
-        file_data: fileData,
-      },
-    };
-  }
-
-  return null;
-}
-
-async function attachFilesToLatestUserMessageForPacky(
-  messages,
-  files,
-  { ossFiles = [] } = {},
-) {
-  const msg = resolveLatestUserMessage(messages);
-  if (!msg) return null;
-
-  const parts = buildInitialAttachmentParts(msg.content);
-  const safeOssFiles = Array.isArray(ossFiles) ? ossFiles : [];
-  for (const file of files) {
-    const packyPart = await buildPackyFileInputPart(file, {
-      ossFile: resolveUploadedContextOssFileForInputFile(file, safeOssFiles),
-    });
-    if (packyPart) {
-      parts.push(packyPart);
-      continue;
-    }
-
-    const mime = String(file?.mimetype || "")
-      .trim()
-      .toLowerCase();
-    if (mime.startsWith("image/")) {
-      throw new Error("图片附件上传到 OSS 失败，请重试。");
-    }
-
-    const fallback = await buildParsedFilePreviewTextPart(file);
-    if (fallback) parts.push(fallback);
-  }
-
-  if (parts.length === 0) return null;
-  msg.content = parts;
-  return {
-    messageId: sanitizeId(msg.id, ""),
-    content: cloneNormalizedMessageContent(parts),
-  };
-}
-
 async function attachFilesToLatestUserMessageForAliyunDashScope(
   messages,
   files,
@@ -4852,7 +3879,6 @@ async function streamAgentResponse({
   );
   const shouldUsePersistentFileContext =
     (provider === "volcengine" && protocol === "responses") ||
-    (provider === "packycode" && protocol === "chat") ||
     provider === "aliyun";
   const shouldKeepOnlyLatestAliyunFileContext =
     provider === "aliyun" && protocol === "dashscope";
@@ -4894,18 +3920,6 @@ async function streamAgentResponse({
     sessionId,
     contextMode,
   });
-  const shouldUseSessionNotesRuntime =
-    provider === "packycode" &&
-    protocol === "chat" &&
-    !!storageUserId &&
-    !!sanitizeId(sessionId, "");
-  let sessionNotesState = shouldUseSessionNotesRuntime
-    ? await readSessionNotes({
-        userId: storageUserId,
-        sessionId,
-      })
-    : null;
-
   let safeMessages = normalizeMessages(messages);
   const originalLocalFiles = Array.isArray(files) ? files.filter(Boolean) : [];
   let filesForLocalAttach = [...originalLocalFiles];
@@ -5070,20 +4084,15 @@ async function streamAgentResponse({
       aliyunFileProcessMode,
     });
   }
-  let packySessionFileContextReuse = null;
-  const shouldReusePackySessionFileContext = false;
-
-  const narrowedMessages = isPackyTokenBudgetRuntime(provider, model)
-    ? [...safeMessages]
-    : pickRecentUserRounds(
-        safeMessages,
-        sanitizeRuntimeInteger(
-          config.contextRounds,
-          DEFAULT_AGENT_RUNTIME_CONFIG.contextRounds,
-          1,
-          RUNTIME_CONTEXT_ROUNDS_MAX,
-        ),
-      );
+  const narrowedMessages = pickRecentUserRounds(
+    safeMessages,
+    sanitizeRuntimeInteger(
+      config.contextRounds,
+      DEFAULT_AGENT_RUNTIME_CONFIG.contextRounds,
+      1,
+      RUNTIME_CONTEXT_ROUNDS_MAX,
+    ),
+  );
 
   let composedSystemPrompt = systemPrompt || "";
   if (
@@ -5327,161 +4336,6 @@ async function streamAgentResponse({
   const uploadedAttachmentLinks = await buildUploadedAttachmentLinksForClient(
     turnUploadedAttachmentOssFiles,
   );
-  let sessionNotesCompressionMeta = null;
-  const pendingFileNoteEntries =
-    shouldUseSessionNotesRuntime && uploadedFileContextRecord?.content
-      ? extractSessionNoteFileEntriesFromContent(uploadedFileContextRecord.content)
-      : [];
-  if (shouldUseSessionNotesRuntime) {
-    const recentTurnMessages = pickRecentUserRounds(
-      requestMessages,
-      SESSION_NOTES_RECENT_USER_ROUNDS,
-    );
-    const olderMessages = buildMessagesBeforeRecentTurns(
-      requestMessages.filter((message) => !message?.hidden),
-      recentTurnMessages,
-    );
-    const unsummarizedOlderMessages = extractUnsummarizedMessages(
-      olderMessages,
-      sessionNotesState?.summaryUpToMessageId || "",
-    );
-    const notesPromptPreview = buildSessionNotesPrompt(sessionNotesState?.notes);
-    const notesAwareInputEstimate = estimatePackyChatInputTokens({
-      messages:
-        recentTurnMessages.length > 0 ? recentTurnMessages : requestMessages,
-      systemPrompt: [composedSystemPrompt, notesPromptPreview]
-        .filter(Boolean)
-        .join("\n\n"),
-    });
-    const requestedMaxOutputTokens = resolvePackyRequestedMaxOutputTokens(config);
-    const hasExistingCompactedHistory =
-      !!sanitizeId(sessionNotesState?.summaryUpToMessageId, "");
-    const needsContextCompaction =
-      unsummarizedOlderMessages.length > 0 &&
-      (hasExistingCompactedHistory ||
-        shouldCompactSessionNotesContext({
-          estimatedInputTokens: notesAwareInputEstimate,
-          requestedMaxOutputTokens,
-          contextWindowTokens: PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
-        }));
-    const needsNotesUpdate =
-      pendingFileNoteEntries.length > 0 || needsContextCompaction;
-
-    if (needsNotesUpdate) {
-      ensureSseHeaders(res);
-      writeEvent(res, "context_compacting", {
-        phase: "start",
-        message: needsContextCompaction
-          ? "正在压缩背景信息…"
-          : "正在整理背景笔记…",
-      });
-      const lockAcquired = await acquireSessionNotesCompressionLock({
-        userId: storageUserId,
-        sessionId,
-      });
-      if (lockAcquired) {
-        try {
-          const refreshedNotes = (await readSessionNotes({
-            userId: storageUserId,
-            sessionId,
-          })) || sessionNotesState;
-          const transcript = needsContextCompaction
-            ? buildSessionNotesTranscript(unsummarizedOlderMessages)
-            : "";
-          const nextNotes = await summarizeSessionNotesBlock({
-            provider,
-            protocol,
-            providerConfig,
-            model,
-            thinkingEffort: config?.thinkingEffort,
-            existingNotes: refreshedNotes?.notes,
-            transcript,
-            fileEntries: pendingFileNoteEntries,
-          });
-          const summaryUpToMessageId = needsContextCompaction
-            ? sanitizeId(
-                unsummarizedOlderMessages[unsummarizedOlderMessages.length - 1]?.id,
-                refreshedNotes?.summaryUpToMessageId || "",
-              )
-            : refreshedNotes?.summaryUpToMessageId || "";
-          sessionNotesState = await upsertSessionNotes({
-            userId: storageUserId,
-            sessionId,
-            notes: nextNotes,
-            recentTurns: buildSessionRecentTurnsFromMessages(recentTurnMessages),
-            summaryUpToMessageId,
-          });
-          sessionNotesCompressionMeta = needsContextCompaction
-            ? {
-                applied: true,
-                estimatedInputTokensBefore: notesAwareInputEstimate,
-                estimatedInputTokensAfter: estimatePackyChatInputTokens({
-                  messages: recentTurnMessages,
-                  systemPrompt: [
-                    composedSystemPrompt,
-                    buildSessionNotesPrompt(sessionNotesState?.notes),
-                  ]
-                    .filter(Boolean)
-                    .join("\n\n"),
-                }),
-                sourceMessageCount: unsummarizedOlderMessages.length,
-                updatedAt: new Date().toISOString(),
-                summaryUpToMessageId,
-              }
-            : null;
-        } finally {
-          await releaseSessionNotesCompressionLock({
-            userId: storageUserId,
-            sessionId,
-          });
-        }
-      } else {
-        sessionNotesState = await readSessionNotes({
-          userId: storageUserId,
-          sessionId,
-        });
-      }
-      writeEvent(res, "context_compacting", {
-        phase: "done",
-        message: "背景笔记已更新。",
-      });
-    }
-
-    const canShapeRequestWithSessionNotes =
-      !hasUnsummarizedOlderMessages(
-        olderMessages,
-        sessionNotesState?.summaryUpToMessageId || "",
-      );
-
-    const notesPrompt = buildSessionNotesPrompt(sessionNotesState?.notes);
-    const shouldInjectSessionNotes =
-      !!notesPrompt ||
-      sessionNotesState?.tokenEstimate > 0 ||
-      !!sessionNotesState?.summaryUpToMessageId;
-
-    if (shouldInjectSessionNotes) {
-      if (canShapeRequestWithSessionNotes) {
-        requestMessages =
-          recentTurnMessages.length > 0 ? recentTurnMessages : requestMessages;
-      }
-      if (notesPrompt) {
-        composedSystemPrompt = [composedSystemPrompt, notesPrompt]
-          .filter(Boolean)
-          .join("\n\n");
-      }
-      await upsertSessionNotes({
-        userId: storageUserId,
-        sessionId,
-        notes: sessionNotesState?.notes,
-        recentTurns: buildSessionRecentTurnsFromMessages(requestMessages),
-        summaryUpToMessageId: sessionNotesState?.summaryUpToMessageId || "",
-      });
-      sessionNotesState = await readSessionNotes({
-        userId: storageUserId,
-        sessionId,
-      });
-    }
-  }
   if (
     shouldUsePersistentFileContext &&
     effectiveVolcengineFileRefs.length > 0
@@ -5502,89 +4356,7 @@ async function streamAgentResponse({
   if (smartContextRuntime.usePreviousResponseId) {
     requestMessages = extractSmartContextIncrementalMessages(requestMessages);
   }
-  if (shouldReusePackySessionFileContext) {
-    packySessionFileContextReuse =
-      await attachLatestSessionFileContextToLatestUserMessage(
-        requestMessages,
-        {
-          userId: storageUserId,
-          sessionId,
-          provider,
-          protocol,
-        },
-      );
-  }
-
-  let packyContextCompressionMeta = null;
-  let packyContextSummaryMessage = null;
-  if (isPackyTokenBudgetRuntime(provider, model) && !shouldUseSessionNotesRuntime) {
-    try {
-      const compressionResult = await maybeApplyPackyContextCompression({
-        sessionId,
-        provider,
-        model,
-        config,
-        systemPrompt: composedSystemPrompt,
-        requestMessages,
-        providerConfig,
-      });
-      requestMessages = Array.isArray(compressionResult?.requestMessages)
-        ? compressionResult.requestMessages
-        : requestMessages;
-      packyContextCompressionMeta =
-        compressionResult?.compressionMetaForClient || null;
-      packyContextSummaryMessage = compressionResult?.summaryMessage || null;
-    } catch (error) {
-      console.warn(
-        `[packycode/chat] context compression skipped: ${
-          error?.message || error
-        }`,
-      );
-    }
-  }
-  if (sessionNotesCompressionMeta) {
-    packyContextCompressionMeta = sessionNotesCompressionMeta;
-  }
-
-  if (provider === "packycode" && isPackyGpt54Model(model)) {
-    appendHiddenPromptToLatestUserMessage(
-      requestMessages,
-      PACKYCODE_GPT54_HIDDEN_USER_PROMPT,
-    );
-  }
-
-  let requestRuntimeConfig = config;
-  if (isPackyTokenBudgetRuntime(provider, model)) {
-    const estimatedInputTokens = estimatePackyChatInputTokens({
-      messages: requestMessages,
-      systemPrompt: composedSystemPrompt,
-    });
-    const requestedMaxOutputTokens = resolvePackyRequestedMaxOutputTokens(config);
-    const safeMaxOutputTokens = computePackySafeMaxOutputTokens({
-      estimatedInputTokens,
-      requestedMaxOutputTokens,
-      contextWindowTokens: PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
-    });
-    requestRuntimeConfig = {
-      ...config,
-      maxOutputTokens: safeMaxOutputTokens,
-    };
-    if (
-      estimatedInputTokens +
-        safeMaxOutputTokens +
-        SESSION_NOTES_CONTEXT_SAFETY_MARGIN_TOKENS >=
-      PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS &&
-      safeMaxOutputTokens <= 64
-    ) {
-      ensureSseHeaders(res);
-      writeEvent(res, "error", {
-        message:
-          "当前会话背景信息仍然过长，已无法在安全预算内继续压缩。请新建一个对话后继续。",
-      });
-      res.end();
-      return;
-    }
-  }
+  const requestRuntimeConfig = config;
 
   let providerMessages = requestMessages.map((msg) => ({
     role: msg.role,
@@ -5734,20 +4506,6 @@ async function streamAgentResponse({
     aliyunDashscopeMultimodalEndpointUsed: useAliyunDashScopeMultimodalEndpoint,
     aliyunFileProcessModeApplied:
       provider === "aliyun" ? aliyunFileProcessMode : "",
-    packySessionFileContextReused: !!packySessionFileContextReuse,
-    packySessionFileContextSourceMessageId:
-      packySessionFileContextReuse?.sourceMessageId || "",
-    packySessionFileContextSourceMessageIds: Array.isArray(
-      packySessionFileContextReuse?.sourceMessageIds,
-    )
-      ? packySessionFileContextReuse.sourceMessageIds
-      : [],
-    packySessionFileContextSourceMessageCount:
-      packySessionFileContextReuse?.sourceMessageCount || 0,
-    packySessionFileContextAttachmentPartCount:
-      packySessionFileContextReuse?.attachmentPartCount || 0,
-    contextCompression: packyContextCompressionMeta,
-    contextSummaryMessage: packyContextSummaryMessage,
     smartContextRequested: smartContextRuntime.requested,
     smartContextEnabled: smartContextRuntime.enabled,
     smartContextUsePreviousResponseId:
@@ -5894,42 +4652,6 @@ async function streamAgentResponse({
       body: JSON.stringify(payload),
       provider,
       protocol,
-      onRetry:
-        provider === "packycode" && protocol === "chat"
-          ? ({ retryAttempt, totalRetries, delayMs }) => {
-              writeEvent(res, "upstream_reconnecting", {
-                phase: "retrying",
-                retryAttempt,
-                totalRetries,
-                delayMs,
-                delaySeconds: Math.ceil(delayMs / 1000),
-                message: `网络连接波动，正在重新连接 ${retryAttempt}/${totalRetries}…`,
-              });
-            }
-          : null,
-      onRecovered:
-        provider === "packycode" && protocol === "chat"
-          ? ({ retryAttemptsUsed, totalRetries }) => {
-              writeEvent(res, "upstream_reconnecting", {
-                phase: "recovered",
-                retryAttempt: retryAttemptsUsed,
-                totalRetries,
-                message: "连接已恢复。",
-              });
-            }
-          : null,
-      onFailed:
-        provider === "packycode" && protocol === "chat"
-          ? ({ retryAttemptsUsed, totalRetries }) => {
-              if (retryAttemptsUsed <= 0) return;
-              writeEvent(res, "upstream_reconnecting", {
-                phase: "failed",
-                retryAttempt: retryAttemptsUsed,
-                totalRetries,
-                message: "重连失败，连接已断开。",
-              });
-            }
-          : null,
     });
   } catch (error) {
     console.error(`[${provider}/${protocol}] request failed:`, error);
@@ -6046,698 +4768,6 @@ async function streamAgentResponse({
   }
 }
 
-async function streamSeedreamImageGeneration({
-  res,
-  body,
-  files = [],
-  chatUserId = "",
-  chatStorageUserId = "",
-}) {
-  const safeChatUserId = sanitizeId(chatUserId, "");
-  const safeChatStorageUserId =
-    sanitizeId(chatStorageUserId, "") || safeChatUserId;
-  const imageConfig = getVolcengineImageGenerationConfig();
-  if (!imageConfig.apiKey) {
-    res.status(500).json({ error: imageConfig.missingKeyMessage });
-    return;
-  }
-
-  let request = null;
-  try {
-    request = await buildSeedreamImageGenerationRequest({
-      body,
-      files,
-      model: imageConfig.model,
-      chatStorageUserId: safeChatStorageUserId,
-    });
-  } catch (error) {
-    res.status(400).json({ error: error?.message || "图片输入参数不合法。" });
-    return;
-  }
-
-  if (!request.prompt) {
-    res.status(400).json({ error: "请输入图片生成提示词。" });
-    return;
-  }
-
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders?.();
-
-  writeEvent(res, "meta", {
-    model: request.payload.model,
-    stream: request.payload.stream,
-    responseFormat: request.payload.response_format,
-    sequentialImageGeneration: request.payload.sequential_image_generation,
-    maxImages: request.maxImages,
-    inputImageCount: request.inputImageCount,
-    size: request.payload.size || "default",
-  });
-
-  const generatedImageByIndex = new Map();
-  let nextGeneratedImageIndex = 0;
-  const collectGeneratedImage = (payload) => {
-    const explicitImageIndex = Number(payload?.imageIndex);
-    const imageIndex =
-      Number.isFinite(explicitImageIndex) && explicitImageIndex >= 0
-        ? Math.floor(explicitImageIndex)
-        : nextGeneratedImageIndex;
-    nextGeneratedImageIndex = Math.max(nextGeneratedImageIndex, imageIndex + 1);
-    const size = sanitizeText(payload?.size, "", 80);
-    const model = sanitizeText(payload?.model, "", 160);
-    const imageUrl = resolveGeneratedImageOutputUrl({
-      url: payload?.url,
-      b64Json: payload?.b64Json,
-    });
-    if (!imageUrl) return;
-    generatedImageByIndex.set(String(imageIndex), {
-      imageIndex,
-      imageUrl,
-      size,
-      model,
-    });
-  };
-
-  let upstream;
-  try {
-    upstream = await fetch(imageConfig.endpoint, {
-      method: "POST",
-      headers: buildImageGenerationHeaders(
-        imageConfig.apiKey,
-        request.payload.stream,
-      ),
-      body: JSON.stringify(request.payload),
-    });
-  } catch (error) {
-    writeEvent(res, "error", {
-      message: `volcengine/images request failed: ${error.message}`,
-    });
-    res.end();
-    return;
-  }
-
-  if (!upstream.ok) {
-    const detail = await safeReadText(upstream);
-    console.error(
-      "[volcengine/images] upstream error:",
-      upstream.status,
-      detail,
-    );
-    writeEvent(res, "error", {
-      message: formatProviderUpstreamError(
-        "volcengine",
-        "images",
-        upstream.status,
-        detail,
-      ),
-    });
-    res.end();
-    return;
-  }
-
-  try {
-    if (request.payload.stream) {
-      if (!upstream.body) {
-        throw new Error("图片生成上游未返回有效流式内容。");
-      }
-      await pipeVolcengineImageGenerationSse(upstream, res, {
-        onImagePartial: collectGeneratedImage,
-      });
-    } else {
-      const result = await safeReadJson(upstream);
-      emitSeedreamImageGenerationNonStreamEvents(result, res, {
-        onImagePartial: collectGeneratedImage,
-      });
-    }
-
-    if (generatedImageByIndex.size > 0) {
-      await saveGeneratedImageHistory({
-        userId: safeChatStorageUserId,
-        prompt: request.prompt,
-        responseFormat: request.payload.response_format,
-        model: request.payload.model,
-        images: Array.from(generatedImageByIndex.values()),
-      });
-    }
-    writeEvent(res, "done", { ok: true });
-  } catch (error) {
-    writeEvent(res, "error", {
-      message: error?.message || "图片生成失败，请稍后重试。",
-    });
-  } finally {
-    res.end();
-  }
-}
-
-async function buildSeedreamImageGenerationRequest({
-  body,
-  files,
-  model,
-  chatStorageUserId = "",
-}) {
-  const resolvedModel = normalizeSeedreamGenerationModel(body?.model, model);
-  const prompt = sanitizeText(body?.prompt, "", 2000);
-  const size = normalizeSeedreamSize(body?.size);
-  const sequentialImageGeneration = normalizeSeedreamSequentialMode(
-    body?.sequentialImageGeneration ?? body?.mode,
-  );
-  const stream = sanitizeRuntimeBoolean(body?.stream, true);
-  const watermark = sanitizeRuntimeBoolean(body?.watermark, false);
-  const responseFormat = normalizeSeedreamResponseFormat(body?.responseFormat);
-  const imageUrls = parseSeedreamImageInputs(body?.imageUrls);
-  const fileInputs = await buildSeedreamFileImageInputs({
-    files,
-    chatStorageUserId,
-  });
-  const inputImages = [...imageUrls, ...fileInputs];
-  if (inputImages.length > MAX_IMAGE_GENERATION_INPUT_FILES) {
-    throw new Error(
-      `输入图片数量超限，最多支持 ${MAX_IMAGE_GENERATION_INPUT_FILES} 张参考图。`,
-    );
-  }
-
-  let maxImages = sanitizeRuntimeInteger(body?.maxImages, 15, 1, 15);
-  if (sequentialImageGeneration === "auto") {
-    const remaining = 15 - inputImages.length;
-    if (remaining <= 0) {
-      throw new Error(
-        "组图模式下，输入参考图数量与输出图数量总和不能超过 15 张。",
-      );
-    }
-    maxImages = Math.min(maxImages, remaining);
-  }
-
-  const payload = {
-    model: resolvedModel,
-    prompt,
-    stream,
-    response_format: responseFormat,
-    watermark,
-    sequential_image_generation: sequentialImageGeneration,
-    optimize_prompt_options: { mode: "standard" },
-  };
-
-  if (size) {
-    payload.size = size;
-  }
-  if (sequentialImageGeneration === "auto") {
-    payload.sequential_image_generation_options = { max_images: maxImages };
-  }
-  if (inputImages.length === 1) {
-    payload.image = inputImages[0];
-  } else if (inputImages.length > 1) {
-    payload.image = inputImages;
-  }
-
-  return {
-    prompt,
-    payload,
-    inputImageCount: inputImages.length,
-    maxImages,
-  };
-}
-
-function normalizeSeedreamGenerationModel(value, fallback = "") {
-  const safeFallback = sanitizeText(
-    fallback,
-    DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL,
-    160,
-  );
-  const normalizedInput = String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[_\s.]+/g, "-");
-  if (!normalizedInput) {
-    return safeFallback;
-  }
-  if (
-    normalizedInput === VOLCENGINE_IMAGE_GENERATION_MODEL_ID_45 ||
-    normalizedInput === "doubao-seedream-4-5" ||
-    normalizedInput === "seedream-4-5" ||
-    normalizedInput === "seedream45"
-  ) {
-    return VOLCENGINE_IMAGE_GENERATION_MODEL_ID_45;
-  }
-  if (
-    normalizedInput === VOLCENGINE_IMAGE_GENERATION_MODEL_ID_50 ||
-    normalizedInput === "doubao-seedream-5-0" ||
-    normalizedInput === "seedream-5-0" ||
-    normalizedInput === "seedream50"
-  ) {
-    return VOLCENGINE_IMAGE_GENERATION_MODEL_ID_50;
-  }
-  if (normalizedInput === safeFallback.toLowerCase()) {
-    return safeFallback;
-  }
-  return safeFallback;
-}
-
-function normalizeSeedreamSize(value) {
-  const raw = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (!raw) return "";
-  if (raw === "2k") return "2K";
-  if (raw === "4k") return "4K";
-  const normalized = raw.replace(/[×]/g, "x");
-  if (!/^\d{3,5}x\d{3,5}$/.test(normalized)) return "";
-  return normalized;
-}
-
-function normalizeSeedreamSequentialMode(value) {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "auto") return "auto";
-  return "disabled";
-}
-
-function normalizeSeedreamResponseFormat(value) {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "b64_json") return "b64_json";
-  return "url";
-}
-
-function parseSeedreamImageInputs(raw) {
-  const parsed = readJsonLikeField(raw, raw);
-  let values = [];
-
-  if (Array.isArray(parsed)) {
-    values = parsed;
-  } else if (typeof parsed === "string") {
-    const text = parsed.trim();
-    if (text) {
-      values = text.includes("\n")
-        ? text.split("\n")
-        : text.includes(",")
-          ? text.split(",")
-          : [text];
-    }
-  }
-
-  const deduped = new Set();
-  const list = [];
-  values.forEach((item) => {
-    const url = String(item || "").trim();
-    if (!url) return;
-    if (!isSeedreamImageInputUrl(url)) return;
-    if (deduped.has(url)) return;
-    deduped.add(url);
-    list.push(url);
-  });
-  return list;
-}
-
-function isSeedreamImageInputUrl(value) {
-  const text = String(value || "").trim();
-  if (!text) return false;
-  return /^https?:\/\//i.test(text) || /^data:image\//i.test(text);
-}
-
-async function buildSeedreamFileImageInputs({ files, chatStorageUserId = "" }) {
-  const safeFiles = Array.isArray(files) ? files : [];
-  const list = [];
-  for (let idx = 0; idx < safeFiles.length; idx += 1) {
-    const file = safeFiles[idx];
-    if (!file?.buffer) continue;
-    const mime = normalizeSeedreamImageMimeType(file.mimetype);
-    if (!mime) {
-      throw new Error(
-        `不支持的图片格式：${file.originalname || "未命名文件"}。仅支持 jpeg、png、webp、bmp、tiff、gif。`,
-      );
-    }
-    const safeBuffer = extractGeneratedImageDataBuffer(file.buffer);
-    if (!safeBuffer.length) continue;
-
-    const fallbackDataUrl = `data:${mime};base64,${safeBuffer.toString("base64")}`;
-    if (!groupChatOssClient || !groupChatOssConfig) {
-      list.push(fallbackDataUrl);
-      continue;
-    }
-
-    const ext = resolveFileExtensionByMimeType(mime, "png");
-    const fallbackName = `seedream-input-${idx + 1}.${ext}`;
-    const safeFileName = sanitizeGroupChatFileName(
-      file?.originalname || fallbackName,
-    );
-    try {
-      const uploaded = await uploadBufferToGroupChatOss({
-        scope: IMAGE_GENERATION_INPUT_OSS_SCOPE,
-        userId: chatStorageUserId,
-        sessionId: "",
-        fileName: safeFileName,
-        mimeType: mime,
-        dataBuffer: safeBuffer,
-        cacheControl: "private, no-store",
-      });
-      const inputUrl = sanitizeGroupChatHttpUrl(uploaded?.fileUrl);
-      if (inputUrl) {
-        list.push(inputUrl);
-      } else {
-        list.push(fallbackDataUrl);
-      }
-    } catch (error) {
-      throw new Error(
-        `上传参考图到 OSS 失败（${safeFileName}）：${error?.message || "unknown error"}`,
-      );
-    }
-  }
-  return list;
-}
-
-function normalizeSeedreamImageMimeType(value) {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (!key) return "";
-  if (key === "image/jpg") return "image/jpeg";
-  if (
-    key === "image/jpeg" ||
-    key === "image/png" ||
-    key === "image/webp" ||
-    key === "image/bmp" ||
-    key === "image/tiff" ||
-    key === "image/gif"
-  ) {
-    return key;
-  }
-  return "";
-}
-
-function extractSeedreamImageResultEntries(payload) {
-  const source = payload && typeof payload === "object" ? payload : {};
-  const rawEntries = [];
-
-  const dataEntries = Array.isArray(source.data) ? source.data : [];
-  dataEntries.forEach((item, idx) => {
-    if (!item || typeof item !== "object") return;
-    rawEntries.push({
-      ...item,
-      __fallbackIndex: idx,
-    });
-  });
-
-  const outputEntries = Array.isArray(source.outputs) ? source.outputs : [];
-  outputEntries.forEach((item, idx) => {
-    if (!item || typeof item !== "object") return;
-    rawEntries.push({
-      ...item,
-      __fallbackIndex: idx,
-    });
-  });
-
-  if (source.image && typeof source.image === "object") {
-    rawEntries.push({
-      ...source.image,
-      __fallbackIndex: 0,
-    });
-  }
-
-  const topLevelUrl = String(source.url || source.image_url || "").trim();
-  const topLevelB64 = String(source.b64_json || source.b64Json || "").trim();
-  if (topLevelUrl || topLevelB64) {
-    rawEntries.push({
-      url: topLevelUrl,
-      b64_json: topLevelB64,
-      size: source.size,
-      image_index: source.image_index ?? source.imageIndex ?? source.index,
-      __fallbackIndex: 0,
-    });
-  }
-
-  const normalized = [];
-  const deduped = new Set();
-  rawEntries.forEach((item, idx) => {
-    const fallbackIndex = sanitizeRuntimeInteger(
-      item?.__fallbackIndex,
-      idx,
-      0,
-      9999,
-    );
-    const imageIndex = sanitizeRuntimeInteger(
-      item?.image_index ?? item?.imageIndex ?? item?.index,
-      fallbackIndex,
-      0,
-      9999,
-    );
-    const url = String(item?.url || item?.image_url || "").trim();
-    const b64Json = String(item?.b64_json || item?.b64Json || "").trim();
-    if (!url && !b64Json) return;
-    const dedupeKey = `${imageIndex}::${url || b64Json}`;
-    if (deduped.has(dedupeKey)) return;
-    deduped.add(dedupeKey);
-    normalized.push({
-      imageIndex,
-      url,
-      b64Json,
-      size: sanitizeText(item?.size, "", 80),
-    });
-  });
-  return normalized;
-}
-
-async function pipeVolcengineImageGenerationSse(upstream, res, handlers = {}) {
-  const reader = upstream.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-  let sawCompleted = false;
-  let sawAnyImageEvent = false;
-
-  const processSseBlock = (block) => {
-    const payload = extractSseDataPayload(block);
-    if (!payload || payload === "[DONE]") return false;
-
-    let json;
-    try {
-      json = JSON.parse(payload);
-    } catch {
-      return false;
-    }
-
-    const type = String(json?.type || "")
-      .trim()
-      .toLowerCase();
-    const model = sanitizeText(json?.model, "", 160);
-    const created = Number.isFinite(Number(json?.created))
-      ? Number(json.created)
-      : null;
-    const imageEntries = extractSeedreamImageResultEntries(json);
-
-    if (type === "image_generation.partial_succeeded") {
-      if (imageEntries.length > 0) {
-        sawAnyImageEvent = true;
-        imageEntries.forEach((entry) => {
-          const partialPayload = {
-            model,
-            created,
-            imageIndex: entry.imageIndex,
-            url: entry.url,
-            b64Json: entry.b64Json,
-            size: entry.size,
-          };
-          writeEvent(res, "image_partial", partialPayload);
-          handlers.onImagePartial?.(partialPayload);
-        });
-      }
-      return false;
-    }
-
-    if (type === "image_generation.partial_failed") {
-      sawAnyImageEvent = true;
-      const fallbackImageIndex =
-        imageEntries.length > 0 ? imageEntries[0].imageIndex : 0;
-      const errorObj =
-        json?.error && typeof json.error === "object" ? json.error : {};
-      const code = sanitizeText(errorObj.code, "", 120);
-      const message = mapVolcengineImageGenerationEventError({
-        code,
-        message: errorObj.message,
-      });
-      writeEvent(res, "image_failed", {
-        model,
-        created,
-        imageIndex: fallbackImageIndex,
-        errorCode: code,
-        errorMessage: message,
-      });
-      return false;
-    }
-
-    if (type === "image_generation.completed") {
-      if (imageEntries.length > 0) {
-        sawAnyImageEvent = true;
-        imageEntries.forEach((entry) => {
-          const partialPayload = {
-            model,
-            created,
-            imageIndex: entry.imageIndex,
-            url: entry.url,
-            b64Json: entry.b64Json,
-            size: entry.size,
-          };
-          writeEvent(res, "image_partial", partialPayload);
-          handlers.onImagePartial?.(partialPayload);
-        });
-      }
-      sawCompleted = true;
-      writeEvent(res, "usage", {
-        model,
-        created,
-        usage: sanitizeImageGenerationUsage(json?.usage),
-      });
-      return true;
-    }
-
-    if (json?.error && typeof json.error === "object") {
-      const code = sanitizeText(json.error.code, "", 120);
-      const message = mapVolcengineUpstreamError({
-        status: 400,
-        code,
-        message: json.error.message,
-        param: "",
-      });
-      throw new Error(
-        message ||
-          mapVolcengineImageGenerationEventError({
-            code,
-            message: json.error.message,
-          }),
-      );
-    }
-
-    if (imageEntries.length > 0) {
-      sawAnyImageEvent = true;
-      imageEntries.forEach((entry) => {
-        const partialPayload = {
-          model,
-          created,
-          imageIndex: entry.imageIndex,
-          url: entry.url,
-          b64Json: entry.b64Json,
-          size: entry.size,
-        };
-        writeEvent(res, "image_partial", partialPayload);
-        handlers.onImagePartial?.(partialPayload);
-      });
-      return false;
-    }
-
-    return false;
-  };
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    let boundary = findSseEventBoundary(buffer);
-    while (boundary.index !== -1) {
-      const block = buffer.slice(0, boundary.index);
-      buffer = buffer.slice(boundary.index + boundary.separatorLength);
-      const completed = processSseBlock(block);
-      if (completed) return;
-      boundary = findSseEventBoundary(buffer);
-    }
-  }
-
-  const tail = buffer.trim();
-  if (tail) {
-    processSseBlock(tail);
-  }
-
-  if (!sawCompleted && !sawAnyImageEvent) {
-    throw new Error("上游未返回有效图片生成结果。");
-  }
-}
-
-function emitSeedreamImageGenerationNonStreamEvents(
-  result,
-  res,
-  handlers = {},
-) {
-  const payload = result && typeof result === "object" ? result : {};
-  const model = sanitizeText(payload?.model, "", 160);
-  const created = Number.isFinite(Number(payload?.created))
-    ? Number(payload.created)
-    : null;
-  const imageEntries = extractSeedreamImageResultEntries(payload);
-  imageEntries.forEach((entry) => {
-    const partialPayload = {
-      model,
-      created,
-      imageIndex: entry.imageIndex,
-      url: entry.url,
-      b64Json: entry.b64Json,
-      size: entry.size,
-    };
-    writeEvent(res, "image_partial", partialPayload);
-    handlers.onImagePartial?.(partialPayload);
-  });
-
-  const data = Array.isArray(payload?.data) ? payload.data : [];
-  data.forEach((item, idx) => {
-    if (!(item && typeof item === "object" && item.error)) return;
-    const errorObj =
-      item.error && typeof item.error === "object" ? item.error : {};
-    const code = sanitizeText(errorObj.code, "", 120);
-    const fallbackIndex = sanitizeRuntimeInteger(
-      item?.image_index ?? item?.imageIndex ?? item?.index,
-      idx,
-      0,
-      9999,
-    );
-    writeEvent(res, "image_failed", {
-      model,
-      created,
-      imageIndex: fallbackIndex,
-      errorCode: code,
-      errorMessage: mapVolcengineImageGenerationEventError({
-        code,
-        message: errorObj.message,
-      }),
-    });
-  });
-
-  if (payload?.error && typeof payload.error === "object") {
-    const code = sanitizeText(payload.error.code, "", 120);
-    const mapped = mapVolcengineUpstreamError({
-      status: 400,
-      code,
-      message: payload.error.message,
-      param: "",
-    });
-    throw new Error(
-      mapped ||
-        mapVolcengineImageGenerationEventError({
-          code,
-          message: payload.error.message,
-        }),
-    );
-  }
-
-  writeEvent(res, "usage", {
-    model,
-    created,
-    usage: sanitizeImageGenerationUsage(payload?.usage),
-  });
-}
-
-function buildGeneratedImageHistoryExpireAt() {
-  if (groupChatOssClient) return null;
-  return new Date(Date.now() + GENERATED_IMAGE_HISTORY_TTL_MS);
-}
-
-function normalizeGeneratedImageHistoryResponseFormat(value) {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "b64_json") return "b64_json";
-  return "url";
-}
-
 function normalizeGeneratedImageStoreUrl(value) {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -6761,10 +4791,21 @@ function normalizeGeneratedImageStorageType(value) {
 }
 
 function normalizeGeneratedImageMimeType(value) {
-  const type = normalizeSeedreamImageMimeType(
-    String(value || "").split(";")[0],
-  );
-  if (type) return type;
+  const type = String(value || "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+  if (type === "image/jpg") return "image/jpeg";
+  if (
+    type === "image/jpeg" ||
+    type === "image/png" ||
+    type === "image/webp" ||
+    type === "image/bmp" ||
+    type === "image/tiff" ||
+    type === "image/gif"
+  ) {
+    return type;
+  }
   return "";
 }
 
@@ -6881,112 +4922,6 @@ function buildAdminGeneratedImageHistoryThumbnailPath(imageId) {
   );
 }
 
-function buildGeneratedMusicHistoryContentPath(musicId) {
-  const safeMusicId = sanitizeId(musicId, "");
-  if (!safeMusicId) return "";
-  return withBasePath(
-    `/api/music/history/${encodeURIComponent(safeMusicId)}/content`,
-    APP_BASE_PATH,
-  );
-}
-
-function normalizeGeneratedMusicFormat(value) {
-  const key = String(value || "")
-    .trim()
-    .toLowerCase();
-  if (key === "wav" || key === "pcm") return key;
-  return "mp3";
-}
-
-function normalizeGeneratedMusicMimeType(value, format = "mp3") {
-  const text = sanitizeGroupChatFileMimeType(value);
-  if (text.startsWith("audio/")) return text;
-  const safeFormat = normalizeGeneratedMusicFormat(format);
-  if (safeFormat === "wav") return "audio/wav";
-  if (safeFormat === "pcm") return "audio/pcm";
-  return "audio/mpeg";
-}
-
-function toGeneratedMusicHistoryItem(doc) {
-  const safeId = sanitizeId(doc?._id, "");
-  const format = normalizeGeneratedMusicFormat(doc?.format);
-  const ossKey = sanitizeGroupChatOssObjectKey(doc?.ossKey);
-  const referenceAudioOssKey = sanitizeGroupChatOssObjectKey(
-    doc?.referenceAudioOssKey,
-  );
-  return {
-    _id: safeId,
-    title: sanitizeText(doc?.title, "", 80),
-    model: sanitizeText(doc?.model, "", 120),
-    prompt: sanitizeText(doc?.prompt, "", 2000),
-    lyrics: sanitizeText(doc?.lyrics, "", 3500),
-    generationType: sanitizeText(doc?.generationType, "compose", 32),
-    isInstrumental: !!doc?.isInstrumental,
-    lyricsOptimizer: !!doc?.lyricsOptimizer,
-    format,
-    sampleRate: sanitizeRuntimeInteger(doc?.sampleRate, 0, 0, 192000),
-    bitrate: sanitizeRuntimeInteger(doc?.bitrate, 0, 0, 1000000),
-    durationMs: sanitizeRuntimeInteger(doc?.durationMs, 0, 0, 24 * 60 * 60 * 1000),
-    audioSize: sanitizeRuntimeInteger(doc?.audioSize, 0, 0, Number.MAX_SAFE_INTEGER),
-    hasOssBackup:
-      sanitizeGroupChatFileStorageType(doc?.audioStorageType) === "oss" ||
-      !!ossKey,
-    referenceAudioFileName: sanitizeText(doc?.referenceAudioFileName, "", 255),
-    referenceAudioMimeType: sanitizeText(doc?.referenceAudioMimeType, "", 120),
-    referenceAudioSize: sanitizeRuntimeInteger(
-      doc?.referenceAudioSize,
-      0,
-      0,
-      Number.MAX_SAFE_INTEGER,
-    ),
-    hasReferenceAudioBackup:
-      sanitizeGroupChatFileStorageType(doc?.referenceAudioStorageType) === "oss" ||
-      !!referenceAudioOssKey,
-    createdAt: sanitizeIsoDate(doc?.createdAt),
-    contentPath: buildGeneratedMusicHistoryContentPath(safeId),
-  };
-}
-
-function toGeneratedLyricsHistoryItem(doc) {
-  return {
-    _id: sanitizeId(doc?._id, ""),
-    title: sanitizeText(doc?.title, "", 80),
-    mode: sanitizeText(doc?.mode, "write_full_song", 32),
-    prompt: sanitizeText(doc?.prompt, "", 2000),
-    sourceLyrics: sanitizeText(doc?.sourceLyrics, "", 3500),
-    songTitle: sanitizeText(doc?.songTitle, "", 160),
-    styleTags: sanitizeText(doc?.styleTags, "", 500),
-    lyrics: sanitizeText(doc?.lyrics, "", 3500),
-    createdAt: sanitizeIsoDate(doc?.createdAt),
-  };
-}
-
-async function deleteGeneratedMusicHistoryOssObjects(historyItems) {
-  const docs = Array.isArray(historyItems) ? historyItems : [];
-  const failedKeys = [];
-  const seenKeys = new Set();
-  let deletedCount = 0;
-
-  for (const doc of docs) {
-    const candidateKeys = [
-      sanitizeGroupChatOssObjectKey(doc?.ossKey),
-      sanitizeGroupChatOssObjectKey(doc?.referenceAudioOssKey),
-    ].filter(Boolean);
-    for (const ossKey of candidateKeys) {
-      if (seenKeys.has(ossKey)) continue;
-      seenKeys.add(ossKey);
-      try {
-        const deleted = await deleteGroupChatOssObject(ossKey);
-        if (deleted) deletedCount += 1;
-      } catch {
-        failedKeys.push(ossKey);
-      }
-    }
-  }
-
-  return { deletedCount, failedKeys };
-}
-
 function parseTeacherScopedStorageUserId(storageUserId) {
   const raw = sanitizeId(storageUserId, "");
   if (!raw) {
@@ -7012,17 +4947,6 @@ function parseTeacherScopedStorageUserId(storageUserId) {
     baseUserId,
     teacherScopeKey: sanitizeTeacherScopeKey(scopeText),
   };
-}
-
-function resolveGeneratedImageOutputUrl({ url, b64Json }) {
-  const direct = normalizeGeneratedImageStoreUrl(url);
-  if (direct) return direct;
-
-  const b64 = String(b64Json || "")
-    .trim()
-    .replace(/\s+/g, "");
-  if (!b64) return "";
-  return normalizeGeneratedImageStoreUrl(`data:image/png;base64,${b64}`);
 }
 
 async function fetchGeneratedImageBinaryFromUrl(imageUrl) {
@@ -7205,133 +5129,6 @@ async function ensureGeneratedImageHistoryThumbnail(doc) {
   return thumbnailPayload;
 }
 
-async function saveGeneratedImageHistory({
-  userId,
-  prompt,
-  responseFormat,
-  model,
-  images,
-}) {
-  const safeUserId = sanitizeId(userId, "");
-  if (!safeUserId) return;
-
-  const safePrompt = sanitizeText(prompt, "", 2000);
-  const safeResponseFormat =
-    normalizeGeneratedImageHistoryResponseFormat(responseFormat);
-  const safeModel = sanitizeText(model, "", 160);
-  const sourceImages = Array.isArray(images) ? images : [];
-  if (sourceImages.length === 0) return;
-
-  const docs = (
-    await Promise.all(
-      sourceImages.slice(0, 20).map(async (item) => {
-        const imageUrl = normalizeGeneratedImageStoreUrl(
-          item?.imageUrl || item?.url || "",
-        );
-        if (!imageUrl) return null;
-
-        const binaryPayload = await buildGeneratedImageBinaryPayload(imageUrl);
-        const hasBinary =
-          !!binaryPayload?.size && Buffer.isBuffer(binaryPayload?.data);
-        const thumbnailPayload = hasBinary
-          ? await buildGeneratedImageThumbnailPayloadFromBuffer(
-              binaryPayload.data,
-            )
-          : null;
-        let uploadedToOss = null;
-        if (hasBinary && groupChatOssClient && groupChatOssConfig) {
-          const ext = resolveFileExtensionByMimeType(
-            binaryPayload?.mimeType,
-            "png",
-          );
-          const imageIndex = sanitizeRuntimeInteger(
-            item?.imageIndex,
-            0,
-            0,
-            9999,
-          );
-          const outputFileName = `seedream-output-${imageIndex + 1}.${ext}`;
-          try {
-            uploadedToOss = await uploadBufferToGroupChatOss({
-              scope: IMAGE_GENERATION_OUTPUT_OSS_SCOPE,
-              userId: safeUserId,
-              sessionId: "",
-              fileName: outputFileName,
-              mimeType: binaryPayload.mimeType || "image/png",
-              dataBuffer: binaryPayload.data,
-              cacheControl: "private, no-store",
-            });
-          } catch (error) {
-            console.warn(
-              `[image-generation] 生成图片上传 OSS 失败（user=${safeUserId}, file=${outputFileName}）：`,
-              error?.message || error,
-            );
-          }
-        }
-        return {
-          userId: safeUserId,
-          prompt: safePrompt,
-          imageUrl:
-            sanitizeGroupChatHttpUrl(uploadedToOss?.fileUrl) || imageUrl,
-          imageStorageType: uploadedToOss
-            ? "oss"
-            : hasBinary
-              ? "binary"
-              : "remote",
-          ossKey: sanitizeGroupChatOssObjectKey(uploadedToOss?.ossKey),
-          ossBucket: sanitizeAliyunOssBucket(uploadedToOss?.ossBucket),
-          ossRegion: sanitizeAliyunOssRegion(uploadedToOss?.ossRegion),
-          imageMimeType: hasBinary ? binaryPayload.mimeType : "",
-          imageSize: hasBinary ? binaryPayload.size : 0,
-          imageData: uploadedToOss
-            ? Buffer.alloc(0)
-            : hasBinary
-              ? binaryPayload.data
-              : Buffer.alloc(0),
-          thumbnailMimeType: thumbnailPayload?.mimeType || "",
-          thumbnailSize: thumbnailPayload?.size || 0,
-          thumbnailData: thumbnailPayload?.data || Buffer.alloc(0),
-          responseFormat: safeResponseFormat,
-          size: sanitizeText(item?.size, "", 80),
-          model: sanitizeText(item?.model, safeModel, 160),
-          expiresAt: buildGeneratedImageHistoryExpireAt(),
-        };
-      }),
-    )
-  ).filter(Boolean);
-  if (docs.length === 0) return;
-
-  try {
-    await GeneratedImageHistory.insertMany(docs, { ordered: false });
-  } catch (error) {
-    console.warn(
-      `Failed to persist generated image history (${safeUserId}):`,
-      error?.message || error,
-    );
-  }
-}
-
-function toGeneratedImageHistoryItem(doc) {
-  const id = sanitizeId(doc?._id, "");
-  const storageType = normalizeGeneratedImageStorageType(doc?.imageStorageType);
-  const storedContentPath =
-    storageType === "binary" || storageType === "oss"
-      ? buildGeneratedImageHistoryContentPath(id)
-      : "";
-  return {
-    id,
-    prompt: sanitizeText(doc?.prompt, "", 2000),
-    url:
-      storedContentPath || normalizeGeneratedImageStoreUrl(doc?.imageUrl || ""),
-    responseFormat: normalizeGeneratedImageHistoryResponseFormat(
-      doc?.responseFormat,
-    ),
-    size: sanitizeText(doc?.size, "", 80),
-    model: sanitizeText(doc?.model, "", 160),
-    createdAt: sanitizeIsoDate(doc?.createdAt) || new Date().toISOString(),
-  };
-}
-
 function toAdminGeneratedImageHistoryItem(doc) {
   const id = sanitizeId(doc?._id, "");
   const createdAt = sanitizeIsoDate(doc?.createdAt) || new Date().toISOString();
@@ -7354,82 +5151,10 @@ function toAdminGeneratedImageHistoryItem(doc) {
   };
 }
 
-function sanitizeImageGenerationUsage(raw) {
-  const usage = raw && typeof raw === "object" ? raw : {};
-  return {
-    generatedImages: sanitizeRuntimeInteger(usage.generated_images, 0, 0, 9999),
-    outputTokens: sanitizeRuntimeInteger(usage.output_tokens, 0, 0, 10_000_000),
-    totalTokens: sanitizeRuntimeInteger(usage.total_tokens, 0, 0, 10_000_000),
-  };
-}
-
-function mapVolcengineImageGenerationEventError({ code, message }) {
-  const codeKey = String(code || "")
-    .trim()
-    .toLowerCase();
-  const explicit = String(message || "").trim();
-
-  if (
-    codeKey.includes("outputimagesensitivecontentdetected") ||
-    codeKey.includes("outputimageriskdetection")
-  ) {
-    return "生成的图像可能包含敏感信息，请调整提示词后重试。";
-  }
-
-  if (
-    codeKey.includes("inputimagesensitivecontentdetected") ||
-    codeKey.includes("inputimageriskdetection")
-  ) {
-    return "输入图片可能包含敏感信息，请更换后重试。";
-  }
-
-  if (codeKey.includes("invalidimageurl")) {
-    return "输入图片无效，请检查图片链接或格式后重试。";
-  }
-
-  if (codeKey.includes("serveroverloaded")) {
-    return "当前服务繁忙，请稍后重试。";
-  }
-
-  if (codeKey.includes("internalserviceerror")) {
-    return "服务内部异常，请稍后重试。";
-  }
-
-  if (explicit) return explicit;
-  return "图片生成失败，请稍后重试。";
-}
-
-function buildImageGenerationHeaders(apiKey, stream = true) {
-  return {
-    Authorization: `Bearer ${apiKey}`,
-    "Content-Type": "application/json",
-    Accept: stream ? "text/event-stream, application/json" : "application/json",
-  };
-}
-
-function getVolcengineImageGenerationConfig() {
-  return {
-    endpoint:
-      process.env.VOLCENGINE_IMAGE_GENERATION_ENDPOINT ||
-      DEFAULT_VOLCENGINE_IMAGE_GENERATION_ENDPOINT,
-    model:
-      process.env.VOLCENGINE_IMAGE_GENERATION_MODEL ||
-      DEFAULT_VOLCENGINE_IMAGE_GENERATION_MODEL,
-    apiKey: readEnvApiKey(
-      "VOLCENGINE_IMAGE_API_KEY",
-      "VOLCENGINE_SEEDREAM_API_KEY",
-      "ARK_IMAGE_API_KEY",
-    ),
-    missingKeyMessage:
-      "未检测到图片生成 API Key。请在 .env 中配置 VOLCENGINE_IMAGE_API_KEY（或 VOLCENGINE_SEEDREAM_API_KEY / ARK_IMAGE_API_KEY）。",
-  };
-}
-
 function buildChatRequestPayload({
   model,
   messages,
   systemPrompt,
-  provider,
   config,
   reasoning,
 }) {
@@ -7438,16 +5163,7 @@ function buildChatRequestPayload({
   if (systemPrompt) {
     finalMessages.push({ role: "system", content: systemPrompt });
   }
-  if (provider === "packycode") {
-    finalMessages.push(
-      ...messages.map((message) => ({
-        ...message,
-        content: normalizePackyChatMessageContent(message?.content),
-      })),
-    );
-  } else {
-    finalMessages.push(...messages);
-  }
+  finalMessages.push(...messages);
 
   const payload = {
     model,
@@ -7461,93 +5177,40 @@ function buildChatRequestPayload({
     ),
   };
 
-  if (provider !== "packycode") {
-    payload.temperature = fixedSampling
-      ? VOLCENGINE_FIXED_TEMPERATURE
-      : sanitizeRuntimeNumber(
-          config.temperature,
-          DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
-          0,
-          2,
-        );
-    payload.top_p = fixedSampling
-      ? VOLCENGINE_FIXED_TOP_P
-      : sanitizeRuntimeNumber(
-          config.topP,
-          DEFAULT_AGENT_RUNTIME_CONFIG.topP,
-          0,
-          1,
-        );
-    payload.frequency_penalty = sanitizeRuntimeNumber(
-      config.frequencyPenalty,
-      DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty,
-      -2,
-      2,
-    );
-    payload.presence_penalty = sanitizeRuntimeNumber(
-      config.presencePenalty,
-      DEFAULT_AGENT_RUNTIME_CONFIG.presencePenalty,
-      -2,
-      2,
-    );
-  }
+  payload.temperature = fixedSampling
+    ? VOLCENGINE_FIXED_TEMPERATURE
+    : sanitizeRuntimeNumber(
+        config.temperature,
+        DEFAULT_AGENT_RUNTIME_CONFIG.temperature,
+        0,
+        2,
+      );
+  payload.top_p = fixedSampling
+    ? VOLCENGINE_FIXED_TOP_P
+    : sanitizeRuntimeNumber(
+        config.topP,
+        DEFAULT_AGENT_RUNTIME_CONFIG.topP,
+        0,
+        1,
+      );
+  payload.frequency_penalty = sanitizeRuntimeNumber(
+    config.frequencyPenalty,
+    DEFAULT_AGENT_RUNTIME_CONFIG.frequencyPenalty,
+    -2,
+    2,
+  );
+  payload.presence_penalty = sanitizeRuntimeNumber(
+    config.presencePenalty,
+    DEFAULT_AGENT_RUNTIME_CONFIG.presencePenalty,
+    -2,
+    2,
+  );
 
   if (reasoning.enabled) {
     payload.reasoning = { effort: reasoning.effort };
   }
 
-  if (provider === "packycode") {
-    payload.stream_options = { include_usage: true };
-  }
-
   return payload;
-}
-
-function normalizePackyChatMessageContent(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-
-  const parts = [];
-  content.forEach((part) => {
-    if (!part || typeof part !== "object") return;
-    const type = String(part.type || "")
-      .trim()
-      .toLowerCase();
-
-    if (type === "text" || type === "input_text" || type === "output_text") {
-      const text = String(part.text || "");
-      if (text.trim()) {
-        parts.push({ type: "input_text", text });
-      }
-      return;
-    }
-
-    if (type === "image_url" || type === "input_image") {
-      const imageUrl = extractInputImageUrl(part);
-      if (imageUrl) {
-        parts.push({ type: "input_image", image_url: imageUrl });
-      }
-      return;
-    }
-
-    if (type === "file") {
-      const filePayload = normalizeChatFilePart(part);
-      if (filePayload?.filename && filePayload?.file_data) {
-        parts.push({
-          type: "input_file",
-          filename: filePayload.filename,
-          file_data: filePayload.file_data,
-        });
-      }
-      return;
-    }
-  });
-
-  if (parts.length === 0) return "";
-  if (parts.length === 1 && parts[0].type === "input_text") {
-    return parts[0].text;
-  }
-  return parts;
 }
 
 function buildResponsesRequestPayload({
@@ -8175,10 +5838,6 @@ function resolveRequestProtocol(requestedProtocol, provider, model = "") {
     const normalized = resolveAliyunProtocol(protocol);
     const value = policy.forceProtocol || normalized;
     return { supported: true, value, forced: value !== protocol };
-  }
-
-  if (provider === "packycode") {
-    return { supported: true, value: "chat", forced: protocol !== "chat" };
   }
 
   if (provider === "reserved") {
@@ -9670,9 +7329,7 @@ function sanitizeAdminClassroomClassName(
   fallback = ADMIN_CLASSROOM_DEFAULT_CLASS_NAME,
 ) {
   const className = sanitizeText(value, "", 40).replace(/\s+/g, "");
-  if (ADMIN_CLASSROOM_SUPPORTED_CLASS_NAMES.includes(className)) {
-    return className;
-  }
+  if (className) return className;
   return sanitizeText(fallback, ADMIN_CLASSROOM_DEFAULT_CLASS_NAME, 40).replace(
     /\s+/g,
     "",
@@ -9935,6 +7592,10 @@ function sanitizeAdminClassroomCoursePlanPayload(input, index = 0) {
     source.courseTime || source.time,
   );
   const notes = sanitizeText(source.notes || source.note, "", 300);
+  const announcement = sanitizeText(source.announcement, "", 500);
+  const announcementUpdatedAt = sanitizeIsoDate(
+    source.announcementUpdatedAt,
+  ) || "";
   const homeworkRequirementText = normalizeClassroomHomeworkRequirementText(
     source.homeworkRequirementText ||
       source.homeworkRequirement ||
@@ -9946,6 +7607,7 @@ function sanitizeAdminClassroomCoursePlanPayload(input, index = 0) {
     !courseStartAt &&
     !courseEndAt &&
     !notes &&
+    !announcement &&
     !homeworkRequirementText &&
     tasks.length === 0 &&
     files.length === 0
@@ -9961,6 +7623,8 @@ function sanitizeAdminClassroomCoursePlanPayload(input, index = 0) {
     courseStartAt,
     courseEndAt,
     notes,
+    announcement,
+    announcementUpdatedAt,
     homeworkRequirementText,
     enabled,
     homeworkUploadEnabled,
@@ -10182,6 +7846,13 @@ function normalizeAdminConfigDoc(doc) {
       doc?.shangguanClassTaskProductImprovementEnabled,
       false,
     ),
+    paiaParticipationMonitoringEnabled: sanitizeRuntimeBoolean(
+      doc?.paiaParticipationMonitoringEnabled,
+      false,
+    ),
+    paiaParticipationMonitoringUpdatedAt: sanitizeIsoDate(
+      doc?.paiaParticipationMonitoringUpdatedAt,
+    ),
     teacherCoursePlans: sanitizeAdminClassroomCoursePlansPayload(
       doc?.teacherCoursePlans,
     ),
@@ -10235,8 +7906,7 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
       : normalizedAgentId === "B"
         ? AGENT_B_FIXED_PROVIDER
       : sanitizeRuntimeProvider(source.provider);
-  const protocol =
-    provider === "packycode" ? "chat" : sanitizeRuntimeProtocol(source.protocol);
+  const protocol = sanitizeRuntimeProtocol(source.protocol);
   const model = sanitizeRuntimeModel(source.model);
   const modelForMatching =
     model ||
@@ -10494,16 +8164,6 @@ function sanitizeSingleAgentRuntimeConfig(raw, agentId = "A") {
     }
   }
 
-  if (provider === "packycode") {
-    next.protocol = "chat";
-    next.enableWebSearch = false;
-    if (isPackyGpt54Model(modelForMatching)) {
-      next.contextWindowTokens = PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS;
-      next.maxInputTokens = PACKYCODE_GPT54_MAX_INPUT_TOKENS;
-      next.maxOutputTokens = PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS;
-    }
-  }
-
   if (normalizedAgentId === "A") {
     next.provider = AGENT_A_FIXED_PROVIDER;
     next.model = AGENT_A_FIXED_MODEL;
@@ -10692,8 +8352,6 @@ function sanitizeRuntimeProvider(value) {
   if (!key) return DEFAULT_AGENT_RUNTIME_CONFIG.provider;
   if (key === "inherit" || key === "default" || key === "auto")
     return "inherit";
-  if (key === "packycode" || key === "packy" || key === "packyapi")
-    return "packycode";
   if (key === "reserved") return "reserved";
   if (key === "aliyun" || key === "alibaba" || key === "dashscope")
     return "aliyun";
@@ -10847,29 +8505,13 @@ function sanitizeReasoningEffort(value, fallback = "high") {
 }
 
 function getProviderDefaultModel(provider) {
-  return normalizeProvider(provider) === "packycode"
-    ? PACKYCODE_DEFAULT_MODEL
-    : "";
+  void provider;
+  return "";
 }
 
 function getProviderDefaultThinkingEffort(provider, fallback = "high") {
-  return normalizeProvider(provider) === "packycode"
-    ? "medium"
-    : sanitizeReasoningEffort(fallback, "high");
-}
-
-function isPackyGpt54Model(model = "") {
-  return getNormalizedModelCandidates(model).some(
-    (candidate) => candidate === PACKYCODE_DEFAULT_MODEL,
-  );
-}
-
-function isPackyTokenBudgetRuntime(provider = "", model = "") {
-  return normalizeProvider(provider) === "packycode" && isPackyGpt54Model(model);
-}
-
-function resolvePackyTokenizerModel(model = "") {
-  return isPackyGpt54Model(model) ? "gpt-5" : undefined;
+  void provider;
+  return sanitizeReasoningEffort(fallback, "high");
 }
 
 function sanitizeRuntimeTokenUsage(raw) {
@@ -10897,819 +8539,6 @@ function sanitizeRuntimeTokenUsage(raw) {
     prompt_tokens,
     completion_tokens,
     total_tokens,
-  };
-}
-
-function findLatestPackyContextSummary(messages) {
-  const list = Array.isArray(messages) ? messages : [];
-  for (let index = list.length - 1; index >= 0; index -= 1) {
-    const message = list[index];
-    if (
-      message?.role === "system" &&
-      message?.hidden &&
-      message?.internalType === "context_summary" &&
-      hasUsableMessageContent(message?.content)
-    ) {
-      return { index, message };
-    }
-  }
-  return { index: -1, message: null };
-}
-
-function findUserRoundStartIndex(messages, keepUserRounds) {
-  const list = Array.isArray(messages) ? messages : [];
-  const safeKeep = sanitizeRuntimeInteger(keepUserRounds, 0, 0, 400);
-  if (list.length === 0 || safeKeep <= 0) return list.length;
-
-  let seenUserRounds = 0;
-  for (let index = list.length - 1; index >= 0; index -= 1) {
-    if (list[index]?.role !== "user") continue;
-    seenUserRounds += 1;
-    if (seenUserRounds === safeKeep) {
-      return index;
-    }
-  }
-
-  return 0;
-}
-
-function buildPackySummaryMessageId(sessionId = "", existingId = "") {
-  const safeExistingId = sanitizeId(existingId, "");
-  if (safeExistingId) return safeExistingId;
-  const safeSessionId = sanitizeId(sessionId, "");
-  if (safeSessionId) return `packy-summary-${safeSessionId}`;
-  return `packy-summary-${Date.now()}`;
-}
-
-function parseDataUrlMime(value = "") {
-  const raw = String(value || "").trim();
-  const match = /^data:([^;,]+)[;,]/i.exec(raw);
-  return sanitizeGroupChatFileMimeType(match?.[1] || "");
-}
-
-function buildPackyEstimatorTextContent(content) {
-  if (typeof content === "string") return content;
-  const normalized = normalizeMessageContent(content);
-  if (!Array.isArray(normalized) || normalized.length === 0) return "";
-
-  return normalized
-    .map((part) => {
-      const type = String(part?.type || "")
-        .trim()
-        .toLowerCase();
-      if (type === "text" || type === "input_text" || type === "output_text") {
-        return String(part?.text || "");
-      }
-      if (type === "image_url" || type === "input_image") {
-        return "[图片附件]";
-      }
-      if (type === "input_file") {
-        return "[文件引用]";
-      }
-      if (type === "input_video") {
-        return "[视频引用]";
-      }
-      if (type === "file") {
-        const filePayload = normalizeChatFilePart(part);
-        const filename = sanitizeText(
-          filePayload?.filename || part?.filename || "",
-          "附件",
-          180,
-        );
-        return `[文件附件: ${filename}]`;
-      }
-      if (type === "file_url" || type === "input_file_url") {
-        const name = sanitizeText(
-          part?.file_url?.name ||
-            part?.file_url?.filename ||
-            part?.name ||
-            part?.filename ||
-            "",
-          "附件",
-          180,
-        );
-        return `[文件链接: ${name}]`;
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function estimatePackyNonTextPartTokens(content) {
-  const normalized = normalizeMessageContent(content);
-  if (!Array.isArray(normalized) || normalized.length === 0) return 0;
-
-  return normalized.reduce((total, part) => {
-    const type = String(part?.type || "")
-      .trim()
-      .toLowerCase();
-    if (type === "image_url" || type === "input_image") {
-      return total + 1200;
-    }
-    if (type === "input_file" || type === "file_url" || type === "input_file_url") {
-      return total + 2400;
-    }
-    if (type === "input_video") {
-      return total + 3600;
-    }
-    if (type !== "file") {
-      return total;
-    }
-
-    const filePayload = normalizeChatFilePart(part);
-    const mime = parseDataUrlMime(filePayload?.file_data);
-    if (mime.includes("pdf")) return total + 8000;
-    if (
-      mime.includes("word") ||
-      mime.includes("sheet") ||
-      mime.includes("excel") ||
-      mime.includes("text/")
-    ) {
-      return total + 6000;
-    }
-    return total + 3000;
-  }, 0);
-}
-
-function estimatePackyChatInputTokens({ messages = [], systemPrompt = "" } = {}) {
-  const chat = [];
-  const safeSystemPrompt = String(systemPrompt || "").trim();
-  if (safeSystemPrompt) {
-    chat.push({ role: "system", content: safeSystemPrompt });
-  }
-
-  let extraTokens = 0;
-  (Array.isArray(messages) ? messages : []).forEach((message) => {
-    const role = ["system", "user", "assistant"].includes(message?.role)
-      ? message.role
-      : "user";
-    const text = buildPackyEstimatorTextContent(message?.content) || " ";
-    chat.push({ role, content: text });
-    extraTokens += estimatePackyNonTextPartTokens(message?.content);
-  });
-
-  try {
-    return encodeChat(chat, resolvePackyTokenizerModel(PACKYCODE_DEFAULT_MODEL))
-      .length + extraTokens;
-  } catch {
-    return (
-      chat.reduce(
-        (total, item) => total + countTokens(String(item?.content || "")),
-        0,
-      ) + extraTokens
-    );
-  }
-}
-
-function resolvePackyRequestedMaxOutputTokens(config) {
-  return sanitizeRuntimeInteger(
-    config?.maxOutputTokens,
-    PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
-    64,
-    PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
-  );
-}
-
-function computePackySafeMaxOutputTokens({
-  estimatedInputTokens = 0,
-  requestedMaxOutputTokens = PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
-  contextWindowTokens = PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
-}) {
-  const safeInput = Math.max(0, Number(estimatedInputTokens) || 0);
-  const safeRequested = Math.max(64, Number(requestedMaxOutputTokens) || 64);
-  const safeWindow = Math.max(1024, Number(contextWindowTokens) || 1024);
-  const remaining =
-    safeWindow - safeInput - SESSION_NOTES_CONTEXT_SAFETY_MARGIN_TOKENS;
-  if (!Number.isFinite(remaining) || remaining <= 64) return 64;
-  return Math.max(64, Math.min(safeRequested, Math.floor(remaining)));
-}
-
-function shouldCompactSessionNotesContext({
-  estimatedInputTokens = 0,
-  requestedMaxOutputTokens = PACKYCODE_GPT54_DEFAULT_MAX_OUTPUT_TOKENS,
-  contextWindowTokens = PACKYCODE_GPT54_CONTEXT_WINDOW_TOKENS,
-}) {
-  const safeInput = Math.max(0, Number(estimatedInputTokens) || 0);
-  const safeRequested = Math.max(64, Number(requestedMaxOutputTokens) || 64);
-  const safeWindow = Math.max(1024, Number(contextWindowTokens) || 1024);
-  return (
-    safeInput + safeRequested + SESSION_NOTES_CONTEXT_SAFETY_MARGIN_TOKENS >=
-    safeWindow
-  );
-}
-
-function hasUnsummarizedOlderMessages(messages, summaryUpToMessageId = "") {
-  const safeMessages = Array.isArray(messages) ? messages : [];
-  if (safeMessages.length === 0) return false;
-  const cutoffId = sanitizeId(summaryUpToMessageId, "");
-  if (!cutoffId) return safeMessages.some((message) => !message?.hidden);
-  let found = false;
-  for (let index = 0; index < safeMessages.length; index += 1) {
-    const messageId = sanitizeId(safeMessages[index]?.id, "");
-    if (!found) {
-      if (messageId === cutoffId) {
-        found = true;
-      }
-      continue;
-    }
-    if (!safeMessages[index]?.hidden) return true;
-  }
-  return false;
-}
-
-function extractUnsummarizedMessages(messages, summaryUpToMessageId = "") {
-  const safeMessages = Array.isArray(messages) ? messages : [];
-  if (safeMessages.length === 0) return [];
-  const cutoffId = sanitizeId(summaryUpToMessageId, "");
-  if (!cutoffId) {
-    return safeMessages.filter((message) => !message?.hidden);
-  }
-
-  let foundCutoff = false;
-  const next = [];
-  safeMessages.forEach((message) => {
-    if (message?.hidden) return;
-    const messageId = sanitizeId(message?.id, "");
-    if (!foundCutoff) {
-      if (messageId === cutoffId) {
-        foundCutoff = true;
-      }
-      return;
-    }
-    next.push(message);
-  });
-  return next;
-}
-
-function clipPackySummaryText(value, maxChars = 6000) {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars).trim()}\n…（已截断）`;
-}
-
-function renderPackySummarySourceMessages(messages) {
-  const list = Array.isArray(messages) ? messages : [];
-  return list
-    .map((message, index) => {
-      const role = String(message?.role || "assistant").toUpperCase();
-      const messageId = sanitizeId(message?.id, `m${index + 1}`);
-      const content = normalizeMessageContent(message?.content);
-      const lines = [`[${role} ${messageId}]`];
-
-      if (typeof content === "string") {
-        const text = clipPackySummaryText(content);
-        if (text) lines.push(text);
-        return lines.join("\n");
-      }
-
-      const safeParts = Array.isArray(content) ? content : [];
-      safeParts.forEach((part) => {
-        const type = String(part?.type || "")
-          .trim()
-          .toLowerCase();
-        if (type === "text" || type === "input_text" || type === "output_text") {
-          const text = clipPackySummaryText(part?.text, 5000);
-          if (text) lines.push(text);
-          return;
-        }
-        if (type === "image_url" || type === "input_image") {
-          lines.push("[图片附件]");
-          return;
-        }
-        if (type === "input_video") {
-          lines.push("[视频附件]");
-          return;
-        }
-        if (type === "input_file") {
-          lines.push("[文件引用]");
-          return;
-        }
-        if (type === "file_url" || type === "input_file_url") {
-          const name = sanitizeText(
-            part?.file_url?.name ||
-              part?.file_url?.filename ||
-              part?.name ||
-              part?.filename ||
-              "",
-            "附件",
-            180,
-          );
-          lines.push(`[文件链接: ${name}]`);
-          return;
-        }
-        if (type === "file") {
-          const filePayload = normalizeChatFilePart(part);
-          const filename = sanitizeText(
-            filePayload?.filename || part?.filename || "",
-            "附件",
-            180,
-          );
-          lines.push(`[文件附件: ${filename}]`);
-        }
-      });
-
-      return lines.join("\n");
-    })
-    .filter(Boolean)
-    .join("\n\n");
-}
-
-function extractChatCompletionOutputText(responseJson) {
-  const choice = responseJson?.choices?.[0] || {};
-  const message = choice?.message && typeof choice.message === "object"
-    ? choice.message
-    : {};
-  const content = message?.content;
-  if (typeof content === "string") {
-    return resolveReasoningTaggedText(content).content;
-  }
-  if (Array.isArray(content)) {
-    return resolveReasoningTaggedText(
-      content
-        .map((part) => extractDeltaText(part?.text || part?.content || part))
-        .join(""),
-    ).content;
-  }
-  return resolveReasoningTaggedText(
-    extractDeltaText(choice?.text || responseJson?.output_text || ""),
-  ).content;
-}
-
-async function summarizePackyContextBlock({
-  chatEndpoint = "",
-  apiKey = "",
-  model = PACKYCODE_DEFAULT_MODEL,
-  thinkingEffort = "medium",
-  existingSummary = "",
-  sourceMessages = [],
-}) {
-  const transcript = renderPackySummarySourceMessages(sourceMessages);
-  if (!transcript) {
-    throw new Error("没有可压缩的历史消息。");
-  }
-
-  const payload = {
-    model,
-    stream: false,
-    response_format: { type: "json_object" },
-    max_tokens: 8192,
-    messages: [
-      {
-        role: "system",
-        content:
-          "你负责把聊天历史压缩成供后续轮次继续使用的上下文摘要。请输出 JSON 对象，且仅包含 summary 字段。summary 必须保留：任务目标、关键结论、用户偏好、待办项、已确认事实、失败尝试、附件或图片讨论得出的结论与引用对象。不要复写整份附件/PDF/图片正文，不要输出 base64，不要丢失尚未完成的任务。",
-      },
-      {
-        role: "user",
-        content: [
-          existingSummary
-            ? `现有摘要：\n${clipPackySummaryText(existingSummary, 12000)}`
-            : "现有摘要：无",
-          "新增待压缩历史：",
-          transcript,
-          '请返回 JSON，例如：{"summary":"..."}',
-        ].join("\n\n"),
-      },
-    ],
-    reasoning: {
-      effort: sanitizeReasoningEffort(thinkingEffort, "medium"),
-    },
-  };
-
-  const response = await fetch(chatEndpoint, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  const detail = await safeReadText(response);
-  if (!response.ok) {
-    throw new Error(
-      formatProviderUpstreamError("packycode", "chat", response.status, detail),
-    );
-  }
-
-  let json;
-  try {
-    json = JSON.parse(detail);
-  } catch {
-    throw new Error("PackyCode 摘要响应不是合法 JSON。");
-  }
-  const text = extractChatCompletionOutputText(json);
-  if (!text.trim()) {
-    throw new Error("PackyCode 摘要响应为空。");
-  }
-
-  try {
-    const parsed = JSON.parse(text);
-    const summary = sanitizeText(parsed?.summary, "", 24000);
-    if (summary) return summary;
-  } catch {
-    // Ignore JSON parse failure and fall back to raw text.
-  }
-
-  return sanitizeText(text, "", 24000);
-}
-
-function mergeSessionNotesFileSummaryLists(existingList, incomingList) {
-  const map = new Map();
-  sanitizeSessionNotesFileSummaries(existingList).forEach((item) => {
-    const key = String(item.filename || item.summary || "")
-      .trim()
-      .toLowerCase();
-    if (!key) return;
-    map.set(key, item);
-  });
-  sanitizeSessionNotesFileSummaries(incomingList).forEach((item) => {
-    const key = String(item.filename || item.summary || "")
-      .trim()
-      .toLowerCase();
-    if (!key) return;
-    const previous = map.get(key);
-    if (!previous) {
-      map.set(key, item);
-      return;
-    }
-    map.set(key, {
-      filename: item.filename || previous.filename,
-      summary: item.summary || previous.summary,
-      keyPoints: sanitizeSessionNotesList([
-        ...(Array.isArray(previous.keyPoints) ? previous.keyPoints : []),
-        ...(Array.isArray(item.keyPoints) ? item.keyPoints : []),
-      ], 6),
-    });
-  });
-  return Array.from(map.values()).slice(0, SESSION_NOTES_MAX_FILE_SUMMARIES);
-}
-
-function mergeSessionNotes(baseNotes, patchNotes) {
-  const base = sanitizeSessionNotesPayload(baseNotes);
-  const patch = sanitizeSessionNotesPayload(patchNotes);
-  return {
-    goal: patch.goal || base.goal,
-    facts: sanitizeSessionNotesList([...base.facts, ...patch.facts]),
-    preferences: sanitizeSessionNotesList([
-      ...base.preferences,
-      ...patch.preferences,
-    ]),
-    completed: sanitizeSessionNotesList([...base.completed, ...patch.completed]),
-    pending: sanitizeSessionNotesList([...base.pending, ...patch.pending]),
-    openQuestions: sanitizeSessionNotesList([
-      ...base.openQuestions,
-      ...patch.openQuestions,
-    ]),
-    fileSummaries: mergeSessionNotesFileSummaryLists(
-      base.fileSummaries,
-      patch.fileSummaries,
-    ),
-    doNotRepeat: sanitizeSessionNotesList([
-      ...base.doNotRepeat,
-      ...patch.doNotRepeat,
-    ]),
-  };
-}
-
-function buildSessionNotesSummarizerSchemaHint() {
-  return JSON.stringify(
-    {
-      goal: "",
-      facts: [],
-      preferences: [],
-      completed: [],
-      pending: [],
-      openQuestions: [],
-      fileSummaries: [
-        {
-          filename: "",
-          summary: "",
-          keyPoints: [],
-        },
-      ],
-      doNotRepeat: [],
-    },
-    null,
-    2,
-  );
-}
-
-function buildLocalFallbackSessionNotesFromTranscript({
-  existingNotes,
-  transcript = "",
-  fileEntries = [],
-}) {
-  const merged = mergeSessionNotes(existingNotes, {
-    facts: transcript ? [clipPackySummaryText(transcript, 1200)] : [],
-    fileSummaries: fileEntries,
-  });
-  return sanitizeSessionNotesPayload(merged);
-}
-
-function extractSessionNoteFileEntriesFromContent(content) {
-  const normalized = normalizeMessageContent(content);
-  const entries = [];
-  if (!Array.isArray(normalized)) return entries;
-
-  normalized.forEach((part) => {
-    if (!isPackyAttachmentMemoryTextPart(part)) return;
-    const text = String(part?.text || "").trim();
-    if (!text) return;
-    const filenameMatch = /^\[附件:\s*(.+?)\]\s*$/m.exec(text);
-    const filename = sanitizeText(filenameMatch?.[1] || "", "附件", 180);
-    const previewIndex = text.indexOf("内容预览:\n");
-    const preview =
-      previewIndex >= 0
-        ? text.slice(previewIndex + "内容预览:\n".length).trim()
-        : text;
-    const sentences = preview
-      .split(/[\n。！？!?]/)
-      .map((item) => sanitizeText(item, "", 240))
-      .filter(Boolean);
-    entries.push({
-      filename,
-      summary: clipPackySummaryText(preview, 360),
-      keyPoints: sanitizeSessionNotesList(sentences, 4),
-    });
-  });
-
-  return sanitizeSessionNotesFileSummaries(entries);
-}
-
-async function summarizeSessionNotesBlock({
-  provider = "",
-  protocol = "",
-  providerConfig = null,
-  model = PACKYCODE_DEFAULT_MODEL,
-  thinkingEffort = "medium",
-  existingNotes = null,
-  transcript = "",
-  fileEntries = [],
-}) {
-  const safeExisting = sanitizeSessionNotesPayload(existingNotes);
-  const safeFileEntries = sanitizeSessionNotesFileSummaries(fileEntries);
-  const safeTranscript = sanitizeText(transcript, "", 24000);
-
-  if (
-    provider !== "packycode" ||
-    protocol !== "chat" ||
-    !providerConfig?.chatEndpoint ||
-    !providerConfig?.apiKey ||
-    (!safeTranscript && safeFileEntries.length === 0)
-  ) {
-    return buildLocalFallbackSessionNotesFromTranscript({
-      existingNotes: safeExisting,
-      transcript: safeTranscript,
-      fileEntries: safeFileEntries,
-    });
-  }
-
-  const prompt = [
-    "你负责维护一个长期可复用的 session notes。请将已有笔记与新增历史融合，输出紧凑、去重、可延续的 JSON。",
-    "要求：",
-    "1. 保留任务目标、已确认事实、用户偏好、已完成事项、待办、未决问题、失败尝试。",
-    "2. 如果有文件内容，只保留文件摘要与关键点，绝不保留大段原文、base64、整页 PDF 文本。",
-    `3. 输出必须符合以下 JSON 结构：\n${buildSessionNotesSummarizerSchemaHint()}`,
-    "4. 控制总信息量，避免冗余；如有重复内容，合并成更短、更准确的表述。",
-    `现有 notes：\n${JSON.stringify(safeExisting, null, 2)}`,
-    safeFileEntries.length > 0
-      ? `新增文件摘要候选：\n${JSON.stringify(safeFileEntries, null, 2)}`
-      : "新增文件摘要候选：无",
-    safeTranscript ? `新增对话历史：\n${safeTranscript}` : "新增对话历史：无",
-  ].join("\n\n");
-
-  const payload = {
-    model,
-    stream: false,
-    response_format: { type: "json_object" },
-    max_tokens: 4096,
-    messages: [
-      {
-        role: "system",
-        content:
-          "你是会话记忆整理器。只输出一个 JSON 对象，不要输出解释文本，不要使用 Markdown。",
-      },
-      {
-        role: "user",
-        content: prompt,
-      },
-    ],
-    reasoning: {
-      effort: sanitizeReasoningEffort(thinkingEffort, "medium"),
-    },
-  };
-
-  try {
-    const response = await fetch(providerConfig.chatEndpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${providerConfig.apiKey}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-    const detail = await safeReadText(response);
-    if (!response.ok) {
-      throw new Error(
-        formatProviderUpstreamError("packycode", "chat", response.status, detail),
-      );
-    }
-    const json = JSON.parse(detail || "{}");
-    const text = extractChatCompletionOutputText(json);
-    if (!text.trim()) {
-      return buildLocalFallbackSessionNotesFromTranscript({
-        existingNotes: safeExisting,
-        transcript: safeTranscript,
-        fileEntries: safeFileEntries,
-      });
-    }
-    const parsed = JSON.parse(text);
-    return mergeSessionNotes(
-      safeExisting,
-      sanitizeSessionNotesPayload(parsed),
-    );
-  } catch (error) {
-    console.warn(
-      `[session-notes] summarize failed: ${error?.message || error}`,
-    );
-    return buildLocalFallbackSessionNotesFromTranscript({
-      existingNotes: safeExisting,
-      transcript: safeTranscript,
-      fileEntries: safeFileEntries,
-    });
-  }
-}
-
-function buildPackyCompressedRequestMessages(messages, summaryMessage) {
-  const safeMessages = Array.isArray(messages) ? messages.filter(Boolean) : [];
-  if (!summaryMessage?.summaryUpToMessageId) {
-    return [
-      summaryMessage,
-      ...safeMessages.filter(
-        (message) =>
-          !(message?.hidden && message?.internalType === "context_summary"),
-      ),
-    ];
-  }
-
-  const cutoffId = sanitizeId(summaryMessage.summaryUpToMessageId, "");
-  let skipping = !!cutoffId;
-  let foundCutoff = false;
-  const next = [summaryMessage];
-
-  safeMessages.forEach((message) => {
-    if (message?.hidden && message?.internalType === "context_summary") {
-      return;
-    }
-    if (!skipping) {
-      next.push(message);
-      return;
-    }
-    if (sanitizeId(message?.id, "") === cutoffId) {
-      foundCutoff = true;
-      skipping = false;
-    }
-  });
-
-  if (!cutoffId || foundCutoff) return next;
-  return [
-    summaryMessage,
-    ...safeMessages.filter(
-      (message) =>
-        !(message?.hidden && message?.internalType === "context_summary"),
-    ),
-  ];
-}
-
-async function maybeApplyPackyContextCompression({
-  sessionId = "",
-  provider = "",
-  model = "",
-  config = {},
-  systemPrompt = "",
-  requestMessages = [],
-  providerConfig = {},
-}) {
-  if (!isPackyTokenBudgetRuntime(provider, model)) {
-    return {
-      requestMessages,
-      compressionMetaForClient: null,
-      summaryMessage: null,
-    };
-  }
-
-  let workingMessages = Array.isArray(requestMessages)
-    ? requestMessages.map((message) => ({ ...message }))
-    : [];
-  if (workingMessages.length === 0) {
-    return {
-      requestMessages,
-      compressionMetaForClient: null,
-      summaryMessage: null,
-    };
-  }
-
-  let estimatedInputTokens = estimatePackyChatInputTokens({
-    messages: workingMessages,
-    systemPrompt,
-  });
-  if (estimatedInputTokens < PACKYCODE_GPT54_COMPRESSION_TRIGGER_TOKENS) {
-    return {
-      requestMessages: workingMessages,
-      compressionMetaForClient: null,
-      summaryMessage: null,
-    };
-  }
-
-  const existingSummaryMatch = findLatestPackyContextSummary(workingMessages);
-  let currentSummaryMessage = existingSummaryMatch.message;
-  let currentSummaryText = buildPackyEstimatorTextContent(
-    existingSummaryMatch.message?.content,
-  );
-  let lastCompressionMeta = null;
-
-  for (
-    let keepUserRounds = PACKYCODE_GPT54_DEFAULT_KEEP_USER_ROUNDS;
-    keepUserRounds >= PACKYCODE_GPT54_MIN_KEEP_USER_ROUNDS;
-    keepUserRounds -= 1
-  ) {
-    const summaryIndex = findLatestPackyContextSummary(workingMessages).index;
-    const keepStartIndex = findUserRoundStartIndex(workingMessages, keepUserRounds);
-    const sourceStartIndex = summaryIndex >= 0 ? summaryIndex + 1 : 0;
-    const sourceMessages = workingMessages.slice(sourceStartIndex, keepStartIndex);
-    const visibleSourceMessages = sourceMessages.filter(
-      (message) => !message?.hidden,
-    );
-    const summaryUpToMessageId = sanitizeId(
-      visibleSourceMessages[visibleSourceMessages.length - 1]?.id,
-      "",
-    );
-    if (!summaryUpToMessageId || visibleSourceMessages.length === 0) {
-      continue;
-    }
-
-    const beforeEstimate = estimatedInputTokens;
-    const summaryText = await summarizePackyContextBlock({
-      chatEndpoint: providerConfig.chatEndpoint,
-      apiKey: providerConfig.apiKey,
-      model,
-      thinkingEffort: config?.thinkingEffort,
-      existingSummary: currentSummaryText,
-      sourceMessages: visibleSourceMessages,
-    });
-    const updatedAt = new Date().toISOString();
-    currentSummaryText = summaryText;
-    currentSummaryMessage = {
-      id: buildPackySummaryMessageId(sessionId, currentSummaryMessage?.id),
-      role: "system",
-      content: summaryText,
-      hidden: true,
-      internalType: "context_summary",
-      summaryUpToMessageId,
-      compressionMeta: {
-        estimatedInputTokensBefore: beforeEstimate,
-        estimatedInputTokensAfter: 0,
-        sourceMessageCount: visibleSourceMessages.length,
-        updatedAt,
-      },
-    };
-    workingMessages = buildPackyCompressedRequestMessages(
-      workingMessages,
-      currentSummaryMessage,
-    );
-    estimatedInputTokens = estimatePackyChatInputTokens({
-      messages: workingMessages,
-      systemPrompt,
-    });
-    currentSummaryMessage = {
-      ...currentSummaryMessage,
-      compressionMeta: {
-        ...currentSummaryMessage.compressionMeta,
-        estimatedInputTokensAfter: estimatedInputTokens,
-      },
-    };
-    lastCompressionMeta = {
-      applied: true,
-      estimatedInputTokensBefore: beforeEstimate,
-      estimatedInputTokensAfter: estimatedInputTokens,
-      sourceMessageCount: visibleSourceMessages.length,
-      updatedAt,
-      summaryUpToMessageId,
-    };
-
-    if (estimatedInputTokens <= PACKYCODE_GPT54_COMPRESSION_TARGET_TOKENS) {
-      break;
-    }
-  }
-
-  return {
-    requestMessages: workingMessages,
-    compressionMetaForClient: lastCompressionMeta,
-    summaryMessage: currentSummaryMessage,
   };
 }
 
@@ -11851,36 +8680,15 @@ function normalizeProvider(value) {
   const key = String(value || "")
     .trim()
     .toLowerCase();
-  if (key === "packycode" || key === "packy" || key === "packyapi")
-    return "packycode";
   if (key === "aliyun" || key === "alibaba" || key === "dashscope")
     return "aliyun";
   if (key === "volcengine" || key === "volc" || key === "ark")
     return "volcengine";
   if (key === "reserved") return "reserved";
-  return "packycode";
+  return "volcengine";
 }
 
 function getProviderConfig(provider) {
-  if (provider === "packycode") {
-    return {
-      chatEndpoint:
-        process.env.PACKYCODE_CHAT_ENDPOINT ||
-        "https://www.packyapi.com/v1/chat/completions",
-      responsesEndpoint: "",
-      apiKey: readEnvApiKey("PACKYCODE_API_KEY"),
-      missingKeyMessage:
-        "未检测到 PackyCode API Key。请在 .env 中配置 PACKYCODE_API_KEY。",
-    };
-  }
-
-  if (provider === "minimax") {
-    return buildMiniMaxProviderConfig({
-      env: process.env,
-      apiKey: readEnvApiKey("MINIMAX_API_KEY"),
-    });
-  }
-
   if (provider === "aliyun") {
     return buildAliyunProviderConfig({
       env: process.env,
@@ -12027,14 +8835,6 @@ function resolveProviderRequestRetryPolicy(provider, protocol) {
   const safeProvider = normalizeProvider(provider);
   const safeProtocol = sanitizeRuntimeProtocol(protocol);
 
-  if (safeProvider === "packycode" && safeProtocol === "chat") {
-    return {
-      maxAttempts: 1 + PACKYCODE_REQUEST_RECONNECT_RETRIES,
-      totalRetries: PACKYCODE_REQUEST_RECONNECT_RETRIES,
-      getDelayMs: () => PACKYCODE_REQUEST_RECONNECT_DELAY_MS,
-    };
-  }
-
   if (safeProvider === "aliyun" && safeProtocol === "dashscope") {
     return {
       maxAttempts: 2,
@@ -12140,23 +8940,6 @@ function formatProviderUpstreamError(provider, protocol, status, detail) {
   const errorCode = parsed.code;
   const errorMessage = parsed.message;
   const errorParam = parsed.param;
-
-  if (provider === "packycode" && status === 401) {
-    return "PackyCode 认证失败：请检查 PACKYCODE_API_KEY 是否正确且仍有效。";
-  }
-
-  if (provider === "packycode" && status === 403) {
-    return "PackyCode 拒绝了当前请求：请检查账号权限、模型可用性或上游策略限制。";
-  }
-
-  if (provider === "minimax") {
-    return formatMiniMaxUpstreamError({
-      status,
-      code: errorCode,
-      message: errorMessage,
-      raw,
-    });
-  }
 
   if (provider === "volcengine") {
     const volcengineMapped = mapVolcengineUpstreamError({
@@ -12434,19 +9217,53 @@ function requireChatAuth(req, res, next) {
   }
 
   const teacherScopeKey = sanitizeTeacherScopeKey(payload.tkey);
+  if (!hasPairProgrammingTokenAccess(payload, teacherScopeKey)) {
+    res.status(403).json({
+      error: "结对编程登录凭证无效，请重新登录并输入邀请码。",
+    });
+    return;
+  }
 
   AuthUser.findById(payload.uid)
-    .then((user) => {
+    .then(async (user) => {
       if (!user) {
         res.status(401).json({ error: "账号不存在，请重新登录。" });
         return;
       }
       req.authUser = user;
       req.authTeacherScopeKey = teacherScopeKey;
+      req.authPairProgrammingAccess =
+        payload?.pairProgrammingAccess === true;
       req.authStorageUserId = buildTeacherScopedStorageUserId(
         String(user?._id || ""),
         teacherScopeKey,
       );
+      const routeRoomId = sanitizeId(req.params?.roomId, "");
+      const isGroupChatRoomRequest = String(req.originalUrl || "").includes(
+        "/api/group-chat/rooms/",
+      );
+      if (
+        isGroupChatRoomRequest &&
+        routeRoomId &&
+        isMongoObjectIdLike(routeRoomId)
+      ) {
+        const room = await GroupChatRoom.findById(
+          routeRoomId,
+          { teacherScopeKey: 1 },
+        ).lean();
+        if (room) {
+          if (!canAccessTeacherScopedRoom({
+            roomTeacherScopeKey: room?.teacherScopeKey,
+            requestTeacherScopeKey: teacherScopeKey,
+            pairProgrammingAccess: req.authPairProgrammingAccess,
+          })) {
+            res.status(403).json({
+              error: "当前登录入口无权访问该群聊。",
+            });
+            return;
+          }
+        }
+      }
       markUserOnlinePresence(user);
       next();
     })
@@ -15820,6 +12637,9 @@ function initGroupChatWebSocketServer(server) {
       authed: false,
       userId: "",
       userName: "",
+      teacherScopeKey: "",
+      pairProgrammingAccess: false,
+      collaborationObserverRoomId: "",
       presenceTracked: false,
       joinedRooms: new Set(),
       authTimer: 0,
@@ -15890,7 +12710,11 @@ async function handleGroupChatWsMessage(socket, rawData) {
     }
     if (type === "ping") {
       const meta = groupChatWsMetaBySocket.get(socket);
-      if (meta?.authed && meta.userId) {
+      if (
+        meta?.authed &&
+        meta.userId &&
+        !meta.collaborationObserverRoomId
+      ) {
         markUserOnlinePresence(meta.userId);
       }
       sendGroupChatWsPayload(socket, {
@@ -15925,6 +12749,17 @@ async function handleGroupChatWsAuth(socket, payload) {
     return;
   }
 
+  const teacherScopeKey = sanitizeTeacherScopeKey(verified.tkey);
+  if (!hasPairProgrammingTokenAccess(verified, teacherScopeKey)) {
+    sendGroupChatWsError(
+      socket,
+      "结对编程登录凭证无效，请重新登录并输入邀请码。",
+      "pair_programming_invite_required",
+    );
+    closeGroupChatSocket(socket, 4003, "pair_programming_invite_required");
+    return;
+  }
+
   const user = await AuthUser.findById(verified.uid).lean();
   if (!user) {
     sendGroupChatWsError(
@@ -15943,6 +12778,24 @@ async function handleGroupChatWsAuth(socket, payload) {
     return;
   }
 
+  const observerRoomId = sanitizeId(
+    readCollaborationObserverRoomId(verified),
+    "",
+  );
+  if (
+    observerRoomId &&
+    (!isMongoObjectIdLike(observerRoomId) ||
+      String(user?.role || "").trim().toLowerCase() !== "admin")
+  ) {
+    sendGroupChatWsError(
+      socket,
+      "教师旁观凭证无效，请返回教师后台重新进入。",
+      "invalid_observer_session",
+    );
+    closeGroupChatSocket(socket, 4003, "invalid_observer_session");
+    return;
+  }
+
   if (meta.presenceTracked && meta.userId && meta.userId !== nextUserId) {
     setUserOnlineSocketPresence(meta.userId, -1);
     meta.presenceTracked = false;
@@ -15951,8 +12804,13 @@ async function handleGroupChatWsAuth(socket, payload) {
   meta.authed = true;
   meta.userId = nextUserId;
   meta.userName = buildGroupChatDisplayName(user);
-  markUserOnlinePresence(meta.userId);
-  if (!meta.presenceTracked && meta.userId) {
+  meta.teacherScopeKey = teacherScopeKey;
+  meta.pairProgrammingAccess = verified?.pairProgrammingAccess === true;
+  meta.collaborationObserverRoomId = observerRoomId;
+  if (!observerRoomId) {
+    markUserOnlinePresence(meta.userId);
+  }
+  if (!observerRoomId && !meta.presenceTracked && meta.userId) {
     setUserOnlineSocketPresence(meta.userId, 1);
     meta.presenceTracked = true;
   }
@@ -15967,6 +12825,7 @@ async function handleGroupChatWsAuth(socket, payload) {
       id: meta.userId,
       name: meta.userName,
     },
+    collaborationObserver: Boolean(observerRoomId),
   });
   console.info(`[group-chat-ws] authed userId=${meta.userId}`);
 }
@@ -15984,15 +12843,41 @@ async function handleGroupChatWsJoinRoom(socket, payload) {
     return;
   }
 
-  const hasMembership = await GroupChatRoom.exists({
-    _id: roomId,
-    memberUserIds: meta.userId,
-  });
-  if (!hasMembership) {
+  const isObserver = isCollaborationObserverForRoom(
+    meta.collaborationObserverRoomId,
+    roomId,
+  );
+  const roomAccess = await GroupChatRoom.findOne(
+    isObserver
+      ? {
+          _id: roomId,
+          teacherScopeKey: SHI_GAOJUN_TEACHER_SCOPE_KEY,
+        }
+      : {
+          _id: roomId,
+          memberUserIds: meta.userId,
+        },
+    { teacherScopeKey: 1 },
+  ).lean();
+  if (!roomAccess) {
     sendGroupChatWsError(
       socket,
-      "你不在该群聊中，无法订阅消息。",
+      isObserver
+        ? "该结对编程小教室不存在或不可旁观。"
+        : "你不在该群聊中，无法订阅消息。",
       "forbidden_room",
+    );
+    return;
+  }
+  if (!canAccessTeacherScopedRoom({
+    roomTeacherScopeKey: roomAccess?.teacherScopeKey,
+    requestTeacherScopeKey: meta.teacherScopeKey,
+    pairProgrammingAccess: meta.pairProgrammingAccess,
+  })) {
+    sendGroupChatWsError(
+      socket,
+      "当前登录入口无权访问该群聊。",
+      "teacher_scope_forbidden",
     );
     return;
   }
@@ -16029,6 +12914,14 @@ function handleGroupChatWsCodingEditorPresence(socket, payload) {
   const roomId = sanitizeId(payload?.roomId, "");
   const meta = groupChatWsMetaBySocket.get(socket);
   if (!roomId || !meta?.authed || !meta.userId || !meta.joinedRooms?.has(roomId)) return;
+  if (
+    isCollaborationObserverForRoom(
+      meta.collaborationObserverRoomId,
+      roomId,
+    )
+  ) {
+    return;
+  }
   setGroupChatCodingEditorPresence(socket, roomId, payload?.active === true);
 }
 
@@ -16103,6 +12996,15 @@ function attachSocketToGroupChatRoom(socket, roomId) {
   sockets.add(socket);
   meta.joinedRooms.add(safeRoomId);
 
+  if (
+    isCollaborationObserverForRoom(
+      meta.collaborationObserverRoomId,
+      safeRoomId,
+    )
+  ) {
+    return;
+  }
+
   if (meta.userId) {
     let roomOnlineCounter = groupChatWsOnlineCountsByRoom.get(safeRoomId);
     if (!roomOnlineCounter) {
@@ -16140,6 +13042,14 @@ function detachSocketFromGroupChatRoom(socket, roomId) {
   }
 
   meta.joinedRooms.delete(safeRoomId);
+  if (
+    isCollaborationObserverForRoom(
+      meta.collaborationObserverRoomId,
+      safeRoomId,
+    )
+  ) {
+    return;
+  }
   if (!meta.userId) return;
 
   const roomOnlineCounter = groupChatWsOnlineCountsByRoom.get(safeRoomId);
@@ -16495,6 +13405,7 @@ async function startServer() {
   console.log("Mongo connected.");
   await ensureFixedAdminAccounts();
   await ensureFixedStudentAccounts();
+  await removeLegacyPlaintextPasswords();
 
   const server = http.createServer(app);
   initGroupChatWebSocketServer(server);
@@ -16510,12 +13421,6 @@ async function startServer() {
 }
 
 async function runStartupMaintenanceTasks() {
-  await ensureSessionNotesIndexes().catch((error) => {
-    console.warn(
-      "Failed to ensure session notes indexes:",
-      error?.message || error,
-    );
-  });
   await ensureUploadedFileContextIndexes().catch((error) => {
     console.warn(
       "Failed to ensure uploaded file context indexes:",
@@ -16577,36 +13482,6 @@ async function ensureUploadedFileContextIndexes() {
   }
 
   await ensureUploadedFileContextTtlIndex(collection, existingIndexes);
-}
-
-async function ensureSessionNotesIndexes() {
-  const collection = SessionNotes.collection;
-  let existingIndexes = await readCollectionIndexesSafe(collection);
-
-  const needUniqueIndex = !hasEquivalentMongoIndex(existingIndexes, {
-    key: { userId: 1, sessionId: 1 },
-    unique: true,
-  });
-  if (needUniqueIndex) {
-    await collection.createIndex(
-      { userId: 1, sessionId: 1 },
-      {
-        unique: true,
-        name: "ux_session_notes_user_session",
-      },
-    );
-    existingIndexes = await readCollectionIndexesSafe(collection);
-  }
-
-  const needLockIndex = !hasEquivalentMongoIndex(existingIndexes, {
-    key: { compressionLockUntil: 1 },
-  });
-  if (needLockIndex) {
-    await collection.createIndex(
-      { compressionLockUntil: 1 },
-      { name: "ix_session_notes_compression_lock_until" },
-    );
-  }
 }
 
 async function ensureGeneratedImageHistoryIndexes() {
@@ -16894,6 +13769,25 @@ function isFixedAdminUser(user) {
   );
 }
 
+function isTeacherAdminUser(user) {
+  return (
+    !!user &&
+    user.role === "admin" &&
+    (isFixedAdminUsernameKey(user.usernameKey) ||
+      String(user.accountTag || "").trim() ===
+        SELF_REGISTERED_TEACHER_ACCOUNT_TAG)
+  );
+}
+
+function readAccountStatus(user) {
+  const status = String(user?.accountStatus || "").trim();
+  if (status === ACCOUNT_STATUS_PENDING_BINDING) {
+    return ACCOUNT_STATUS_PENDING_BINDING;
+  }
+  if (status === ACCOUNT_STATUS_DISABLED) return ACCOUNT_STATUS_DISABLED;
+  return ACCOUNT_STATUS_ACTIVE;
+}
+
 function isFixedStudentUsernameKey(usernameKey) {
   return FIXED_STUDENT_USERNAME_KEYS.has(
     String(usernameKey || "")
@@ -16929,15 +13823,6 @@ function resolveTeacherScopeKeyByClassName(value) {
     return YANG_JUNFENG_TEACHER_SCOPE_KEY;
   }
 
-  const class810Token = normalizeClassNameForTeacherScope(CLASS_NAME_810);
-  const class811Token = normalizeClassNameForTeacherScope(CLASS_NAME_811);
-  if (
-    (class810Token && normalized.includes(class810Token)) ||
-    (class811Token && normalized.includes(class811Token))
-  ) {
-    return SHANGGUAN_FUZE_TEACHER_SCOPE_KEY;
-  }
-
   return "";
 }
 
@@ -16950,8 +13835,15 @@ function isJiaoji231ClassName(value) {
 function resolveLoginLockedTeacherScopeKey(user) {
   const className = sanitizeText(user?.profile?.className, "", 40);
   const classTeacherScopeKey = resolveTeacherScopeKeyByClassName(className);
-  if (classTeacherScopeKey) return classTeacherScopeKey;
-  return readLockedTeacherScopeKey(user?.lockedTeacherScopeKey);
+  if (isStudentTeacherScopeSelectable(classTeacherScopeKey)) {
+    return classTeacherScopeKey;
+  }
+  const storedTeacherScopeKey = readLockedTeacherScopeKey(
+    user?.lockedTeacherScopeKey,
+  );
+  return isStudentTeacherScopeSelectable(storedTeacherScopeKey)
+    ? storedTeacherScopeKey
+    : "";
 }
 
 function validatePassword(password) {
@@ -17004,7 +13896,7 @@ async function ensureFixedAdminAccounts() {
         usernameKey,
         role: "admin",
         passwordHash,
-        passwordPlain: password,
+        accountStatus: ACCOUNT_STATUS_ACTIVE,
       });
       continue;
     }
@@ -17012,14 +13904,14 @@ async function ensureFixedAdminAccounts() {
     const needsUpdate =
       existing.role !== "admin" ||
       existing.username !== username ||
-      existing.passwordPlain !== password ||
+      readAccountStatus(existing) !== ACCOUNT_STATUS_ACTIVE ||
       !hashMatches;
     if (!needsUpdate) continue;
 
     existing.username = username;
     existing.usernameKey = usernameKey;
     existing.role = "admin";
-    existing.passwordPlain = password;
+    existing.accountStatus = ACCOUNT_STATUS_ACTIVE;
     existing.passwordHash = await hashPassword(password);
     await existing.save();
   }
@@ -17054,8 +13946,8 @@ async function ensureFixedStudentAccounts() {
         usernameKey,
         role: "user",
         passwordHash,
-        passwordPlain: password,
         accountTag: FIXED_STUDENT_ACCOUNT_TAG,
+        accountStatus: ACCOUNT_STATUS_ACTIVE,
         lockedTeacherScopeKey,
         profile: {
           name: username,
@@ -17077,7 +13969,7 @@ async function ensureFixedStudentAccounts() {
     const needsUpdate =
       existing.role !== "user" ||
       existing.username !== username ||
-      existing.passwordPlain !== password ||
+      readAccountStatus(existing) !== ACCOUNT_STATUS_ACTIVE ||
       !hashMatches ||
       String(existing.accountTag || "").trim() !== FIXED_STUDENT_ACCOUNT_TAG ||
       readLockedTeacherScopeKey(existing.lockedTeacherScopeKey) !==
@@ -17093,12 +13985,25 @@ async function ensureFixedStudentAccounts() {
     existing.username = username;
     existing.usernameKey = usernameKey;
     existing.role = "user";
-    existing.passwordPlain = password;
+    existing.accountStatus = ACCOUNT_STATUS_ACTIVE;
     existing.passwordHash = await hashPassword(password);
     existing.accountTag = FIXED_STUDENT_ACCOUNT_TAG;
     existing.lockedTeacherScopeKey = lockedTeacherScopeKey;
     existing.profile = nextProfile;
     await existing.save();
+  }
+}
+
+async function removeLegacyPlaintextPasswords() {
+  const result = await AuthUser.collection.updateMany(
+    { passwordPlain: { $exists: true } },
+    { $unset: { passwordPlain: "" } },
+  );
+  const removedCount = Number(result?.modifiedCount || 0);
+  if (removedCount > 0) {
+    console.info(
+      `[auth] 已从 ${removedCount} 个历史账号中清除明文密码字段。`,
+    );
   }
 }
 
@@ -17159,7 +14064,10 @@ async function authenticateAdminRequest(req, res) {
   }
 
   const admin = await AuthUser.findById(payload.uid).lean();
-  if (!isFixedAdminUser(admin)) {
+  if (
+    !isTeacherAdminUser(admin) ||
+    readAccountStatus(admin) !== ACCOUNT_STATUS_ACTIVE
+  ) {
     res.status(403).json({ error: "仅管理员可访问。" });
     return null;
   }
@@ -17175,7 +14083,10 @@ async function authenticateAdminRequestFromHeaderOrQuery(req, res) {
   }
 
   const admin = await AuthUser.findById(payload.uid).lean();
-  if (!isFixedAdminUser(admin)) {
+  if (
+    !isTeacherAdminUser(admin) ||
+    readAccountStatus(admin) !== ACCOUNT_STATUS_ACTIVE
+  ) {
     res.status(403).json({ error: "仅管理员可访问。" });
     return null;
   }
@@ -17184,7 +14095,7 @@ async function authenticateAdminRequestFromHeaderOrQuery(req, res) {
 
 function buildAdminUsersExportTxt(users) {
   const lines = [
-    "EduChat 管理员导出：账号密码数据",
+    "EduChat 管理员导出：账号目录",
     `导出时间: ${formatDisplayTime(new Date())}`,
     `总用户数: ${users.length}`,
     "",
@@ -17193,7 +14104,6 @@ function buildAdminUsersExportTxt(users) {
   users.forEach((item, idx) => {
     lines.push(`用户 ${idx + 1}`);
     lines.push(`账号: ${item.username || "-"}`);
-    lines.push(`密码: ${item.passwordPlain || "-"}`);
     lines.push(`角色: ${item.role || "user"}`);
     lines.push(`注册时间: ${formatDisplayTime(item.createdAt)}`);
     lines.push(`更新时间: ${formatDisplayTime(item.updatedAt)}`);
@@ -17662,11 +14572,23 @@ export {
   ALIYUN_SEARCH_STRATEGIES,
   DEFAULT_TEACHER_SCOPE_KEY,
   SHANGGUAN_FUZE_TEACHER_SCOPE_KEY,
+  SHI_GAOJUN_TEACHER_SCOPE_KEY,
   YANG_JUNFENG_TEACHER_SCOPE_KEY,
   buildTeacherScopedStorageUserId,
   getTeacherScopeLabel,
   isDefaultTeacherScopeKey,
+  isStudentTeacherScopeSelectable,
   sanitizeTeacherScopeKey,
+  PAIR_PROGRAMMING_INVITE_CODE,
+  TEACHER_REGISTRATION_INVITE_CODE,
+  SELF_REGISTERED_TEACHER_ACCOUNT_TAG,
+  ACCOUNT_STATUS_ACTIVE,
+  ACCOUNT_STATUS_PENDING_BINDING,
+  ACCOUNT_STATUS_DISABLED,
+  canAccessTeacherScopedRoom,
+  hasPairProgrammingTokenAccess,
+  isPairProgrammingInviteCodeValid,
+  isPairProgrammingTeacherScope,
   FIXED_STUDENT_ACCOUNTS,
   FIXED_STUDENT_ACCOUNT_TAG,
   FIXED_STUDENT_REQUIRED_TEACHER_SCOPE_KEY,
@@ -17686,7 +14608,6 @@ export {
   CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS,
   CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS,
   CHAT_PREPARED_ATTACHMENT_MAX_REFS,
-  MAX_IMAGE_GENERATION_INPUT_FILES,
   MAX_PARSED_CHARS_PER_FILE,
   ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS,
   EXCEL_PREVIEW_MAX_ROWS,
@@ -17756,8 +14677,6 @@ export {
   FIXED_STUDENT_USERNAME_KEYS,
   RESERVED_ADMIN_USERNAME_KEYS,
   CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE,
-  IMAGE_GENERATION_INPUT_OSS_SCOPE,
-  IMAGE_GENERATION_OUTPUT_OSS_SCOPE,
   ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES,
   ALIYUN_DASHSCOPE_PDF_RENDER_DPI,
   ALIYUN_DASHSCOPE_PDF_RENDER_TIMEOUT_MS,
@@ -17801,7 +14720,6 @@ export {
   upload,
   studentHomeworkUpload,
   teacherClassroomFileUpload,
-  imageGenerationUpload,
   groupChatImageUpload,
   groupChatFileUpload,
   authUserSchema,
@@ -17812,10 +14730,6 @@ export {
   UploadedFileContext,
   generatedImageHistorySchema,
   GeneratedImageHistory,
-  generatedMusicHistorySchema,
-  GeneratedMusicHistory,
-  generatedLyricsHistorySchema,
-  GeneratedLyricsHistory,
   groupChatRoomReadStateSchema,
   groupChatRoomSchema,
   GroupChatRoom,
@@ -17891,21 +14805,6 @@ export {
   attachFilesToLatestUserMessageForAliyunDashScope,
   attachFilesToLatestUserMessageByLocalParsing,
   streamAgentResponse,
-  streamSeedreamImageGeneration,
-  buildSeedreamImageGenerationRequest,
-  normalizeSeedreamGenerationModel,
-  normalizeSeedreamSize,
-  normalizeSeedreamSequentialMode,
-  normalizeSeedreamResponseFormat,
-  parseSeedreamImageInputs,
-  isSeedreamImageInputUrl,
-  buildSeedreamFileImageInputs,
-  normalizeSeedreamImageMimeType,
-  extractSeedreamImageResultEntries,
-  pipeVolcengineImageGenerationSse,
-  emitSeedreamImageGenerationNonStreamEvents,
-  buildGeneratedImageHistoryExpireAt,
-  normalizeGeneratedImageHistoryResponseFormat,
   normalizeGeneratedImageStoreUrl,
   normalizeGeneratedImageStorageType,
   normalizeGeneratedImageMimeType,
@@ -17914,24 +14813,11 @@ export {
   buildGeneratedImageHistoryContentPath,
   buildAdminGeneratedImageHistoryContentPath,
   buildAdminGeneratedImageHistoryThumbnailPath,
-  buildGeneratedMusicHistoryContentPath,
-  normalizeGeneratedMusicFormat,
-  normalizeGeneratedMusicMimeType,
-  toGeneratedMusicHistoryItem,
-  toGeneratedLyricsHistoryItem,
   parseTeacherScopedStorageUserId,
-  resolveGeneratedImageOutputUrl,
   fetchGeneratedImageBinaryFromUrl,
   buildGeneratedImageBinaryPayload,
   ensureGeneratedImageHistoryThumbnail,
-  saveGeneratedImageHistory,
-  toGeneratedImageHistoryItem,
   toAdminGeneratedImageHistoryItem,
-  sanitizeImageGenerationUsage,
-  mapVolcengineImageGenerationEventError,
-  buildImageGenerationHeaders,
-  getVolcengineImageGenerationConfig,
-  SESSION_NOTES_MAX_ESTIMATED_TOKENS,
   buildChatRequestPayload,
   buildResponsesRequestPayload,
   resolveProviderWebSearchRuntime,
@@ -17958,18 +14844,6 @@ export {
   extractSmartContextIncrementalMessages,
   isPromptLeakProbeRequest,
   extractMessagePlainText,
-  sanitizeSessionNotesPayload,
-  fitSessionNotesToTokenBudget,
-  estimateSessionNotesTokens,
-  buildSessionNotesPrompt,
-  buildSessionRecentTurnsFromMessages,
-  buildMessagesBeforeRecentTurns,
-  hasUnsummarizedOlderMessages,
-  extractUnsummarizedMessages,
-  extractSessionNoteFileEntriesFromContent,
-  resolvePackyRequestedMaxOutputTokens,
-  computePackySafeMaxOutputTokens,
-  shouldCompactSessionNotesContext,
   resolveSmartContextRuntime,
   readSessionContextRef,
   saveSessionContextRef,
@@ -18220,7 +15094,6 @@ export {
   runGroupChatOssStartupHealthCheck,
   deleteGroupChatStoredFileObjects,
   deleteGeneratedImageHistoryOssObjects,
-  deleteGeneratedMusicHistoryOssObjects,
   isGroupChatOssNotFoundError,
   findGroupChatStoredFileByRoomAndId,
   cleanupExpiredGroupChatStoredFiles,
@@ -18269,7 +15142,6 @@ export {
   broadcastGroupChatMemberJoined,
   startServer,
   runStartupMaintenanceTasks,
-  ensureSessionNotesIndexes,
   ensureUploadedFileContextIndexes,
   ensureGeneratedImageHistoryIndexes,
   ensureGroupChatStoredFileIndexes,
@@ -18286,6 +15158,8 @@ export {
   isReservedAdminUsernameKey,
   isFixedAdminUsernameKey,
   isFixedAdminUser,
+  isTeacherAdminUser,
+  readAccountStatus,
   isFixedStudentUsernameKey,
   isFixedStudentUser,
   readLockedTeacherScopeKey,
@@ -18296,6 +15170,7 @@ export {
   verifyPassword,
   ensureFixedAdminAccounts,
   ensureFixedStudentAccounts,
+  removeLegacyPlaintextPasswords,
   signToken,
   verifyToken,
   readBearerToken,

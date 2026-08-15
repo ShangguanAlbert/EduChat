@@ -9,14 +9,9 @@ import { createStartupTasks } from "./app/startup-tasks.js";
 import { resolveConfiguredBasePath, stripBasePath } from "./config/base-path.js";
 import { createChatDeps } from "./modules/chat/createChatDeps.js";
 import { registerChatRoutes } from "./modules/chat/routes.js";
-import { createImageDeps } from "./modules/images/createImageDeps.js";
-import { registerImageRoutes } from "./modules/images/routes.js";
-import { createMusicDeps } from "./modules/music/createMusicDeps.js";
-import { registerMusicRoutes } from "./modules/music/routes.js";
 import { registerAuthUserClassroomRoutes } from "./routes/auth-user-classroom.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerGroupChatRoutes } from "./routes/group-chat.js";
-import { registerNotesRoutes } from "./routes/notes.js";
 import { registerPartyCodingRoutes } from "./modules/party-coding/routes.js";
 import { createGroupChatRealtimeHub } from "./runtime/group-chat-realtime-hub.js";
 import { subscribeGroupChatAiEvents } from "./runtime/group-chat-ai-events.js";
@@ -41,9 +36,6 @@ if (APP_BASE_PATH !== "/") {
 registerAuthUserClassroomRoutes(app, deps);
 registerAdminRoutes(app, deps);
 registerChatRoutes(app, createChatDeps(deps));
-registerImageRoutes(app, createImageDeps(deps));
-registerMusicRoutes(app, createMusicDeps(deps));
-registerNotesRoutes(app, deps);
 registerGroupChatRoutes(app, deps);
 const partyCodingRealtime = registerPartyCodingRoutes(app, deps);
 deps.setPartyCodingRealtime(partyCodingRealtime);
@@ -82,6 +74,7 @@ async function startServer() {
   console.log("Mongo connected.");
   await deps.ensureFixedAdminAccounts();
   await deps.ensureFixedStudentAccounts();
+  await deps.removeLegacyPlaintextPasswords();
 
   const server = http.createServer(app);
   groupChatRealtimeHub.initWebSocketServer(server);
@@ -102,6 +95,11 @@ async function startServer() {
         ).trim()} socketCount=${groupChatRealtimeHub.getRoomSocketCount(roomId)}`,
       );
       groupChatRealtimeHub.broadcastMessageUpdated(roomId, payload.message);
+    },
+    onRealtimePayload: (event) => {
+      const roomId = String(event?.roomId || event?.payload?.roomId || "").trim();
+      if (!roomId || !event?.payload) return;
+      deps.broadcastGroupChatWsPayload(roomId, event.payload);
     },
   });
 

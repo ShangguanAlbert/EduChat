@@ -73,23 +73,16 @@ import {
   prepareComposerFiles,
   suggestSessionTitleForExchange,
 } from "../../../features/chat/services/ChatSessionService.js";
-import { captureNoteFromChat } from "../../../modules/notes/api/notesApi.js";
 import {
   clearUserAuthSession,
   withAuthSlot,
 } from "../../../app/authStorage.js";
 import {
   appendReturnUrlParam,
-  buildAbsoluteAppUrl,
   compactReturnUrlSearch,
   readReturnUrlFromSearch,
   redirectToReturnUrl,
 } from "../../../app/returnNavigation.js";
-import {
-  loadImageReturnContext,
-  normalizeImageReturnContext,
-  saveImageReturnContext,
-} from "../../image/returnContext.js";
 import "../../../styles/chat.css";
 import "../../../styles/chat-motion.css";
 
@@ -451,21 +444,16 @@ function clipSessionTitleText(value, maxLength = 22) {
     : text;
 }
 
-function sanitizeProvider(value, fallback = "packycode") {
+function sanitizeProvider(value, fallback = "volcengine") {
   const key = String(value || "")
     .trim()
     .toLowerCase();
   if (
-    key === "packycode" ||
-    key === "packy" ||
     key === "volcengine" ||
     key === "aliyun" ||
     key === "reserved"
   ) {
-    return key === "packy" ? "packycode" : key;
-  }
-  if (key === "packyapi") {
-    return "packycode";
+    return key;
   }
   if (key === "volc" || key === "ark") {
     return "volcengine";
@@ -497,7 +485,7 @@ function resolveAgentProvider(agentId, runtimeConfig, providerDefaults) {
     .trim()
     .toLowerCase();
   if (runtimeProvider && runtimeProvider !== "inherit") {
-    return sanitizeProvider(runtimeProvider, "packycode");
+    return sanitizeProvider(runtimeProvider, "volcengine");
   }
   return sanitizeProvider(
     providerDefaults?.[safeAgentId],
@@ -626,7 +614,7 @@ function sanitizeContextSummaryMessage(raw) {
   const internalType = String(raw.internalType || "").trim().toLowerCase();
   if (internalType !== "context_summary") return null;
   return {
-    id: String(raw.id || `packy-summary-${Date.now()}`).trim(),
+    id: String(raw.id || `context-summary-${Date.now()}`).trim(),
     role: "system",
     content,
     hidden: true,
@@ -1031,7 +1019,6 @@ export default function ChatDesktopPage() {
   });
   const [bootstrapPending, setBootstrapPending] = useState(true);
   const [bootstrapError, setBootstrapError] = useState("");
-  const [noteActionError, setNoteActionError] = useState("");
   const [dismissedRoundWarningBySession, setDismissedRoundWarningBySession] =
     useState({});
   const [messageBottomInset, setMessageBottomInset] = useState(0);
@@ -2046,60 +2033,6 @@ export default function ChatDesktopPage() {
     openAgentSelectionModal(defaultAgentChoice);
   }
 
-  function onOpenImageGeneration() {
-    if (!confirmStreamingExit("leave-page")) return;
-    const context = normalizeImageReturnContext({
-      sessionId: activeId,
-      agentId: agent,
-      timestamp: Date.now(),
-    });
-    if (context) {
-      saveImageReturnContext(context);
-    }
-    const nextReturnTarget =
-      returnTarget === "teacher-home" ? "teacher-home" : "chat";
-    const params = new URLSearchParams();
-    params.set("returnTo", nextReturnTarget);
-    if (nextReturnTarget === "teacher-home" && teacherHomePanelParam) {
-      params.set("teacherPanel", teacherHomePanelParam);
-    }
-    if (
-      nextReturnTarget === "teacher-home" &&
-      teacherHomeExportContext.exportTeacherScopeKey
-    ) {
-      params.set(
-        "exportTeacherScopeKey",
-        teacherHomeExportContext.exportTeacherScopeKey,
-      );
-    }
-    if (
-      nextReturnTarget === "teacher-home" &&
-      teacherHomeExportContext.exportDate
-    ) {
-      params.set("exportDate", teacherHomeExportContext.exportDate);
-    }
-    if (nextReturnTarget === "teacher-home" && returnUrl) {
-      appendReturnUrlParam(params, returnUrl);
-    }
-    navigate(withAuthSlot(`/image-generation?${params.toString()}`), {
-      state: {
-        returnContext: context,
-      },
-    });
-  }
-
-  function onOpenMusicGeneration() {
-    if (!confirmStreamingExit("leave-page")) return;
-    const params = new URLSearchParams();
-    appendReturnUrlParam(params, buildAbsoluteAppUrl(buildChatSessionHref(activeId)));
-    navigate(withAuthSlot(`/music-generation?${params.toString()}`));
-  }
-
-  function onOpenNotes() {
-    if (!confirmStreamingExit("leave-page")) return;
-    navigate(withAuthSlot("/notes"));
-  }
-
   function onOpenGroupChat() {
     if (!confirmStreamingExit("leave-page")) return;
     const nextReturnTarget =
@@ -2128,76 +2061,6 @@ export default function ChatDesktopPage() {
       appendReturnUrlParam(params, returnUrl);
     }
     navigate(withAuthSlot(`/party?${params.toString()}`));
-  }
-
-  function readMessageTextForNote(message) {
-    const content = message?.content;
-    if (typeof content === "string") {
-      return content.trim();
-    }
-    if (Array.isArray(content)) {
-      return content
-        .map((part) => {
-          if (typeof part === "string") return part;
-          if (typeof part?.text === "string") return part.text;
-          if (typeof part?.content === "string") return part.content;
-          return "";
-        })
-        .join("\n")
-        .trim();
-    }
-    return "";
-  }
-
-  async function onSaveMessageAsNote(message, payload = {}) {
-    const safeMessageId = String(message?.id || "").trim();
-    const safeSessionId = String(activeId || "").trim();
-    const safeSelectedText =
-      typeof payload === "string"
-        ? String(payload || "").trim()
-        : String(payload?.selectedText || "").trim();
-    const safePromptMessageId =
-      typeof payload === "string"
-        ? ""
-        : String(payload?.promptMessageId || "").trim();
-    const safeMessageText = readMessageTextForNote(message);
-    const currentMessages = Array.isArray(sessionMessages[safeSessionId])
-      ? sessionMessages[safeSessionId]
-      : [];
-    const promptMessage =
-      safePromptMessageId && message?.role === "assistant"
-        ? currentMessages.find(
-            (item) =>
-              String(item?.id || "").trim() === safePromptMessageId && item?.role === "user",
-          ) || null
-        : null;
-    const promptText = readMessageTextForNote(promptMessage);
-    if (!safeSessionId || !safeMessageId || (!safeMessageText && !safeSelectedText)) {
-      setNoteActionError("当前消息没有可保存的文本内容。");
-      return;
-    }
-
-    setNoteActionError("");
-    try {
-      const activeSession = sessions.find((session) => session?.id === safeSessionId) || null;
-      const data = await captureNoteFromChat({
-        sessionId: safeSessionId,
-        messageId: safeMessageId,
-        selectedText: safeSelectedText,
-        messageText: safeMessageText,
-        messageRole: String(message?.role || "").trim(),
-        promptMessageId: safePromptMessageId,
-        promptText,
-        sessionTitle: String(activeSession?.title || "").trim(),
-      });
-      const noteId = String(data?.note?.id || "").trim();
-      if (!noteId) {
-        throw new Error("笔记创建成功，但未返回笔记 ID。");
-      }
-      navigate(withAuthSlot(`/notes/${noteId}`));
-    } catch (error) {
-      setNoteActionError(error?.message || "保存为笔记失败，请稍后重试。");
-    }
   }
 
   async function onDeleteSession(sessionId) {
@@ -3457,7 +3320,6 @@ export default function ChatDesktopPage() {
     setStreamError("");
     setStateSaveError("");
     setBootstrapError("");
-    setNoteActionError("");
   }
 
   function closeRoundWarning() {
@@ -3685,12 +3547,6 @@ export default function ChatDesktopPage() {
         const nextProviderDefaults = sanitizeAgentProviderDefaults(
           data?.agentProviderDefaults,
         );
-        const restoreContext = location.state?.fromImageGeneration
-          ? normalizeImageReturnContext(
-              location.state?.restoreContext || loadImageReturnContext(),
-            )
-          : null;
-
         const fallbackAgent =
           (AGENT_META[stateSettings.agent] ? stateSettings.agent : "A");
         const nextDefaultAgentChoice =
@@ -3723,15 +3579,9 @@ export default function ChatDesktopPage() {
           pendingNavigationSessionIdRaw === EMPTY_ROUTE_NAVIGATION_SENTINEL
             ? ""
             : sanitizeSmartContextSessionId(pendingNavigationSessionIdRaw);
-        const canRestoreSession =
-          !liveRouteSessionId &&
-          !pendingNavigationSessionId &&
-          !!restoreContext?.sessionId &&
-          resolvedSessions.some((s) => s.id === restoreContext.sessionId);
         const preferredActiveIdCandidates = [
           pendingNavigationSessionId,
           liveRouteSessionId,
-          canRestoreSession ? restoreContext.sessionId : "",
           sanitizeSmartContextSessionId(rawActiveId),
         ].filter(Boolean);
         const preferredResolvedActiveId = preferredActiveIdCandidates.find(
@@ -4258,9 +4108,6 @@ export default function ChatDesktopPage() {
         onNewChat={() => {
           onNewChat();
         }}
-        onOpenNotes={onOpenNotes}
-        onOpenImageGeneration={onOpenImageGeneration}
-        onOpenMusicGeneration={onOpenMusicGeneration}
         onOpenGroupChat={onOpenGroupChat}
         onDeleteSession={onDeleteSession}
         onBatchDeleteSessions={onBatchDeleteSessions}
@@ -4376,7 +4223,6 @@ export default function ChatDesktopPage() {
         {(streamError ||
           stateSaveError ||
           bootstrapError ||
-          noteActionError ||
           activeSessionUsesRemovedAgent) && (
           <div className="stream-error">
             <span>
@@ -4385,7 +4231,6 @@ export default function ChatDesktopPage() {
                 streamError,
                 stateSaveError,
                 bootstrapError,
-                noteActionError,
               ]
                 .filter(Boolean)
                 .join(" | ")}
@@ -4423,7 +4268,6 @@ export default function ChatDesktopPage() {
               onDownloadAttachment={handleMessageAttachmentDownload}
               onAssistantFeedback={onAssistantFeedback}
               onAssistantRegenerate={onAssistantRegenerate}
-              onSaveNote={onSaveMessageAsNote}
               onAskSelection={onAskSelection}
               onLatestChange={setIsAtLatest}
             />

@@ -14,8 +14,6 @@ import {
   MessageSquareQuote,
   Smile,
   Plus,
-  PanelLeftClose,
-  PanelLeftOpen,
   SquarePen,
   SendHorizonal,
   Trash2,
@@ -106,6 +104,7 @@ const COMPOSER_TOOL_EMOJIS = Object.freeze(buildComposerEmojiCatalog());
 const PARTY_WORKSPACE_SPLIT_STORAGE_KEY = "educhat.party.workspace-split.v1";
 const PARTY_WORKSPACE_MIN_CHAT_RATIO = 0.36;
 const PARTY_WORKSPACE_MAX_CHAT_RATIO = 0.68;
+const PARTY_WORKSPACE_DESKTOP_SIDE_HANDLE_OFFSET_PX = 137;
 
 const PARTY_GUIDE_ITEMS = Object.freeze([
   ["加入协作", "通过左侧“+”创建派，或输入派号加入已有协作组。"],
@@ -119,7 +118,7 @@ const PAIA_CLASSROOM_GUIDE_ITEMS = Object.freeze([
   ["查看任务", "左侧任务发布栏展示老师布置的网页设计任务和附件。"],
   ["讨论与琳琳", "正常发送消息可与同伴讨论；需要帮助时点击“问琳琳”，无需输入 @AI。"],
   ["网页结对编程", "两名同学轮流担任 Driver 和 Navigator，共同编写 HTML/CSS、检查代码并预览网页。"],
-  ["调整布局", "左侧集中显示任务、学生和琳琳；拖动中间分隔条可调整讨论区与编程区宽度。"],
+  ["调整布局", "页面固定为协作信息、讨论区和编程区三栏；拖动讨论区与编程区之间的分隔条可调整宽度。"],
 ]);
 
 function clampPartyWorkspaceSplit(value) {
@@ -314,7 +313,6 @@ export default function PartyChatDesktopPage({
   const [createSubmitting, setCreateSubmitting] = useState(false);
   const [joinRoomCode, setJoinRoomCode] = useState("");
   const [joinSubmitting, setJoinSubmitting] = useState(false);
-  const [isSidebarExpanded, setIsSidebarExpanded] = useState(false);
   const [showPartyGuide, setShowPartyGuide] = useState(false);
   const [workspaceSplit, setWorkspaceSplit] = useState(() => {
     const savedSplit = readPartyWorkspaceSplit();
@@ -536,13 +534,10 @@ export default function PartyChatDesktopPage({
     });
     return map;
   }, [activeRoom, canManageActiveRoom]);
-  const showSidebar = isMobileSidebarDrawer ? isSidebarDrawerOpen : isSidebarExpanded;
+  const showSidebar = isMobileSidebarDrawer ? isSidebarDrawerOpen : true;
   const toggleSidebarPanel = useCallback(() => {
-    if (isMobileSidebarDrawer) {
-      onToggleSidebarDrawer?.(!showSidebar);
-      return;
-    }
-    setIsSidebarExpanded((prev) => !prev);
+    if (!isMobileSidebarDrawer) return;
+    onToggleSidebarDrawer?.(!showSidebar);
   }, [isMobileSidebarDrawer, onToggleSidebarDrawer, showSidebar]);
   const updateWorkspaceSplit = useCallback((ratio) => {
     const nextRatio = clampPartyWorkspaceSplit(ratio);
@@ -556,8 +551,14 @@ export default function PartyChatDesktopPage({
   const updateWorkspaceSplitFromPointer = useCallback((clientX) => {
     const bounds = workspaceRef.current?.getBoundingClientRect();
     if (!bounds?.width) return;
-    updateWorkspaceSplit((Number(clientX) - bounds.left) / bounds.width);
-  }, [updateWorkspaceSplit]);
+    const sideHandleOffset =
+      showSidebar && !isMobileSidebarDrawer
+        ? PARTY_WORKSPACE_DESKTOP_SIDE_HANDLE_OFFSET_PX
+        : 0;
+    updateWorkspaceSplit(
+      (Number(clientX) - bounds.left - sideHandleOffset) / bounds.width,
+    );
+  }, [isMobileSidebarDrawer, showSidebar, updateWorkspaceSplit]);
   const handleWorkspaceResizeStart = useCallback((event) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
     event.preventDefault();
@@ -3434,19 +3435,6 @@ export default function PartyChatDesktopPage({
         }`}
         style={{ "--party-chat-column-width": `${Math.round(workspaceSplit * 1000) / 10}%` }}
       >
-        {!isMobileSidebarDrawer && !showSidebar ? (
-          <button
-            type="button"
-            className="party-sidebar-reveal-btn"
-            aria-controls="party-side-panel"
-            aria-expanded={showSidebar}
-            onClick={toggleSidebarPanel}
-            title={showSidebar ? "隐藏协作信息" : "显示协作信息"}
-          >
-            {showSidebar ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
-            <span>{isShiGaojunTeacherScope ? "协作信息" : "我的派"}</span>
-          </button>
-        ) : null}
         <aside
           id="party-side-panel"
           className={`party-side${showSidebar ? "" : " is-collapsed"}${
@@ -3487,17 +3475,6 @@ export default function PartyChatDesktopPage({
                   </div>
                 ) : null}
               </div> : null}
-              {!isMobileSidebarDrawer ? (
-                <button
-                  type="button"
-                  className="party-side-collapse-btn"
-                  title={isShiGaojunTeacherScope ? "隐藏协作信息" : "隐藏我的派边栏"}
-                  aria-label={isShiGaojunTeacherScope ? "隐藏协作信息" : "隐藏我的派边栏"}
-                  onClick={toggleSidebarPanel}
-                >
-                  <PanelLeftClose size={17} />
-                </button>
-              ) : null}
             </div>
           </div>
 
@@ -4308,29 +4285,31 @@ export default function PartyChatDesktopPage({
             </>
           ) : (
             <section className="party-empty">
-              <button
-                type="button"
-                className="party-empty-side-toggle-btn"
-                aria-controls="party-side-panel"
-                aria-expanded={showSidebar}
-                onClick={toggleSidebarPanel}
-                title={showSidebar ? "隐藏侧栏" : "显示侧栏"}
-                aria-label={showSidebar ? "隐藏侧栏" : "显示侧栏"}
-              >
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <rect
-                    x="2.5"
-                    y="3"
-                    width="15"
-                    height="14"
-                    rx="2.5"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.4"
-                  />
-                  <path d="M7.4 3v14" stroke="currentColor" strokeWidth="1.4" />
-                </svg>
-              </button>
+              {isMobileSidebarDrawer ? (
+                <button
+                  type="button"
+                  className="party-empty-side-toggle-btn"
+                  aria-controls="party-side-panel"
+                  aria-expanded={showSidebar}
+                  onClick={toggleSidebarPanel}
+                  title={showSidebar ? "隐藏侧栏" : "显示侧栏"}
+                  aria-label={showSidebar ? "隐藏侧栏" : "显示侧栏"}
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <rect
+                      x="2.5"
+                      y="3"
+                      width="15"
+                      height="14"
+                      rx="2.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.4"
+                    />
+                    <path d="M7.4 3v14" stroke="currentColor" strokeWidth="1.4" />
+                  </svg>
+                </button>
+              ) : null}
               <h2>{isShiGaojunTeacherScope ? "协作小教室" : "欢迎来到派"}</h2>
               <p>{isShiGaojunTeacherScope ? "老师分配小教室后，你可以在这里与同伴开展网页结对编程。" : "创建或加入一个派，开始协作学习对话。"}</p>
             </section>
@@ -5603,20 +5582,17 @@ function isRemovedPartyAgentId(value) {
   return sanitizeStoredPartyAgentId(value) === REMOVED_PARTY_AGENT_E_ID;
 }
 
-function sanitizePartyProvider(value, fallback = "packycode") {
+function sanitizePartyProvider(value, fallback = "volcengine") {
   const key = String(value || "")
     .trim()
     .toLowerCase();
   if (
-    key === "packycode" ||
-    key === "packy" ||
     key === "volcengine" ||
     key === "aliyun" ||
     key === "reserved"
   ) {
-    return key === "packy" ? "packycode" : key;
+    return key;
   }
-  if (key === "packyapi") return "packycode";
   if (key === "volc" || key === "ark") return "volcengine";
   if (key === "dashscope" || key === "alibaba") return "aliyun";
   return fallback;
@@ -5657,7 +5633,7 @@ function resolvePartyAgentProvider(agentId, runtimeConfigs, providerDefaults) {
     .trim()
     .toLowerCase();
   if (runtimeProvider && runtimeProvider !== "inherit") {
-    return sanitizePartyProvider(runtimeProvider, "packycode");
+    return sanitizePartyProvider(runtimeProvider, "volcengine");
   }
   return sanitizePartyProvider(
     providerDefaults?.[safeAgentId],

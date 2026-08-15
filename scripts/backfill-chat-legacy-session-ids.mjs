@@ -36,7 +36,6 @@ async function main() {
   const scopeFilter = String(readArgValue("--scope") || "").trim();
   const ChatState = deps.ChatState;
   const AuthUser = deps.AuthUser;
-  const SessionNotes = deps.mongoose.model("SessionNotes");
   const UploadedFileContext = deps.mongoose.model("UploadedFileContext");
 
   await deps.mongoose.connect(deps.mongoUri, { serverSelectionTimeoutMS: 8000 });
@@ -68,7 +67,6 @@ async function main() {
       changedDocs: 0,
       changedScopes: 0,
       remappedSessions: 0,
-      updatedSessionNotes: 0,
       updatedUploadedFileContexts: 0,
       ambiguousExternalRefs: [],
       changes: [],
@@ -147,17 +145,10 @@ async function main() {
           }
 
           const nextSessionId = uniqueTargets[0];
-          const [notesResult, filesResult] = await Promise.all([
-            SessionNotes.updateMany(
-              { userId, sessionId: oldSessionId },
-              { $set: { sessionId: nextSessionId } },
-            ),
-            UploadedFileContext.updateMany(
-              { userId, sessionId: oldSessionId },
-              { $set: { sessionId: nextSessionId } },
-            ),
-          ]);
-          summary.updatedSessionNotes += Number(notesResult.modifiedCount || 0);
+          const filesResult = await UploadedFileContext.updateMany(
+            { userId, sessionId: oldSessionId },
+            { $set: { sessionId: nextSessionId } },
+          );
           summary.updatedUploadedFileContexts += Number(filesResult.modifiedCount || 0);
         }
       }

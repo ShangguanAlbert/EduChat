@@ -24,6 +24,8 @@ test("GROUP_CHAT_AI_RUNTIME defaults to the Aliyun group-chat route", () => {
 
 test("GROUP_CHAT_AI_LIMITS reflects the agreed room and user quotas", () => {
   assert.deepEqual(GROUP_CHAT_AI_LIMITS, {
+    globalRunning: 32,
+    participationRunning: 8,
     roomRunning: 4,
     userRunning: 2,
     userPending: 3,
@@ -103,6 +105,19 @@ test("checkGroupChatAiEnqueuePolicy accepts requests under the pending limits", 
 });
 
 test("checkGroupChatAiStartPolicy enforces room and user running limits", () => {
+  assert.deepEqual(
+    checkGroupChatAiStartPolicy({
+      globalRunningCount: 32,
+      roomRunningCount: 0,
+      userRunningCount: 0,
+    }),
+    {
+      accepted: false,
+      code: "global_running_limit",
+      message: "当前 AI 请求较多，已进入排队，请稍后。",
+    },
+  );
+
   assert.deepEqual(
     checkGroupChatAiStartPolicy({
       roomRunningCount: 4,

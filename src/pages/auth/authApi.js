@@ -49,13 +49,6 @@ export function fetchAuthStatus() {
   return request("/api/auth/status");
 }
 
-export function registerAccount(payload) {
-  return request("/api/auth/register", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
 export function loginAccount(payload) {
   return request("/api/auth/login", {
     method: "POST",
@@ -63,29 +56,8 @@ export function loginAccount(payload) {
   });
 }
 
-export function fetchLoginTeacherScopeLock(username) {
-  const safeUsername = String(username || "").trim();
-  if (!safeUsername) {
-    return Promise.resolve({
-      ok: true,
-      lockedTeacherScopeKey: "",
-      teacherScopeLabel: "",
-    });
-  }
-  return request(
-    `/api/auth/login/teacher-scope-lock?username=${encodeURIComponent(safeUsername)}`,
-  );
-}
-
-export function verifyForgotAccount(payload) {
-  return request("/api/auth/forgot/verify", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function resetForgotPassword(payload) {
-  return request("/api/auth/forgot/reset", {
+export function registerAccount(payload) {
+  return request("/api/auth/register", {
     method: "POST",
     body: JSON.stringify(payload),
   });

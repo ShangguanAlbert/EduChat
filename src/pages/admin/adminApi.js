@@ -121,6 +121,15 @@ export function updateAdminUserDirectoryUser(adminToken, userId, payload) {
   );
 }
 
+export function bindAdminUserDirectoryStudent(adminToken, userId) {
+  const safeUserId = String(userId || "").trim();
+  return request(
+    `/api/auth/admin/user-directory/users/${encodeURIComponent(safeUserId)}/bind-teacher`,
+    adminToken,
+    { method: "POST" },
+  );
+}
+
 export function deleteAdminUserDirectoryUser(adminToken, userId, payload = {}) {
   const safeUserId = String(userId || "").trim();
   return request(
@@ -295,8 +304,8 @@ export function fetchAdminClassroomHomeworkOverview(adminToken) {
   return request("/api/auth/admin/classroom-homework/overview", adminToken);
 }
 
-export function fetchAdminGroupChatRooms(adminToken) {
-  return request("/api/auth/admin/group-chat/rooms", adminToken);
+export function fetchAdminCollaborationClassrooms(adminToken) {
+  return request("/api/auth/admin/collaboration-classrooms", adminToken);
 }
 
 export function updateAdminCollaborationClassroomMonitoring(
@@ -315,6 +324,75 @@ export function updateAdminCollaborationClassroomMonitoring(
   );
 }
 
+export function updateAdminCollaborationMonitoringMaster(
+  adminToken,
+  enabled,
+) {
+  return request(
+    "/api/auth/admin/collaboration-classrooms/monitoring",
+    adminToken,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: enabled === true }),
+    },
+  );
+}
+
+export function updateAdminCollaborationCourseAnnouncement(
+  adminToken,
+  lessonId,
+  announcement,
+) {
+  return request(
+    "/api/auth/admin/collaboration-classrooms/announcement",
+    adminToken,
+    {
+      method: "PUT",
+      body: JSON.stringify({ lessonId, announcement }),
+    },
+  );
+}
+
+export function createAdminCollaborationClassroom(adminToken, payload = {}) {
+  return request("/api/auth/admin/collaboration-classrooms", adminToken, {
+    method: "POST",
+    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+  });
+}
+
+export function fetchAdminCollaborationCourseMemoryConfig(adminToken) {
+  return request(
+    "/api/auth/admin/collaboration-course-memory-config",
+    adminToken,
+  );
+}
+
+export function updateAdminCollaborationCourseMemoryConfig(
+  adminToken,
+  payload = {},
+) {
+  return request(
+    "/api/auth/admin/collaboration-course-memory-config",
+    adminToken,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
+    },
+  );
+}
+
+export function createAdminCollaborationObserverSession(adminToken, roomId) {
+  const safeRoomId = String(roomId || "").trim();
+  return request(
+    `/api/auth/admin/collaboration-classrooms/${encodeURIComponent(safeRoomId)}/observer-session`,
+    adminToken,
+    {
+      method: "POST",
+      body: JSON.stringify({}),
+    },
+  );
+}
+
 export function fetchAdminPartyCodingQuality(adminToken, options = {}) {
   const params = new URLSearchParams();
   const hours = Number(options?.hours);
@@ -325,24 +403,6 @@ export function fetchAdminPartyCodingQuality(adminToken, options = {}) {
   return request(
     `/api/auth/admin/party-coding/quality${query ? `?${query}` : ""}`,
     adminToken,
-  );
-}
-
-export function createAdminGroupChatRoom(adminToken, payload = {}) {
-  return request("/api/auth/admin/group-chat/rooms", adminToken, {
-    method: "POST",
-    body: JSON.stringify(payload && typeof payload === "object" ? payload : {}),
-  });
-}
-
-export function dissolveAdminGroupChatRoom(adminToken, roomId) {
-  const safeRoomId = String(roomId || "").trim();
-  return request(
-    `/api/auth/admin/group-chat/rooms/${encodeURIComponent(safeRoomId)}`,
-    adminToken,
-    {
-      method: "DELETE",
-    },
   );
 }
 

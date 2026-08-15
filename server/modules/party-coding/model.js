@@ -110,7 +110,28 @@ export function getPartyPaiaInterventionModel(mongoose) {
       },
       evidenceSummary: { type: String, required: true },
       prompt: { type: String, required: true },
+      supportNeed: {
+        type: String,
+        enum: [
+          "shared_goal",
+          "mutual_explanation",
+          "role_coordination",
+          "productive_debugging",
+          "ai_verification",
+          "reflection",
+        ],
+        default: "role_coordination",
+        index: true,
+      },
       targetUserId: { type: String, default: "" },
+      participationAnalysis: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null,
+      },
+      orchestration: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null,
+      },
       feedback: { type: String, enum: ["", "correct", "partial", "incorrect"], default: "" },
       feedbackNote: { type: String, default: "" },
       feedbackByUserId: { type: String, default: "" },
@@ -121,4 +142,259 @@ export function getPartyPaiaInterventionModel(mongoose) {
   );
   schema.index({ roomId: 1, createdAt: -1 });
   return mongoose.models.PartyPaiaIntervention || mongoose.model("PartyPaiaIntervention", schema);
+}
+
+export function getPartyCollaborationMemoryModel(mongoose) {
+  const schema = new mongoose.Schema(
+    {
+      roomId: { type: String, required: true, index: true },
+      scope: { type: String, enum: ["room"], default: "room", required: true },
+      memoryType: { type: String, enum: ["intervention_feedback"], required: true },
+      supportNeed: { type: String, required: true, index: true },
+      strategyKey: { type: String, required: true },
+      verdict: { type: String, enum: ["correct", "partial", "incorrect"], required: true },
+      correctCount: { type: Number, default: 0 },
+      partialCount: { type: Number, default: 0 },
+      incorrectCount: { type: Number, default: 0 },
+      sourceCandidateIds: { type: [String], default: () => [] },
+      lastValidatedAt: { type: Date, required: true, index: true },
+      consolidatedAt: { type: Date, required: true, index: true },
+      useCount: { type: Number, default: 0 },
+      lastUsedAt: { type: Date, default: null },
+      expiresAt: { type: Date, required: true },
+      createdAt: { type: Date, default: Date.now, index: true },
+    },
+    { timestamps: true, collection: "party_paia_memories" },
+  );
+  schema.index(
+    { roomId: 1, scope: 1, supportNeed: 1, strategyKey: 1 },
+    { unique: true },
+  );
+  schema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+  return mongoose.models.PartyCollaborationMemory
+    || mongoose.model("PartyCollaborationMemory", schema);
+}
+
+export function getPartyCollaborationMemoryCandidateModel(mongoose) {
+  const schema = new mongoose.Schema(
+    {
+      roomId: { type: String, required: true, index: true },
+      scope: { type: String, enum: ["room"], default: "room", required: true },
+      memoryType: { type: String, enum: ["intervention_feedback"], required: true },
+      supportNeed: { type: String, required: true, index: true },
+      strategyKey: { type: String, required: true },
+      appliedMemoryIds: { type: [String], default: () => [] },
+      triggerType: { type: String, default: "" },
+      taskStage: { type: String, enum: TASK_STAGES, default: "understand" },
+      verdict: { type: String, enum: ["correct", "partial", "incorrect"], required: true },
+      summary: { type: String, required: true },
+      feedbackNote: { type: String, default: "" },
+      sourceInterventionId: { type: String, required: true, unique: true },
+      validatedByUserId: { type: String, default: "" },
+      validatedAt: { type: Date, required: true, index: true },
+      eligibleAt: { type: Date, required: true, index: true },
+      status: { type: String, enum: ["pending", "consolidated"], default: "pending", index: true },
+      consolidatedAt: { type: Date, default: null },
+      createdAt: { type: Date, default: Date.now, index: true },
+    },
+    { timestamps: true, collection: "party_paia_memory_candidates" },
+  );
+  schema.index({ status: 1, eligibleAt: 1 });
+  return mongoose.models.PartyCollaborationMemoryCandidate
+    || mongoose.model("PartyCollaborationMemoryCandidate", schema);
+}
+
+const LONGITUDINAL_SUBJECT_TYPES = ["course", "project", "pair", "student", "agent"];
+const LONGITUDINAL_MEMORY_TYPES = [
+  "course_progress",
+  "project_snapshot",
+  "collaboration_pattern",
+  "learning_activity",
+  "knowledge_evidence",
+  "ability_judgment",
+  "agent_outcome",
+];
+
+const MEMORY_ALLOWED_USE_TYPES = ["student_reply", "group_intervention"];
+
+export function getPartyLongitudinalMemoryCandidateModel(mongoose) {
+  const schema = new mongoose.Schema(
+    {
+      candidateKey: { type: String, required: true, unique: true, index: true },
+      roomId: { type: String, required: true, index: true },
+      courseId: { type: String, required: true, index: true },
+      lessonId: { type: String, default: "", index: true },
+      projectId: { type: String, default: "", index: true },
+      subjectType: { type: String, enum: LONGITUDINAL_SUBJECT_TYPES, required: true, index: true },
+      subjectId: { type: String, required: true, index: true },
+      memoryType: { type: String, enum: LONGITUDINAL_MEMORY_TYPES, required: true, index: true },
+      conceptKey: { type: String, default: "", index: true },
+      summary: { type: String, required: true },
+      payload: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+      confidence: { type: Number, default: 0.5, min: 0, max: 1 },
+      validationStatus: {
+        type: String,
+        enum: ["system_observed", "human_confirmed", "human_rejected"],
+        default: "system_observed",
+        index: true,
+      },
+      sourceEventIds: { type: [String], default: () => [] },
+      boundaryAt: { type: Date, required: true, index: true },
+      status: {
+        type: String,
+        enum: ["pending", "processing", "consolidated"],
+        default: "pending",
+        index: true,
+      },
+      claimedAt: { type: Date, default: null },
+      consolidatedAt: { type: Date, default: null },
+      lastError: { type: String, default: "" },
+      createdAt: { type: Date, default: Date.now, index: true },
+    },
+    { timestamps: true, collection: "party_course_memory_candidates" },
+  );
+  schema.index({ status: 1, boundaryAt: 1, createdAt: 1 });
+  schema.index({ courseId: 1, subjectType: 1, subjectId: 1, memoryType: 1 });
+  return mongoose.models.PartyLongitudinalMemoryCandidate
+    || mongoose.model("PartyLongitudinalMemoryCandidate", schema);
+}
+
+export function getPartyLongitudinalMemoryModel(mongoose) {
+  const historySchema = new mongoose.Schema(
+    {
+      candidateId: { type: String, required: true },
+      summary: { type: String, required: true },
+      payload: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+      confidence: { type: Number, default: 0.5 },
+      boundaryAt: { type: Date, required: true },
+    },
+    { _id: false },
+  );
+  const schema = new mongoose.Schema(
+    {
+      roomId: { type: String, required: true, index: true },
+      courseId: { type: String, required: true, index: true },
+      lessonId: { type: String, default: "", index: true },
+      projectId: { type: String, default: "", index: true },
+      subjectType: { type: String, enum: LONGITUDINAL_SUBJECT_TYPES, required: true, index: true },
+      subjectId: { type: String, required: true, index: true },
+      memoryType: { type: String, enum: LONGITUDINAL_MEMORY_TYPES, required: true, index: true },
+      conceptKey: { type: String, default: "", index: true },
+      summary: { type: String, required: true },
+      payload: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+      confidence: { type: Number, default: 0.5, min: 0, max: 1 },
+      validationStatus: {
+        type: String,
+        enum: ["system_observed", "human_confirmed", "human_rejected"],
+        default: "system_observed",
+        index: true,
+      },
+      validationNote: { type: String, default: "" },
+      validatedAt: { type: Date, default: null },
+      validatedByAdminId: { type: String, default: "" },
+      teacherEditedAt: { type: Date, default: null },
+      teacherEditedByAdminId: { type: String, default: "" },
+      retrievalEnabled: { type: Boolean, default: true, index: true },
+      allowedUseTypes: {
+        type: [String],
+        enum: MEMORY_ALLOWED_USE_TYPES,
+        default: () => ["student_reply"],
+      },
+      publicDisclosure: {
+        type: String,
+        enum: ["action_only", "summary_allowed"],
+        default: "action_only",
+      },
+      evidenceCount: { type: Number, default: 0 },
+      sourceCandidateIds: { type: [String], default: () => [] },
+      history: { type: [historySchema], default: () => [] },
+      lastBoundaryAt: { type: Date, required: true, index: true },
+      consolidatedAt: { type: Date, required: true, index: true },
+      useCount: { type: Number, default: 0 },
+      lastUsedAt: { type: Date, default: null },
+      expiresAt: { type: Date, required: true },
+      createdAt: { type: Date, default: Date.now, index: true },
+    },
+    { timestamps: true, collection: "party_course_memories" },
+  );
+  schema.index(
+    {
+      courseId: 1,
+      subjectType: 1,
+      subjectId: 1,
+      memoryType: 1,
+      conceptKey: 1,
+    },
+    { unique: true },
+  );
+  schema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+  return mongoose.models.PartyLongitudinalMemory
+    || mongoose.model("PartyLongitudinalMemory", schema);
+}
+
+export function getPartyMemoryUseModel(mongoose) {
+  const schema = new mongoose.Schema(
+    {
+      usageKey: { type: String, required: true, unique: true, index: true },
+      roomId: { type: String, required: true, index: true },
+      taskId: { type: String, default: "", index: true },
+      projectId: { type: String, default: "", index: true },
+      memoryKind: {
+        type: String,
+        enum: ["longitudinal", "collaboration"],
+        required: true,
+        index: true,
+      },
+      memoryId: { type: String, required: true, index: true },
+      memoryVersion: { type: String, default: "" },
+      subjectType: { type: String, default: "", index: true },
+      subjectId: { type: String, default: "", index: true },
+      useType: {
+        type: String,
+        enum: MEMORY_ALLOWED_USE_TYPES,
+        required: true,
+        index: true,
+      },
+      retrievalReason: { type: String, default: "" },
+      retrievalScore: { type: Number, default: null, min: 0, max: 1 },
+      groupChatAiTaskId: { type: String, default: "", index: true },
+      agentMessageIds: { type: [String], default: () => [] },
+      interventionId: { type: String, default: "", index: true },
+      outcomeEventIds: { type: [String], default: () => [] },
+      outcomeStatus: {
+        type: String,
+        enum: ["pending", "observed", "helpful", "partial", "unsuitable"],
+        default: "pending",
+        index: true,
+      },
+      feedback: {
+        type: String,
+        enum: ["", "correct", "partial", "incorrect"],
+        default: "",
+      },
+      feedbackByUserId: { type: String, default: "" },
+      feedbackAt: { type: Date, default: null },
+      usedAt: { type: Date, required: true, default: Date.now, index: true },
+    },
+    { timestamps: true, collection: "party_memory_uses" },
+  );
+  schema.index({ roomId: 1, usedAt: -1 });
+  schema.index({ memoryId: 1, usedAt: -1 });
+  return mongoose.models.PartyMemoryUse
+    || mongoose.model("PartyMemoryUse", schema);
+}
+
+export function getPartyMemoryCompilationStateModel(mongoose) {
+  const schema = new mongoose.Schema(
+    {
+      roomId: { type: String, required: true, unique: true, index: true },
+      lastBoundaryAt: { type: Date, default: null, index: true },
+      lastCompiledAt: { type: Date, default: null },
+      lastCandidateCount: { type: Number, default: 0 },
+      lastError: { type: String, default: "" },
+    },
+    { timestamps: true, collection: "party_memory_compilation_states" },
+  );
+  return mongoose.models.PartyMemoryCompilationState
+    || mongoose.model("PartyMemoryCompilationState", schema);
 }

@@ -8,6 +8,7 @@ import {
 import { createPartyLearningService } from "./learning-service.js";
 import { getPartyWebWorkspaceModel } from "./model.js";
 import { ensurePartyPairRoles } from "./pair-roles.js";
+import { isCollaborationObserverForRoom } from "./access-control.js";
 
 const MAX_DOCUMENT_LENGTH = 200_000;
 const MAX_UPDATE_BYTES = 512 * 1024;
@@ -223,9 +224,6 @@ export function createPartyCodingRealtime(deps) {
         roomId: room.roomId,
         workspace: normalizeWorkspace(workspace),
       });
-      await learning.maybeIntervene({ roomId: room.roomId }).catch((error) => {
-        console.error("[party-web] PAIA intervention evaluation failed", error);
-      });
       return workspace;
     }).catch((error) => {
       console.error("[party-web] failed to persist collaboration state", error);
@@ -247,11 +245,17 @@ export function createPartyCodingRealtime(deps) {
     const roomId = sanitizeId(payload?.roomId, "");
     if (!roomId || !meta?.authed || !meta?.userId || !meta.joinedRooms?.has(roomId)) return true;
     const room = await getRoom(roomId);
+    const isObserver = isCollaborationObserverForRoom(
+      meta?.collaborationObserverRoomId,
+      roomId,
+    );
 
     if (type === "coding_collab_join") {
       const groupRoom = await GroupChatRoom.findOne(
-        { _id: roomId, memberUserIds: meta.userId },
-        { memberUserIds: 1 },
+        isObserver
+          ? { _id: roomId, teacherScopeKey: "shi-gaojun" }
+          : { _id: roomId, memberUserIds: meta.userId },
+        { memberUserIds: 1, teacherScopeKey: 1 },
       ).lean();
       if (!groupRoom) return true;
       const workspaceWithRoles = await ensurePartyPairRoles({
@@ -291,6 +295,15 @@ export function createPartyCodingRealtime(deps) {
           intervention,
         });
       }
+      return true;
+    }
+
+    if (isObserver) {
+      sendGroupChatWsPayload(socket, {
+        type: "coding_collab_error",
+        roomId,
+        error: "教师旁观模式为只读，不能修改学生协作内容。",
+      });
       return true;
     }
 

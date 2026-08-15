@@ -70,7 +70,6 @@ export function registerGroupChatRoutes(app, deps) {
     CHAT_PREPARED_ATTACHMENT_CACHE_TTL_MS,
     CHAT_PREPARED_ATTACHMENT_CACHE_MAX_ITEMS,
     CHAT_PREPARED_ATTACHMENT_MAX_REFS,
-    MAX_IMAGE_GENERATION_INPUT_FILES,
     MAX_PARSED_CHARS_PER_FILE,
     ALIYUN_DASHSCOPE_PARSED_DOC_MAX_CHARS,
     EXCEL_PREVIEW_MAX_ROWS,
@@ -138,8 +137,6 @@ export function registerGroupChatRoutes(app, deps) {
     FIXED_STUDENT_USERNAME_KEYS,
     RESERVED_ADMIN_USERNAME_KEYS,
     CHAT_PREPARED_PDF_IMAGE_OSS_SCOPE,
-    IMAGE_GENERATION_INPUT_OSS_SCOPE,
-    IMAGE_GENERATION_OUTPUT_OSS_SCOPE,
     ALIYUN_DASHSCOPE_PDF_IMAGE_MAX_PAGES,
     ALIYUN_DASHSCOPE_PDF_RENDER_DPI,
     ALIYUN_DASHSCOPE_PDF_RENDER_TIMEOUT_MS,
@@ -256,7 +253,13 @@ export function registerGroupChatRoutes(app, deps) {
     }
 
     try {
-      const rooms = await GroupChatRoom.find({ memberUserIds: userId })
+      const pairProgrammingRequest = isPaiaClassroomStudentRequest(req);
+      const rooms = await GroupChatRoom.find({
+        memberUserIds: userId,
+        teacherScopeKey: pairProgrammingRequest
+          ? PAIA_TEACHER_SCOPE_KEY
+          : { $ne: PAIA_TEACHER_SCOPE_KEY },
+      })
         .sort({ updatedAt: -1 })
         .lean();
       const roomItems = rooms
@@ -358,6 +361,13 @@ export function registerGroupChatRoutes(app, deps) {
       const room = await GroupChatRoom.findOne({ roomCode }).lean();
       if (!room) {
         res.status(404).json({ error: "未找到该群聊，请核对群号。" });
+        return;
+      }
+      if (
+        String(room?.teacherScopeKey || "").trim().toLowerCase() ===
+        PAIA_TEACHER_SCOPE_KEY
+      ) {
+        res.status(403).json({ error: "结对编程小教室只能由教师后台分配。" });
         return;
       }
 
@@ -1172,6 +1182,10 @@ export function registerGroupChatRoutes(app, deps) {
         res.status(403).json({ error: "你不在该群聊中，无法发送消息。" });
         return;
       }
+      const isPaiaClassroom =
+        String(normalizedRoom.teacherScopeKey || "")
+          .trim()
+          .toLowerCase() === PAIA_TEACHER_SCOPE_KEY;
       if (isGroupChatMemberMuted(normalizedRoom, userId)) {
         res.status(403).json({ error: GROUP_CHAT_MEMBER_MUTED_ERROR_MESSAGE });
         return;
@@ -1209,7 +1223,7 @@ export function registerGroupChatRoutes(app, deps) {
       }
       broadcastGroupChatMessageCreated(roomId, normalizedMessage);
 
-      if (String(req.authTeacherScopeKey || "").trim().toLowerCase() === PAIA_TEACHER_SCOPE_KEY) {
+      if (isPaiaClassroom) {
         await partyLearning.recordEvent({
           roomId,
           userId,
@@ -1219,14 +1233,19 @@ export function registerGroupChatRoutes(app, deps) {
         }).catch((error) => {
           console.error("[party-web] failed to record chat learning event", error);
         });
-        await partyLearning.maybeIntervene({ roomId }).catch((error) => {
-          console.error("[party-web] chat intervention evaluation failed", error);
+        await partyLearning.enqueueParticipationAnalysis({
+          roomId,
+          triggerMessageId: normalizedMessage.id,
+          requestedByUserId: userId,
+          requestedByUserName: senderName,
+        }).catch((error) => {
+          console.error("[party-web] participation analysis enqueue failed", error);
         });
       }
 
       const aiRequested = isGroupChatAiMentionRequested(content)
         || (
-          String(req.authTeacherScopeKey || "").trim().toLowerCase() === PAIA_TEACHER_SCOPE_KEY
+          isPaiaClassroom
           && req.body?.aiRequested === true
         );
       if (aiRequested) {
@@ -1311,8 +1330,8 @@ export function registerGroupChatRoutes(app, deps) {
               requestedByUserId: userId,
               requestedByUserName: senderName,
               agentId: "A",
-              provider: "packycode",
-              model: "gpt-5.4",
+              provider: "aliyun",
+              model: "qwen3.7-plus",
               status: "pending",
               contextSnapshot,
               attachmentRefs: Array.isArray(contextSnapshot.attachmentMessages)
@@ -1362,8 +1381,8 @@ export function registerGroupChatRoutes(app, deps) {
                     aiMeta: {
                       taskId,
                       agentId: "A",
-                      provider: "packycode",
-                      model: "gpt-5.4",
+                      provider: "aliyun",
+                      model: "qwen3.7-plus",
                       requestedByUserId: userId,
                       triggerMessageId: normalizedMessage.id,
                       status: "failed",

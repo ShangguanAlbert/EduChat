@@ -5,7 +5,6 @@ import {
   Download,
   ExternalLink,
   FileText,
-  Image,
   LayoutGrid,
   Lock,
   RefreshCw,
@@ -239,7 +238,6 @@ function resolveStudentHomePanel(search) {
     "history-homework",
     "seat-selection",
     "workshop",
-    "image-generation",
     "party",
   ]);
   return allowedPanels.has(panel) ? panel : "classroom";
@@ -631,15 +629,6 @@ export default function ModeSelectionPage() {
     window.open(workshopUrl, "_blank", "noopener,noreferrer");
   }
 
-  function onOpenImageGeneration() {
-    const params = new URLSearchParams();
-    params.set("returnTo", "mode-selection");
-    if (modeSelectionReturnUrl) {
-      appendReturnUrlParam(params, modeSelectionReturnUrl);
-    }
-    navigate(withAuthSlot(`/image-generation?${params.toString()}`, activeSlot));
-  }
-
   function onOpenParty() {
     const params = new URLSearchParams();
     params.set("returnTo", "mode-selection");
@@ -1008,12 +997,6 @@ export default function ModeSelectionPage() {
       hint: "在新标签页进入学习协作空间",
     },
     {
-      key: "image-generation",
-      label: "图片生成",
-      icon: Image,
-      hint: "进入元协坊图片生成功能",
-    },
-    {
       key: "party",
       label: "派 · 协作",
       icon: Users,
@@ -1271,10 +1254,6 @@ export default function ModeSelectionPage() {
                       onOpenWorkshopInNewTab();
                       return;
                     }
-                    if (item.key === "image-generation") {
-                      onOpenImageGeneration();
-                      return;
-                    }
                     if (item.key === "party") {
                       onOpenParty();
                       return;
@@ -1285,7 +1264,6 @@ export default function ModeSelectionPage() {
                   <Icon size={17} />
                   <span className="teacher-home-nav-label">{item.label}</span>
                   {item.key === "workshop" ||
-                  item.key === "image-generation" ||
                   item.key === "party" ? (
                     <span className="teacher-home-nav-open-indicator" aria-hidden="true">
                       <ExternalLink size={13} />
